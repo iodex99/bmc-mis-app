@@ -240,6 +240,81 @@ def bulk_create_employees() -> int:
     return count
 
 
+# ====================== COST-CENTRE STRINGS ================================
+
+def apply_known_cc_string_mappings() -> int:
+    """For each saved mapping, set the cost-centre / manager on every
+    voucher_split whose voucher carries the matching ``raw_cost_centre``.
+
+    Returns the number of split rows updated. Comparison is whitespace-
+    insensitive (Tally sometimes writes multiple spaces in cost-centre names).
+    """
+    updated = 0
+    with transaction() as conn:
+        mappings = {
+            norm(r["raw_text"]): (r["cost_centre_id"], r["manager_id"])
+            for r in conn.execute(
+                "SELECT raw_text, cost_centre_id, manager_id "
+                "FROM cc_string_mappings WHERE active = 1")}
+        if not mappings:
+            return 0
+        vouchers = conn.execute(
+            "SELECT id, raw_cost_centre FROM vouchers "
+            "WHERE kind = 'sales' AND raw_cost_centre <> ''").fetchall()
+        # Bucket voucher ids by their normalised raw_cost_centre.
+        buckets: dict[str, list[int]] = {}
+        for v in vouchers:
+            n = norm(v["raw_cost_centre"])
+            if n in mappings:
+                buckets.setdefault(n, []).append(v["id"])
+        for n, ids in buckets.items():
+            cc_id, mgr_id = mappings[n]
+            placeholders = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"UPDATE voucher_splits SET cost_centre_id = ?, manager_id = ? "
+                f"WHERE voucher_id IN ({placeholders})",
+                (cc_id, mgr_id, *ids))
+            updated += cur.rowcount
+    return updated
+
+
+def unresolved_cc_strings() -> list[dict]:
+    """Distinct ``raw_cost_centre`` strings (from sales vouchers) that have no
+    saved mapping yet. Whitespace-insensitive."""
+    with transaction() as conn:
+        known = {norm(r["raw_text"]) for r in conn.execute(
+            "SELECT raw_text FROM cc_string_mappings WHERE active = 1")}
+        rows = conn.execute(
+            "SELECT raw_cost_centre AS raw FROM vouchers "
+            "WHERE kind = 'sales' AND raw_cost_centre <> ''").fetchall()
+    agg: dict[str, dict] = {}
+    for r in rows:
+        n = norm(r["raw"])
+        if n in known:
+            continue
+        entry = agg.setdefault(n, {"raw": r["raw"], "count": 0})
+        entry["count"] += 1
+    return sorted(agg.values(), key=lambda d: -d["count"])
+
+
+def map_cc_string(raw: str, cost_centre_id: int | None,
+                  manager_id: int | None) -> int:
+    """Save a Cost Centre string mapping and back-apply it.
+
+    Returns the number of voucher splits updated.
+    """
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO cc_string_mappings (raw_text, cost_centre_id, manager_id) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(raw_text) DO UPDATE SET "
+            "  cost_centre_id = excluded.cost_centre_id, "
+            "  manager_id = excluded.manager_id, "
+            "  active = 1",
+            (raw, cost_centre_id, manager_id))
+    return apply_known_cc_string_mappings()
+
+
 def _bump(agg: dict[str, dict], raw: str, source: str, n: int) -> None:
     key = norm(raw)
     entry = agg.setdefault(key, {"raw": raw, "sources": set(), "count": 0})

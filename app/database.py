@@ -201,9 +201,21 @@ MIGRATIONS: list[tuple[int, str]] = [
             UNIQUE(alias_text, source)
         );
     """),
+    (3, """
+        -- Maps a raw Tally 'Cost Center' string (e.g. 'Mr. Shreyans Dedhia',
+        -- 'Prashant - Shreyans') to a (cost_centre, manager) pair. Used by
+        -- the sales-register import — operator maps each distinct string
+        -- once and the resolution is remembered.
+        CREATE TABLE IF NOT EXISTS cc_string_mappings (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            raw_text        TEXT NOT NULL UNIQUE,
+            cost_centre_id  INTEGER REFERENCES cost_centres(id),
+            manager_id      INTEGER REFERENCES managers(id),
+            active          INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
-    # Example:
-    # (3, "ALTER TABLE clients ADD COLUMN industry TEXT;"),
 ]
 
 

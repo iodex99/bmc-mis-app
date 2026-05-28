@@ -37,6 +37,32 @@ def _cost_centre_id(conn, raw: str) -> int | None:
     return row["id"] if row else None
 
 
+def _ensure_service(conn, name: str) -> int | None:
+    """Look up a service by name; create it if it doesn't exist."""
+    name = name.strip()
+    if not name:
+        return None
+    row = conn.execute(
+        "SELECT id FROM services WHERE lower(name) = ?",
+        (name.lower(),)).fetchone()
+    if row:
+        return row["id"]
+    return conn.execute(
+        "INSERT INTO services(name) VALUES (?)", (name,)).lastrowid
+
+
+def _cc_string_mapping(conn, raw: str) -> tuple[int | None, int | None]:
+    """Look up a saved Cost Centre string → (cost_centre_id, manager_id)."""
+    if not raw:
+        return None, None
+    row = conn.execute(
+        "SELECT cost_centre_id, manager_id FROM cc_string_mappings "
+        "WHERE lower(trim(raw_text)) = ?", (raw.strip().lower(),)).fetchone()
+    if row:
+        return row["cost_centre_id"], row["manager_id"]
+    return None, None
+
+
 def _entity_id(conn, raw: str) -> int | None:
     if not raw:
         return None
@@ -75,7 +101,11 @@ def commit_result(result: ParseResult, entity_id: int | None,
         ).lastrowid
 
         for v in result.vouchers:
+            # First pass attribution: try a direct cost-centre code/name match.
+            # cc_string -> (partner, manager) resolution runs after the whole
+            # batch is inserted, so whitespace-insensitive matching works.
             cc_id = _cost_centre_id(conn, v.raw_cost_centre)
+
             vid = conn.execute(
                 "INSERT INTO vouchers (batch_id, entity_id, txn_date, period, "
                 "vch_type, vch_no, party_name, gross_amount, tax_amount, "
@@ -86,12 +116,24 @@ def commit_result(result: ParseResult, entity_id: int | None,
                  v.tax_amount, v.net_amount, v.description,
                  "; ".join(v.ledger_heads), v.raw_cost_centre, v.kind),
             ).lastrowid
-            # Default single split for the full net amount.
-            conn.execute(
-                "INSERT INTO voucher_splits (voucher_id, amount, cost_centre_id) "
-                "VALUES (?, ?, ?)",
-                (vid, v.net_amount, cc_id),
-            )
+
+            if v.service_splits:
+                # One split per non-zero service column.
+                for svc_name, amount in v.service_splits:
+                    svc_id = _ensure_service(conn, svc_name)
+                    conn.execute(
+                        "INSERT INTO voucher_splits "
+                        "(voucher_id, amount, cost_centre_id, service_id) "
+                        "VALUES (?, ?, ?, ?)",
+                        (vid, amount, cc_id, svc_id),
+                    )
+            else:
+                conn.execute(
+                    "INSERT INTO voucher_splits "
+                    "(voucher_id, amount, cost_centre_id) "
+                    "VALUES (?, ?, ?)",
+                    (vid, v.net_amount, cc_id),
+                )
 
         for t in result.timesheet:
             conn.execute(
@@ -116,4 +158,8 @@ def commit_result(result: ParseResult, entity_id: int | None,
                  _entity_id(conn, s.raw_entity), s.raw_entity, s.category,
                  s.salary_paid, s.reimbursement),
             )
+    # Apply any saved cc-string -> (partner, manager) mappings to the new
+    # vouchers (whitespace-insensitive, handled in the resolution service).
+    from ..services.resolution import apply_known_cc_string_mappings
+    apply_known_cc_string_mappings()
     return batch_id

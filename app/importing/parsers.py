@@ -185,13 +185,84 @@ def parse_salary(grid: list[list[Any]], colmap: ColMap,
     return result
 
 
+_CANCELLED_KEYWORDS = ("cancel", "void", "cancelled", "voided")
+
+
+def parse_sales_flat(grid: list[list[Any]], colmap: ColMap, data_start: int,
+                     service_map: dict[int, str],
+                     tax_cols: list[int]) -> ParseResult:
+    """Parse a flat sales register (one row per invoice).
+
+    *service_map* maps column index → service name; each non-zero amount in a
+    service column becomes one split. *tax_cols* lists indices summed into
+    ``tax_amount``. Rows whose cost-centre string looks like "(cancelled)" are
+    skipped.
+    """
+    result = ParseResult(file_type=config.FILE_TYPE_SALES)
+    d_i = colmap.get("date")
+    p_i = colmap.get("particulars")
+    cc_i = colmap.get("cost_centre_string")
+    vt_i = colmap.get("vch_type")
+    vn_i = colmap.get("vch_no")
+
+    for row in grid[data_start:]:
+        if _is_blank(row):
+            continue
+        date = to_date(_cell(row, d_i))
+        if date is None:
+            continue
+        cc_str = clean(_cell(row, cc_i))
+        if not cc_str:
+            continue
+        low = cc_str.lower()
+        if any(k in low for k in _CANCELLED_KEYWORDS):
+            continue                                  # skip cancelled invoices
+
+        splits: list[tuple[str, float]] = []
+        for col_idx, svc_name in service_map.items():
+            amt = to_number(_cell(row, col_idx))
+            if amt is not None and abs(amt) > 0.005:
+                splits.append((svc_name, float(amt)))
+        if not splits:
+            continue                                  # nothing billable
+
+        tax_total = 0.0
+        for ci in tax_cols:
+            v = to_number(_cell(row, ci))
+            if v is not None:
+                tax_total += float(v)
+
+        net = sum(a for _s, a in splits)
+        voucher = ParsedVoucher(
+            date=date, period=period_of(date),
+            vch_type=clean(_cell(row, vt_i)),
+            vch_no=clean(_cell(row, vn_i)),
+            party_name=clean(_cell(row, p_i)),
+            kind=config.VCH_SALES,
+            gross_amount=net + tax_total,
+            tax_amount=tax_total,
+            net_amount=net,
+            raw_cost_centre=cc_str,
+            ledger_heads=[s for s, _a in splits],
+            service_splits=splits,
+        )
+        result.vouchers.append(voucher)
+
+    if not result.vouchers:
+        result.warnings.append("No sales rows parsed — check the column map.")
+    return result
+
+
 def parse(file_type: str, grid: list[list[Any]], colmap: ColMap,
-          data_start: int) -> ParseResult:
+          data_start: int, **extras) -> ParseResult:
     """Dispatch to the right parser for *file_type*."""
-    if file_type in (config.FILE_TYPE_SALES, config.FILE_TYPE_PURCHASE):
-        kind = config.VCH_SALES if file_type == config.FILE_TYPE_SALES \
-            else config.VCH_EXPENSE
-        return parse_tally(grid, colmap, data_start, kind)
+    if file_type == config.FILE_TYPE_PURCHASE:
+        return parse_tally(grid, colmap, data_start, config.VCH_EXPENSE)
+    if file_type == config.FILE_TYPE_SALES:
+        return parse_sales_flat(
+            grid, colmap, data_start,
+            extras.get("service_map", {}),
+            extras.get("tax_cols", []))
     if file_type == config.FILE_TYPE_TIMESHEET:
         return parse_timesheet(grid, colmap, data_start)
     if file_type == config.FILE_TYPE_SALARY:

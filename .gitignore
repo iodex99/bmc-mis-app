@@ -31,4 +31,6 @@ app/_secrets.py
 
 # Firm-sensitive sample files (real data — keep local only)
 *.xlsx
+*.xls
+~$*                     # Excel lock files
 !docs/sample_*.xlsx     # carve out for any anonymised samples added later

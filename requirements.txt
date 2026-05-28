@@ -2,7 +2,8 @@
 # Python 3.11+ recommended
 
 PySide6>=6.6        # desktop GUI (Qt)
-openpyxl>=3.1       # read Tally/timesheet/salary .xlsx + write formula-driven MIS
+openpyxl>=3.1       # read .xlsx + write formula-driven MIS
+xlrd==1.2.0         # read legacy .xls (Tally exports sales register as .xls)
 rapidfuzz>=3.6      # fuzzy matching of client / employee names
 python-dateutil>=2.9
 requests>=2.31      # GitHub Releases API for the in-app updater

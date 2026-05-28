@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import repository as repo
+from ..database import transaction
 from ..services import resolution
 from ..services import vouchers as vsvc
 from ..util import fmt_inr
@@ -184,6 +185,93 @@ class ResolveEmployeeDialog(QDialog):
         else:
             _a, name, cat, mgr, cc = self._result
             resolution.create_employee(self.raw, name, cat, mgr, cc)
+
+
+# --- Resolve a Cost Centre string -------------------------------------------
+
+class ResolveCcStringDialog(QDialog):
+    """Map a raw Tally Cost Centre string to a (partner, manager) pair."""
+
+    def __init__(self, raw: str, parent=None) -> None:
+        super().__init__(parent)
+        self.raw = raw
+        self.setWindowTitle("Resolve Cost Centre")
+        self.setMinimumWidth(440)
+        self._result: tuple | None = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f"Cost Centre string from Tally:\n<b>{raw}</b>"))
+
+        form = QFormLayout()
+        # Partner cost centres only (Office is for overheads, not invoices).
+        partner_opts = self._partner_options()
+        self.cc_combo = _combo(partner_opts, allow_none=False)
+        form.addRow("Partner (cost centre):", self.cc_combo)
+
+        mgr_row = QHBoxLayout()
+        self.mgr_combo = _combo(repo.fk_options("managers"),
+                                 none_label="(none / partner only)")
+        new_mgr_btn = QPushButton("+ New manager…")
+        new_mgr_btn.clicked.connect(self._add_manager)
+        mgr_row.addWidget(self.mgr_combo, 1)
+        mgr_row.addWidget(new_mgr_btn)
+        form.addRow("Manager:", mgr_row)
+
+        layout.addLayout(form)
+        layout.addWidget(QLabel(
+            "<span style='color:#64748B;'>This mapping is remembered; future "
+            "imports auto-resolve the same Cost Centre string.</span>"))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _partner_options() -> list[tuple[int, str]]:
+        with transaction() as conn:
+            return [(r["id"], f"{r['code']} — {r['name']}") for r in conn.execute(
+                "SELECT id, code, name FROM cost_centres "
+                "WHERE active = 1 AND cc_type = 'partner' ORDER BY code")]
+
+    def _add_manager(self) -> None:
+        from .master_data import RecordDialog, SPECS
+        spec = next(s for s in SPECS if s.table == "managers")
+        dlg = RecordDialog(spec, None, self)
+        if dlg.exec() == QDialog.Accepted:
+            try:
+                repo.insert("managers", dlg.values())
+            except Exception as exc:
+                QMessageBox.critical(self, "Couldn't add", str(exc))
+                return
+            # Refresh manager combo, keeping current selection if still present.
+            keep = self.mgr_combo.currentData()
+            self.mgr_combo.clear()
+            self.mgr_combo.addItem("(none / partner only)", None)
+            for mid, label in repo.fk_options("managers"):
+                self.mgr_combo.addItem(label, mid)
+            if keep is not None:
+                idx = self.mgr_combo.findData(keep)
+                if idx >= 0:
+                    self.mgr_combo.setCurrentIndex(idx)
+            # Auto-select the just-created manager (last in the list).
+            self.mgr_combo.setCurrentIndex(self.mgr_combo.count() - 1)
+
+    def _accept(self) -> None:
+        cc = self.cc_combo.currentData()
+        if cc is None:
+            QMessageBox.warning(self, "Partner required",
+                                "Pick a partner cost centre.")
+            return
+        self._result = (cc, self.mgr_combo.currentData())
+        self.accept()
+
+    def apply(self) -> int:
+        if not self._result:
+            return 0
+        cc_id, mgr_id = self._result
+        return resolution.map_cc_string(self.raw, cc_id, mgr_id)
 
 
 # --- Voucher split editor ----------------------------------------------------

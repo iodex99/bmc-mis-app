@@ -40,13 +40,20 @@ def to_number(value: Any) -> float | None:
 
 
 def to_date(value: Any) -> _dt.date | None:
-    """Parse a date from a cell (handles Excel datetimes and 1-Jan-26 text)."""
+    """Parse a date from a cell (datetimes, Excel serials, or '1-Jan-26' text)."""
     if value is None or value == "":
         return None
     if isinstance(value, _dt.datetime):
         return value.date()
     if isinstance(value, _dt.date):
         return value
+    if isinstance(value, (int, float)) and 25000 < float(value) < 70000:
+        # Excel date serial (covers ~1968-2091).
+        try:
+            return (_dt.datetime(1899, 12, 30)
+                    + _dt.timedelta(days=float(value))).date()
+        except (ValueError, OverflowError):
+            pass
     try:
         return _dtparser.parse(str(value).strip(), dayfirst=True).date()
     except (ValueError, OverflowError, TypeError):

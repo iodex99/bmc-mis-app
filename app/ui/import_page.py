@@ -180,17 +180,28 @@ class ImportPage(QWidget):
             return
         columns = dlg.column_map()
         header_row = dlg.header_index()
-        templates.save_template(self.file_type, self._signature,
-                                header_row, columns)
-        self._mapping = {"header_row": header_row, "columns": columns}
+        service_map = dlg.service_map()
+        tax_cols = dlg.tax_cols()
+        templates.save_template(
+            self.file_type, self._signature, header_row, columns,
+            service_map=service_map, tax_cols=tax_cols)
+        self._mapping = {
+            "header_row": header_row, "columns": columns,
+            "service_map": service_map, "tax_cols": tax_cols,
+        }
         self._parse_and_preview()
 
     def _parse_and_preview(self) -> None:
         if not self._mapping:
             return
+        # service_map keys come back from JSON as strings — convert to int.
+        sm_raw = self._mapping.get("service_map") or {}
+        service_map = {int(k): v for k, v in sm_raw.items()}
+        tax_cols = [int(c) for c in (self._mapping.get("tax_cols") or [])]
         self._result = parsers.parse(
             self.file_type, self._grid, self._mapping["columns"],
-            self._mapping["header_row"] + 1)
+            self._mapping["header_row"] + 1,
+            service_map=service_map, tax_cols=tax_cols)
         res = self._result
         msg = f"Parsed {res.row_count} record(s)."
         if res.warnings:
@@ -253,21 +264,30 @@ class ImportPage(QWidget):
 
         # Auto-resolve any names this import already has saved aliases for.
         auto_linked = resolution.apply_known_client_aliases()
+        cc_linked = resolution.apply_known_cc_string_mappings()
         unmapped_c = len(resolution.unresolved_clients())
         unmapped_e = len(resolution.unresolved_employees())
+        unmapped_cc = len(resolution.unresolved_cc_strings())
 
         rows = self._result.row_count
         head = (f"Import committed — batch #{batch_id}, {fmt_inr(rows)} row(s) "
                 "added.")
-        if auto_linked:
-            head += f"\n\n{fmt_inr(auto_linked)} row(s) auto-mapped from "
-            head += "previously remembered names."
+        auto_total = auto_linked + cc_linked
+        if auto_total:
+            head += (f"\n\n{fmt_inr(auto_total)} row(s) auto-mapped from "
+                     "previously remembered names.")
 
-        if unmapped_c or unmapped_e:
+        if unmapped_c or unmapped_e or unmapped_cc:
+            parts = []
+            if unmapped_cc:
+                parts.append(f"{fmt_inr(unmapped_cc)} cost-centre string(s)")
+            if unmapped_c:
+                parts.append(f"{fmt_inr(unmapped_c)} client name(s)")
+            if unmapped_e:
+                parts.append(f"{fmt_inr(unmapped_e)} employee name(s)")
             msg = (f"{head}\n\n"
-                   f"{fmt_inr(unmapped_c)} client name(s) and "
-                   f"{fmt_inr(unmapped_e)} employee name(s) still need to be "
-                   "mapped.\n\nResolve them now?")
+                   + ", ".join(parts) +
+                   " still need to be mapped.\n\nResolve them now?")
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Question)
             box.setWindowTitle("Imported — mapping needed")

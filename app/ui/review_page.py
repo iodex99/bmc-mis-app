@@ -21,6 +21,7 @@ from ..services import resolution
 from ..services import vouchers as vsvc
 from ..util import fmt_inr
 from .review_dialogs import (
+    ResolveCcStringDialog,
     ResolveClientDialog,
     ResolveEmployeeDialog,
     SplitEditorDialog,
@@ -167,6 +168,58 @@ class EmployeeTab(QWidget):
 
 # --- Voucher review tab ------------------------------------------------------
 
+class CcStringTab(QWidget):
+    """Resolve raw Tally Cost Centre strings to (partner, manager) pairs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: list[dict] = []
+        layout = QVBoxLayout(self)
+
+        bar = QHBoxLayout()
+        self.info = QLabel()
+        auto_btn = QPushButton("Auto-apply known")
+        resolve_btn = QPushButton("Resolve selected…")
+        auto_btn.clicked.connect(self._auto)
+        resolve_btn.clicked.connect(self._resolve)
+        bar.addWidget(self.info)
+        bar.addStretch(1)
+        bar.addWidget(auto_btn)
+        bar.addWidget(resolve_btn)
+        layout.addLayout(bar)
+
+        self.table = QTableWidget()
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.doubleClicked.connect(self._resolve)
+        layout.addWidget(self.table)
+
+    def reload(self) -> None:
+        self._rows = resolution.unresolved_cc_strings()
+        _fill(self.table, ["Cost Centre string", "Invoices"],
+              [[r["raw"], r["count"]] for r in self._rows])
+        n = len(self._rows)
+        self.info.setText("All cost-centre strings mapped ✓" if n == 0
+                          else f"{n} unmapped cost-centre string(s)")
+
+    def _auto(self) -> None:
+        n = resolution.apply_known_cc_string_mappings()
+        QMessageBox.information(self, "Auto-apply",
+                                f"{n} voucher split(s) updated from saved "
+                                "mappings.")
+        self.reload()
+
+    def _resolve(self) -> None:
+        sel = {i.row() for i in self.table.selectedIndexes()}
+        if not sel:
+            return
+        raw = self._rows[sel.pop()]["raw"]
+        dlg = ResolveCcStringDialog(raw, self)
+        if dlg.exec() == ResolveCcStringDialog.Accepted:
+            dlg.apply()
+            self.reload()
+
+
 class VoucherTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -270,9 +323,11 @@ class ReviewPage(QWidget):
         self.tabs = QTabWidget()
         self.client_tab = ClientTab()
         self.employee_tab = EmployeeTab()
+        self.cc_tab = CcStringTab()
         self.voucher_tab = VoucherTab()
         self.tabs.addTab(self.client_tab, "Clients")
         self.tabs.addTab(self.employee_tab, "Employees")
+        self.tabs.addTab(self.cc_tab, "Cost Centres")
         self.tabs.addTab(self.voucher_tab, "Vouchers & Splits")
         self.tabs.currentChanged.connect(self._refresh)
         layout.addWidget(self.tabs)
@@ -280,11 +335,12 @@ class ReviewPage(QWidget):
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
         resolution.apply_known_client_aliases()
+        resolution.apply_known_cc_string_mappings()
         self._refresh(self.tabs.currentIndex())
 
     def _refresh(self, index: int) -> None:
         widget = self.tabs.widget(index)
-        if index == 2:
+        if widget is self.voucher_tab:
             self.voucher_tab._reload_filters()
         elif hasattr(widget, "reload"):
             widget.reload()

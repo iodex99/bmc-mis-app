@@ -32,10 +32,19 @@ def find_template(file_type: str, signature: str) -> dict | None:
 
 
 def save_template(file_type: str, signature: str, header_row: int,
-                  columns: dict[str, int], name: str | None = None,
+                  columns: dict[str, int], *,
+                  service_map: dict[int, str] | None = None,
+                  tax_cols: list[int] | None = None,
+                  name: str | None = None,
                   entity_id: int | None = None) -> None:
     """Persist (or overwrite) a column mapping for a layout."""
-    payload = json.dumps({"header_row": header_row, "columns": columns})
+    body: dict = {"header_row": header_row, "columns": columns}
+    if service_map:
+        # JSON object keys must be strings.
+        body["service_map"] = {str(k): v for k, v in service_map.items()}
+    if tax_cols:
+        body["tax_cols"] = list(tax_cols)
+    payload = json.dumps(body)
     with transaction() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO column_templates "

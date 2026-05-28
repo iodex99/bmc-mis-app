@@ -21,6 +21,10 @@ class ParsedVoucher:
     ledger_heads: list[str] = field(default_factory=list)
     cc_allocations: list[tuple[str, float]] = field(default_factory=list)
     raw_cost_centre: str = ""             # dominant cost centre seen in Tally
+    # Sales register only: one (service name, amount) pair per non-zero
+    # service column in the row. When set, the importer creates one
+    # voucher_split per entry instead of a single full-amount split.
+    service_splits: list[tuple[str, float]] = field(default_factory=list)
 
     @property
     def description(self) -> str:

@@ -18,8 +18,8 @@ class F:
         self.required = required
 
 
-# Tally sales & purchase registers share the same voucher structure.
-_TALLY_FIELDS = [
+# Tally Purchase Register — multi-row voucher blocks.
+_PURCHASE_FIELDS = [
     F("date", "Date", required=True),
     F("particulars", "Particulars", required=True),
     F("vch_type", "Voucher Type"),
@@ -27,6 +27,20 @@ _TALLY_FIELDS = [
     F("debit", "Debit", required=True),
     F("credit", "Credit", required=True),
     F("taxable_amount", "Taxable Amount"),
+]
+
+# Tally Sales Register — flat one-row-per-invoice layout. Service revenue is
+# spread across many columns (one per service) and the Tally "Cost Center"
+# column carries a "Partner – Manager" identifier string. Both are configured
+# in the per-column role section of the mapping dialog, not as canonical
+# fields here.
+_SALES_FIELDS = [
+    F("date", "Date", required=True),
+    F("particulars", "Particulars (client)", required=True),
+    F("cost_centre_string", "Cost Centre (Tally column)", required=True),
+    F("vch_type", "Voucher Type"),
+    F("vch_no", "Voucher No."),
+    F("gross_total", "Gross Total (cross-check)"),
 ]
 
 _TIMESHEET_FIELDS = [
@@ -52,8 +66,8 @@ _SALARY_FIELDS = [
 ]
 
 FIELDS: dict[str, list[F]] = {
-    config.FILE_TYPE_SALES: _TALLY_FIELDS,
-    config.FILE_TYPE_PURCHASE: _TALLY_FIELDS,
+    config.FILE_TYPE_SALES: _SALES_FIELDS,
+    config.FILE_TYPE_PURCHASE: _PURCHASE_FIELDS,
     config.FILE_TYPE_TIMESHEET: _TIMESHEET_FIELDS,
     config.FILE_TYPE_SALARY: _SALARY_FIELDS,
 }
