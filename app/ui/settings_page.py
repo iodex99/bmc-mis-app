@@ -62,6 +62,7 @@ class SettingsPage(QWidget):
         super().__init__()
         self._latest: updater.UpdateInfo | None = None
         self._thread: QThread | None = None
+        self._worker: QObject | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -214,8 +215,13 @@ class SettingsPage(QWidget):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.start()
+        # Hold Python references so the worker / thread aren't garbage
+        # collected before the background work completes (a PySide6 gotcha
+        # that otherwise breaks the finished signal silently).
         self._thread = thread
+        self._worker = worker
+        thread.start()
 
     def _cleanup_thread(self) -> None:
         self._thread = None
+        self._worker = None

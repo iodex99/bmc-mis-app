@@ -33,8 +33,8 @@ except ImportError:                                    # source/dev runs
 
 UPDATES_ENABLED = bool(GITHUB_TOKEN and GITHUB_REPO)
 _API = "https://api.github.com"
-_TIMEOUT_CHECK = 5
-_TIMEOUT_DOWNLOAD = 180
+_TIMEOUT_CHECK = 15
+_TIMEOUT_DOWNLOAD = 300
 
 AUTO_CHECK_KEY = "auto_check_updates"
 

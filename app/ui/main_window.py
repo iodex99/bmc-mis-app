@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
 
         # Silent auto-check on launch (off the UI thread, fail-quietly).
         self._auto_check_thread: QThread | None = None
+        self._auto_check_worker: QObject | None = None
         if updater.auto_check_enabled():
             self._start_auto_check()
 
@@ -99,11 +100,16 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.start()
+        # Keep Python references alive until the thread emits finished
+        # (otherwise PySide6 may garbage-collect the worker and lose the
+        # signal silently).
         self._auto_check_thread = thread
+        self._auto_check_worker = worker
+        thread.start()
 
     def _on_silent_check(self, info) -> None:
         self._auto_check_thread = None
+        self._auto_check_worker = None
         if info is not None:
             self._settings_page.offer_update(info)
 
