@@ -179,41 +179,56 @@ def download_update(info: UpdateInfo, progress=None) -> Path:
 
 
 def apply_update(new_dir: Path) -> None:
-    """Write the helper script, launch it detached, then exit this process."""
+    """Write the helper script, launch it detached, then exit this process.
+
+    The helper waits for the current process to exit (by PID, not by image
+    name — more reliable), mirrors the freshly-downloaded files over the
+    install folder, relaunches the app and cleans up. A log is written to
+    the install folder so post-mortem debugging is possible.
+    """
+    import time
+
     install_dir = _install_dir()
     tmp_parent = new_dir.parent
-    log_file = tmp_parent / "update.log"
+    log_file = install_dir / "update.log"
     bat = tmp_parent / "apply_update.bat"
+    exe_path = install_dir / "BMC MIS.exe"
+    pid = os.getpid()
 
-    # The .bat waits for this exe to exit, mirrors the new build over the
-    # install dir, relaunches, and cleans up after itself.
-    bat.write_text(
-        '@echo off\r\n'
-        f'set LOG="{log_file}"\r\n'
-        'echo Waiting for BMC MIS to exit... > %LOG%\r\n'
-        ':wait\r\n'
-        'tasklist /FI "IMAGENAME eq BMC MIS.exe" 2>NUL | '
-        'find /I "BMC MIS.exe" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)\r\n'
-        'timeout /t 1 /nobreak >NUL\r\n'
-        f'robocopy "{new_dir}" "{install_dir}" /MIR /R:3 /W:2 >> %LOG% 2>&1\r\n'
-        f'start "" "{install_dir}\\BMC MIS.exe"\r\n'
-        f'rmdir /S /Q "{tmp_parent}" 2>NUL\r\n',
-        encoding="ascii",
-    )
+    lines = [
+        '@echo off',
+        f'> "{log_file}" echo === BMC MIS update helper ===',
+        f'>> "{log_file}" echo Started at %DATE% %TIME%',
+        f'>> "{log_file}" echo Waiting for PID {pid}...',
+        ':wait',
+        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL',
+        'if not errorlevel 1 (timeout /t 1 /nobreak >NUL & goto wait)',
+        f'>> "{log_file}" echo PID exited, sleeping 2s for handle release',
+        'timeout /t 2 /nobreak >NUL',
+        f'>> "{log_file}" echo Running robocopy...',
+        f'robocopy "{new_dir}" "{install_dir}" /MIR /R:5 /W:2 '
+        f'/XF "{log_file.name}" >> "{log_file}" 2>&1',
+        f'>> "{log_file}" echo Robocopy returned %ERRORLEVEL%',
+        f'>> "{log_file}" echo Launching "{exe_path}"',
+        f'start "" "{exe_path}"',
+        f'>> "{log_file}" echo Cleaning up temp folder',
+        f'rmdir /S /Q "{tmp_parent}" 2>NUL',
+        f'>> "{log_file}" echo Done at %DATE% %TIME%',
+    ]
+    bat.write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
 
-    # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP so the bat survives our exit.
-    DETACHED = 0x00000008
-    NEW_GROUP = 0x00000200
+    # Run the helper detached so it survives our exit. cwd MUST NOT be inside
+    # tmp_parent (the helper deletes that folder at the end).
+    DETACHED_PROCESS = 0x00000008
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
     subprocess.Popen(
         ["cmd.exe", "/c", str(bat)],
-        creationflags=DETACHED | NEW_GROUP,
+        creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
         close_fds=True,
-        cwd=str(tmp_parent),
+        cwd=str(install_dir),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    # Give cmd.exe a moment to start before we exit.
-    import time
-    time.sleep(0.5)
+    time.sleep(0.8)
     os._exit(0)

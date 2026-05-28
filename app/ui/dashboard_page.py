@@ -74,7 +74,7 @@ class DashboardPage(QWidget):
         # Tiny visible marker so an installed user can confirm the auto-update
         # actually landed.
         tagline = QLabel("Board-ready MIS — compiled from your Tally, "
-                         "timesheet and salary data. ✓ updated to v0.3.7")
+                         "timesheet and salary data. ✓ updated to v0.3.8")
         tagline.setObjectName("pageNote")
         root.addWidget(tagline)
 
