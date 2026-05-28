@@ -1,0 +1,69 @@
+"""Dataclasses for records produced by the parsers (pre-database staging)."""
+
+from __future__ import annotations
+
+import datetime as _dt
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ParsedVoucher:
+    """One Tally voucher (sales or expense) extracted from a register."""
+    date: _dt.date | None = None
+    period: str | None = None
+    vch_type: str = ""
+    vch_no: str = ""
+    party_name: str = ""
+    kind: str = "expense"                 # sales | expense
+    gross_amount: float = 0.0             # total billed / payable
+    tax_amount: float = 0.0               # GST + TDS + round-off lines
+    net_amount: float = 0.0               # taxable value -> the P&L figure
+    ledger_heads: list[str] = field(default_factory=list)
+    cc_allocations: list[tuple[str, float]] = field(default_factory=list)
+    raw_cost_centre: str = ""             # dominant cost centre seen in Tally
+
+    @property
+    def description(self) -> str:
+        return ", ".join(dict.fromkeys(self.ledger_heads))
+
+
+@dataclass
+class ParsedTimesheetRow:
+    """One timesheet line: an employee's hours on a client for a day."""
+    emp_code: str = ""
+    emp_name: str = ""
+    date: _dt.date | None = None
+    period: str | None = None
+    client_raw: str = ""
+    task: str = ""
+    hours: float = 0.0
+    day_fraction: float = 0.0
+    reporting_manager: str = ""
+    description: str = ""
+    is_billable: bool = True
+
+
+@dataclass
+class ParsedSalaryRow:
+    """One salary-sheet line for an employee in a month."""
+    period: str | None = None
+    employee_name: str = ""
+    raw_cost_centre: str = ""
+    raw_entity: str = ""
+    category: str = ""
+    salary_paid: float = 0.0
+    reimbursement: float = 0.0
+
+
+@dataclass
+class ParseResult:
+    """Outcome of parsing one file."""
+    file_type: str
+    vouchers: list[ParsedVoucher] = field(default_factory=list)
+    timesheet: list[ParsedTimesheetRow] = field(default_factory=list)
+    salary: list[ParsedSalaryRow] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def row_count(self) -> int:
+        return len(self.vouchers) + len(self.timesheet) + len(self.salary)

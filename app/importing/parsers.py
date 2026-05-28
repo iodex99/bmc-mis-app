@@ -1,0 +1,199 @@
+"""Parsers that turn a raw spreadsheet grid + column map into staged records.
+
+A *column map* is ``{canonical_field: column_index}``. *data_start* is the first
+row index holding real data (just after the header row).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .. import config
+from .models import ParsedSalaryRow, ParsedTimesheetRow, ParsedVoucher, ParseResult
+from .valueutils import (
+    clean,
+    hours_from_duration,
+    is_tax_head,
+    period_of,
+    to_date,
+    to_number,
+)
+
+ColMap = dict[str, int]
+
+
+def _cell(row: list[Any], idx: int | None) -> Any:
+    if idx is None or idx < 0 or idx >= len(row):
+        return None
+    return row[idx]
+
+
+def _is_blank(row: list[Any]) -> bool:
+    return all(c in (None, "") for c in row)
+
+
+def _marker(row: list[Any]) -> bool:
+    """True if the row carries a 'Dr'/'Cr' cost-centre allocation marker."""
+    return any(clean(c).lower() in ("dr", "cr") for c in row)
+
+
+def _first_number(row: list[Any]) -> float | None:
+    for c in row:
+        n = to_number(c)
+        if n is not None:
+            return n
+    return None
+
+
+# --- Tally sales / purchase register ----------------------------------------
+
+def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
+                kind: str) -> ParseResult:
+    """Parse a Tally register into vouchers.
+
+    Vouchers are multi-row blocks: a row carrying a date starts a new voucher;
+    following rows are ledger heads and 'Dr'/'Cr' cost-centre allocations.
+    """
+    result = ParseResult(file_type=kind)
+    d_i = colmap.get("date")
+    p_i = colmap.get("particulars")
+    vt_i = colmap.get("vch_type")
+    vn_i = colmap.get("vch_no")
+    dr_i = colmap.get("debit")
+    cr_i = colmap.get("credit")
+    tx_i = colmap.get("taxable_amount")
+
+    current: ParsedVoucher | None = None
+    head_is_tax = False
+
+    for row in grid[data_start:]:
+        if _is_blank(row):
+            continue
+        date = to_date(_cell(row, d_i))
+
+        if date is not None:                       # ---- voucher header ----
+            credit = to_number(_cell(row, cr_i)) or 0.0
+            debit = to_number(_cell(row, dr_i)) or 0.0
+            taxable = to_number(_cell(row, tx_i))
+            gross = credit if kind == config.VCH_EXPENSE else debit
+            if gross == 0:
+                gross = max(credit, debit)
+            current = ParsedVoucher(
+                date=date,
+                period=period_of(date),
+                vch_type=clean(_cell(row, vt_i)),
+                vch_no=clean(_cell(row, vn_i)),
+                party_name=clean(_cell(row, p_i)),
+                kind=kind,
+                gross_amount=gross,
+                net_amount=taxable if taxable is not None else gross,
+            )
+            head_is_tax = False
+            result.vouchers.append(current)
+
+        elif current is not None:                  # ---- sub-rows ----
+            if _marker(row):
+                if not head_is_tax:
+                    name = clean(_cell(row, p_i))
+                    amount = _first_number(row)
+                    if name and amount is not None:
+                        current.cc_allocations.append((name, amount))
+            else:
+                head = clean(_cell(row, p_i))
+                if head:
+                    if is_tax_head(head):
+                        head_is_tax = True
+                        amt = (to_number(_cell(row, dr_i)) or 0.0) + \
+                              (to_number(_cell(row, cr_i)) or 0.0)
+                        current.tax_amount += amt
+                    else:
+                        head_is_tax = False
+                        current.ledger_heads.append(head)
+
+    # Pick the dominant cost centre seen for each voucher (a hint for review).
+    for v in result.vouchers:
+        if v.cc_allocations:
+            agg: dict[str, float] = {}
+            for name, amt in v.cc_allocations:
+                agg[name] = agg.get(name, 0.0) + amt
+            v.raw_cost_centre = max(agg, key=lambda k: abs(agg[k]))
+
+    if not result.vouchers:
+        result.warnings.append("No vouchers were detected — check the column map.")
+    return result
+
+
+# --- Timesheet ---------------------------------------------------------------
+
+def parse_timesheet(grid: list[list[Any]], colmap: ColMap,
+                    data_start: int) -> ParseResult:
+    """Parse a flat timesheet into per-employee/client/day rows."""
+    result = ParseResult(file_type=config.FILE_TYPE_TIMESHEET)
+    for row in grid[data_start:]:
+        if _is_blank(row):
+            continue
+        name = clean(_cell(row, colmap.get("emp_name")))
+        client = clean(_cell(row, colmap.get("client")))
+        date = to_date(_cell(row, colmap.get("date")))
+        if not name or not client:
+            continue
+        hours = hours_from_duration(
+            _cell(row, colmap.get("duration")),
+            _cell(row, colmap.get("day_fraction")),
+        )
+        result.timesheet.append(ParsedTimesheetRow(
+            emp_code=clean(_cell(row, colmap.get("emp_code"))),
+            emp_name=name,
+            date=date,
+            period=period_of(date),
+            client_raw=client,
+            task=clean(_cell(row, colmap.get("task"))),
+            hours=hours,
+            day_fraction=to_number(_cell(row, colmap.get("day_fraction"))) or 0.0,
+            reporting_manager=clean(_cell(row, colmap.get("reporting_manager"))),
+            description=clean(_cell(row, colmap.get("description"))),
+            is_billable="non billable" not in client.lower(),
+        ))
+    if not result.timesheet:
+        result.warnings.append("No timesheet rows were detected — check the column map.")
+    return result
+
+
+# --- Salary & reimbursements -------------------------------------------------
+
+def parse_salary(grid: list[list[Any]], colmap: ColMap,
+                 data_start: int) -> ParseResult:
+    """Parse a flat salary & reimbursements sheet."""
+    result = ParseResult(file_type=config.FILE_TYPE_SALARY)
+    for row in grid[data_start:]:
+        if _is_blank(row):
+            continue
+        name = clean(_cell(row, colmap.get("name")))
+        if not name:
+            continue
+        result.salary.append(ParsedSalaryRow(
+            period=period_of(_cell(row, colmap.get("month"))),
+            employee_name=name,
+            raw_cost_centre=clean(_cell(row, colmap.get("cost_centre"))),
+            raw_entity=clean(_cell(row, colmap.get("entity"))),
+            category=clean(_cell(row, colmap.get("category"))),
+            salary_paid=to_number(_cell(row, colmap.get("salary_paid"))) or 0.0,
+            reimbursement=to_number(_cell(row, colmap.get("reimbursement"))) or 0.0,
+        ))
+    if not result.salary:
+        result.warnings.append("No salary rows were detected — check the column map.")
+    return result
+
+
+def parse(file_type: str, grid: list[list[Any]], colmap: ColMap,
+          data_start: int) -> ParseResult:
+    """Dispatch to the right parser for *file_type*."""
+    if file_type in (config.FILE_TYPE_SALES, config.FILE_TYPE_PURCHASE):
+        kind = config.VCH_SALES if file_type == config.FILE_TYPE_SALES \
+            else config.VCH_EXPENSE
+        return parse_tally(grid, colmap, data_start, kind)
+    if file_type == config.FILE_TYPE_TIMESHEET:
+        return parse_timesheet(grid, colmap, data_start)
+    if file_type == config.FILE_TYPE_SALARY:
+        return parse_salary(grid, colmap, data_start)
+    raise ValueError(f"Unknown file type: {file_type}")

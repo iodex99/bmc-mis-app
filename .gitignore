@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build artefacts
+build/
+dist/
+Output/
+*.spec
+
+# Application data (database + generated reports)
+data/
+data_test/
+
+# Generated MIS workbooks
+*.xlsx~
+~$*.xlsx
+
+# OS / editor / tooling
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+.DS_Store
+
+# Secrets — populated at build time from env vars (never commit)
+app/_secrets.py
+
+# Firm-sensitive sample files (real data — keep local only)
+*.xlsx
+!docs/sample_*.xlsx     # carve out for any anonymised samples added later
