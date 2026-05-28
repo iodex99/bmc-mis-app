@@ -27,7 +27,7 @@ from .settings_page import SettingsPage
 # Each nav entry: (label, page-factory). Real pages replace the placeholders
 # as later phases are built.
 NAV_ITEMS = [
-    ("Dashboard", DashboardPage),
+    ("Main Dashboard", DashboardPage),
     ("Import Files", ImportPage),
     ("Review & Map", ReviewPage),
     ("Master Data", MasterDataPage),

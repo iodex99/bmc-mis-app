@@ -65,7 +65,7 @@ class DashboardPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
 
-        heading = QLabel("Dashboard")
+        heading = QLabel("Main Dashboard")
         heading.setObjectName("pageHeading")
         root.addWidget(heading)
         self.subtitle = QLabel("")
