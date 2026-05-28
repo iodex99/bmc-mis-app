@@ -71,6 +71,12 @@ class DashboardPage(QWidget):
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("pageNote")
         root.addWidget(self.subtitle)
+        # Tiny visible marker so an installed user can confirm the auto-update
+        # actually landed (introduced in v0.3.4).
+        tagline = QLabel("Board-ready MIS — assembled from your Tally, "
+                         "timesheet and salary data.")
+        tagline.setObjectName("pageNote")
+        root.addWidget(tagline)
 
         grid = QGridLayout()
         grid.setSpacing(14)
