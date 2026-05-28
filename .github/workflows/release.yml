@@ -65,6 +65,7 @@ jobs:
           files: ${{ env.ZIP }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          make_latest: 'true'
 
       - name: Upload as workflow artifact (for manual runs)
         if: github.event_name == 'workflow_dispatch'

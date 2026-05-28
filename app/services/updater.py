@@ -102,23 +102,40 @@ def _headers(accept: str = "application/vnd.github+json") -> dict:
 
 
 def check_latest() -> UpdateInfo | None:
-    """Hit the GitHub Releases API; return UpdateInfo if newer, else None."""
+    """Hit the GitHub Releases API; return UpdateInfo if newer, else None.
+
+    Lists releases (rather than relying on ``/releases/latest``) so the check
+    works even when no release is flagged as "latest" on GitHub.
+    """
     if not UPDATES_ENABLED:
         return None
-    url = f"{_API}/repos/{GITHUB_REPO}/releases/latest"
+    url = f"{_API}/repos/{GITHUB_REPO}/releases?per_page=30"
     r = requests.get(url, headers=_headers(), timeout=_TIMEOUT_CHECK)
     r.raise_for_status()
-    data = r.json()
-    tag = (data.get("tag_name") or "").lstrip("v")
-    if not tag or not _is_newer(tag, current_version()):
+
+    best = None
+    best_ver: tuple[int, ...] = ()
+    for rel in (r.json() or []):
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        tag = (rel.get("tag_name") or "").lstrip("v")
+        if not tag:
+            continue
+        ver = _parse(tag)
+        if ver > best_ver:
+            best_ver, best = ver, rel
+    if best is None:
         return None
-    asset = next((a for a in data.get("assets", [])
+    tag = (best.get("tag_name") or "").lstrip("v")
+    if not _is_newer(tag, current_version()):
+        return None
+    asset = next((a for a in best.get("assets", [])
                   if a["name"].lower().endswith(".zip")), None)
     if not asset:
         return None
     return UpdateInfo(
         version=tag,
-        notes=data.get("body", "") or "",
+        notes=best.get("body", "") or "",
         asset_url=asset["url"],
         asset_name=asset["name"],
     )
