@@ -203,27 +203,30 @@ def apply_update(new_dir: Path) -> None:
         ':wait',
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL',
         'if not errorlevel 1 (timeout /t 1 /nobreak >NUL & goto wait)',
-        f'>> "{log_file}" echo PID exited, sleeping 2s for handle release',
-        'timeout /t 2 /nobreak >NUL',
+        f'>> "{log_file}" echo PID exited, sleeping 5s for handle release',
+        'timeout /t 5 /nobreak >NUL',
         f'>> "{log_file}" echo Running robocopy...',
         f'robocopy "{new_dir}" "{install_dir}" /MIR /R:5 /W:2 '
         f'/XF "{log_file.name}" >> "{log_file}" 2>&1',
         f'>> "{log_file}" echo Robocopy returned %ERRORLEVEL%',
         f'>> "{log_file}" echo Launching "{exe_path}"',
         f'start "" "{exe_path}"',
-        f'>> "{log_file}" echo Cleaning up temp folder',
-        f'rmdir /S /Q "{tmp_parent}" 2>NUL',
         f'>> "{log_file}" echo Done at %DATE% %TIME%',
+        # NOTE: we deliberately do NOT rmdir the temp folder here. Doing so
+        # while the bat itself is still executing from another folder used to
+        # hang on some Windows configurations. Windows cleans its temp on
+        # disk-cleanup / reboot; the few stray folders are harmless.
     ]
     bat.write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
 
-    # Run the helper detached so it survives our exit. cwd MUST NOT be inside
-    # tmp_parent (the helper deletes that folder at the end).
+    # Run the helper truly headless: CREATE_NO_WINDOW hides the cmd console
+    # window; DETACHED_PROCESS / NEW_PROCESS_GROUP let it survive our exit.
+    CREATE_NO_WINDOW = 0x08000000
     DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     subprocess.Popen(
         ["cmd.exe", "/c", str(bat)],
-        creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+        creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
         close_fds=True,
         cwd=str(install_dir),
         stdin=subprocess.DEVNULL,

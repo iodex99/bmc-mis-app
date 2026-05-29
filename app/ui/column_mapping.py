@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -23,6 +24,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+# By default a QComboBox / QSpinBox eats wheel events to step through its
+# values — which is awful when it sits inside a scroll area. These subclasses
+# pass the wheel event up to the parent so the scroll area scrolls instead.
+
+class NoScrollComboBox(QComboBox):
+    def wheelEvent(self, event):  # noqa: N802
+        event.ignore()
+
+
+class NoScrollSpinBox(QSpinBox):
+    def wheelEvent(self, event):  # noqa: N802
+        event.ignore()
 from rapidfuzz import fuzz
 
 from .. import config
@@ -57,8 +72,14 @@ class ColumnMappingDialog(QDialog):
         self.file_type = file_type
         self.fields = fields_for(file_type)
         self.setWindowTitle("Map Columns to Fields")
-        self.resize(980, 720)
-        self.setMinimumSize(720, 500)
+        # Open at a size that fits the current screen, leaving room for the
+        # taskbar — so the OK / Cancel buttons are always on-screen.
+        screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        max_h = (avail.height() - 80) if avail else 720
+        self.resize(min(980, (avail.width() - 80) if avail else 980),
+                    min(720, max_h))
+        self.setMinimumSize(720, 480)
 
         # The dialog itself stays a fixed shell: title at top, OK/Cancel at the
         # bottom, and a scroll area in the middle for everything else — so
@@ -90,7 +111,7 @@ class ColumnMappingDialog(QDialog):
         # --- header row selector -------------------------------------------
         hdr_row = QHBoxLayout()
         hdr_row.addWidget(QLabel("Header row:"))
-        self.header_spin = QSpinBox()
+        self.header_spin = NoScrollSpinBox()
         self.header_spin.setRange(1, min(len(grid), 60) or 1)
         self.header_spin.valueChanged.connect(self._refresh_labels)
         hdr_row.addWidget(self.header_spin)
@@ -102,7 +123,7 @@ class ColumnMappingDialog(QDialog):
         form = QFormLayout(box)
         self.combos: dict[str, QComboBox] = {}
         for f in self.fields:
-            combo = QComboBox()
+            combo = NoScrollComboBox()
             self.combos[f.key] = combo
             label = f.label + (" *" if f.required else "")
             form.addRow(label, combo)
@@ -234,7 +255,7 @@ class ColumnMappingDialog(QDialog):
                                        f"{head_text}".strip()))
             self.role_table.item(r, 0).setData(Qt.UserRole, col_idx)
 
-            role_combo = QComboBox()
+            role_combo = NoScrollComboBox()
             for key, lab in _ROLE_LABELS.items():
                 role_combo.addItem(lab, key)
             default_role = (ROLE_SERVICE if col_idx in sm else
