@@ -25,11 +25,12 @@ from ..database import transaction
 from ..services import resolution
 from ..services import vouchers as vsvc
 from ..util import fmt_inr
+from .widgets import NoScrollComboBox, NoScrollSpinBox
 
 
 def _combo(options: list[tuple[int, str]], current=None,
            allow_none: bool = True, none_label: str = "—") -> QComboBox:
-    cb = QComboBox()
+    cb = NoScrollComboBox()
     if allow_none:
         cb.addItem(none_label, None)
     for oid, label in options:
@@ -335,6 +336,7 @@ class SplitEditorDialog(QDialog):
         amount.setRange(-1e12, 1e12)
         amount.setDecimals(2)
         amount.setGroupSeparatorShown(True)
+        amount.wheelEvent = lambda e: e.ignore()
         amount.setValue(float(data.get("amount", self._remaining())))
         amount.valueChanged.connect(self._update_total)
         self.table.setCellWidget(r, 0, amount)

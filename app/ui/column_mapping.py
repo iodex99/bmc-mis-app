@@ -26,22 +26,13 @@ from PySide6.QtWidgets import (
 )
 
 
-# By default a QComboBox / QSpinBox eats wheel events to step through its
-# values — which is awful when it sits inside a scroll area. These subclasses
-# pass the wheel event up to the parent so the scroll area scrolls instead.
-
-class NoScrollComboBox(QComboBox):
-    def wheelEvent(self, event):  # noqa: N802
-        event.ignore()
-
-
-class NoScrollSpinBox(QSpinBox):
-    def wheelEvent(self, event):  # noqa: N802
-        event.ignore()
+# NoScrollComboBox / NoScrollSpinBox live in app.ui.widgets so the rest of the
+# app can use them too.
 from rapidfuzz import fuzz
 
 from .. import config
 from ..importing.fields import fields_for
+from .widgets import NoScrollComboBox, NoScrollSpinBox  # noqa: F401
 
 PREVIEW_ROWS = 18
 

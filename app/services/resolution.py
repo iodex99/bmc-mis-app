@@ -35,31 +35,48 @@ def norm_loose(text: str | None) -> str:
 
 # =========================== CLIENTS ========================================
 
-def apply_known_client_aliases() -> int:
-    """Auto-link unresolved rows whose raw name matches a known client/alias.
+def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
+    """Set vouchers.client_id / timesheet_entries.client_id wherever the
+    Python-normalised raw name matches a key in *name_to_cid*.
 
-    Returns the number of newly linked rows.
+    SQL ``LOWER(TRIM(...))`` doesn't collapse internal whitespace — Tally
+    sometimes writes multiple spaces in client names, which used to leave
+    rows unmapped even after the operator confirmed them. Matching in Python
+    via :func:`norm` (which collapses any run of whitespace) fixes that.
     """
+    linked = 0
+    rows = conn.execute(
+        "SELECT id, party_name FROM vouchers "
+        "WHERE kind='sales' AND client_id IS NULL "
+        "AND party_name <> ''").fetchall()
+    for r in rows:
+        cid = name_to_cid.get(norm(r["party_name"]))
+        if cid is not None:
+            conn.execute("UPDATE vouchers SET client_id = ? WHERE id = ?",
+                         (cid, r["id"]))
+            linked += 1
+    rows = conn.execute(
+        "SELECT id, client_raw FROM timesheet_entries "
+        "WHERE client_id IS NULL AND client_raw <> ''").fetchall()
+    for r in rows:
+        cid = name_to_cid.get(norm(r["client_raw"]))
+        if cid is not None:
+            conn.execute("UPDATE timesheet_entries SET client_id = ? WHERE id = ?",
+                         (cid, r["id"]))
+            linked += 1
+    return linked
+
+
+def apply_known_client_aliases() -> int:
+    """Auto-link unresolved rows whose raw name matches a known client/alias."""
     with transaction() as conn:
         pairs: dict[str, int] = {}
         for r in conn.execute("SELECT id, canonical_name FROM clients"):
             pairs[norm(r["canonical_name"])] = r["id"]
-        for r in conn.execute("SELECT client_id, alias_text FROM client_aliases"):
+        for r in conn.execute(
+                "SELECT client_id, alias_text FROM client_aliases"):
             pairs[norm(r["alias_text"])] = r["client_id"]
-
-        linked = 0
-        for name, cid in pairs.items():
-            cur = conn.execute(
-                "UPDATE vouchers SET client_id = ? "
-                "WHERE kind = 'sales' AND client_id IS NULL "
-                "AND lower(trim(party_name)) = ?", (cid, name))
-            linked += cur.rowcount
-            cur = conn.execute(
-                "UPDATE timesheet_entries SET client_id = ? "
-                "WHERE client_id IS NULL AND lower(trim(client_raw)) = ?",
-                (cid, name))
-            linked += cur.rowcount
-    return linked
+        return _apply_client_norm_mapping(conn, pairs)
 
 
 def unresolved_clients() -> list[dict]:
@@ -121,16 +138,8 @@ def create_client(raw: str, canonical_name: str,
 
 
 def _link_client_rows(conn, raw: str, client_id: int) -> int:
-    key = norm(raw)
-    n = conn.execute(
-        "UPDATE vouchers SET client_id = ? WHERE kind = 'sales' "
-        "AND client_id IS NULL AND lower(trim(party_name)) = ?",
-        (client_id, key)).rowcount
-    n += conn.execute(
-        "UPDATE timesheet_entries SET client_id = ? "
-        "WHERE client_id IS NULL AND lower(trim(client_raw)) = ?",
-        (client_id, key)).rowcount
-    return n
+    """Set client_id on all rows whose raw name normalises to *raw*."""
+    return _apply_client_norm_mapping(conn, {norm(raw): client_id})
 
 
 def bulk_create_clients() -> int:

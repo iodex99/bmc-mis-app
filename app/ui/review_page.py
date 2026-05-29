@@ -52,6 +52,7 @@ class ClientTab(QWidget):
         auto_btn = QPushButton("Auto-resolve known")
         bulk_btn = QPushButton("Create all as new clients")
         resolve_btn = QPushButton("Resolve selected…")
+        resolve_btn.setObjectName("primary")
         auto_btn.clicked.connect(self._auto)
         bulk_btn.clicked.connect(self._bulk)
         resolve_btn.clicked.connect(self._resolve)
@@ -62,9 +63,15 @@ class ClientTab(QWidget):
         bar.addWidget(resolve_btn)
         layout.addLayout(bar)
 
+        hint = QLabel("Tip: double-click a row, or select it and click "
+                      "'Resolve selected…', to map a client.")
+        hint.setObjectName("pageNote")
+        layout.addWidget(hint)
+
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.doubleClicked.connect(self._resolve)
         layout.addWidget(self.table)
 
@@ -76,6 +83,8 @@ class ClientTab(QWidget):
         n = len(self._rows)
         self.info.setText("All clients resolved ✓" if n == 0
                           else f"{n} unresolved client name(s)")
+        if n:
+            self.table.selectRow(0)
 
     def _auto(self) -> None:
         linked = resolution.apply_known_client_aliases()
@@ -119,6 +128,7 @@ class EmployeeTab(QWidget):
         self.info = QLabel()
         bulk_btn = QPushButton("Create all as new employees")
         resolve_btn = QPushButton("Resolve selected…")
+        resolve_btn.setObjectName("primary")
         bulk_btn.clicked.connect(self._bulk)
         resolve_btn.clicked.connect(self._resolve)
         bar.addWidget(self.info)
@@ -127,9 +137,15 @@ class EmployeeTab(QWidget):
         bar.addWidget(resolve_btn)
         layout.addLayout(bar)
 
+        hint = QLabel("Tip: double-click a row, or select it and click "
+                      "'Resolve selected…', to map an employee.")
+        hint.setObjectName("pageNote")
+        layout.addWidget(hint)
+
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.doubleClicked.connect(self._resolve)
         layout.addWidget(self.table)
 
@@ -141,6 +157,8 @@ class EmployeeTab(QWidget):
         n = len(self._rows)
         self.info.setText("All employees resolved ✓" if n == 0
                           else f"{n} unresolved employee name(s)")
+        if n:
+            self.table.selectRow(0)
 
     def _bulk(self) -> None:
         if not self._rows:
@@ -180,6 +198,7 @@ class CcStringTab(QWidget):
         self.info = QLabel()
         auto_btn = QPushButton("Auto-apply known")
         resolve_btn = QPushButton("Resolve selected…")
+        resolve_btn.setObjectName("primary")
         auto_btn.clicked.connect(self._auto)
         resolve_btn.clicked.connect(self._resolve)
         bar.addWidget(self.info)
@@ -188,9 +207,17 @@ class CcStringTab(QWidget):
         bar.addWidget(resolve_btn)
         layout.addLayout(bar)
 
+        hint = QLabel("Tip: double-click a row, or select it and click "
+                      "'Resolve selected…', to map a cost-centre string "
+                      "to a partner (and optionally a manager).")
+        hint.setObjectName("pageNote")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.doubleClicked.connect(self._resolve)
         layout.addWidget(self.table)
 
@@ -201,6 +228,8 @@ class CcStringTab(QWidget):
         n = len(self._rows)
         self.info.setText("All cost-centre strings mapped ✓" if n == 0
                           else f"{n} unmapped cost-centre string(s)")
+        if n:
+            self.table.selectRow(0)
 
     def _auto(self) -> None:
         n = resolution.apply_known_cc_string_mappings()
@@ -236,6 +265,7 @@ class VoucherTab(QWidget):
         for w in (self.entity_combo, self.period_combo, self.kind_combo):
             w.currentIndexChanged.connect(self.reload)
         edit_btn = QPushButton("Edit splits…")
+        edit_btn.setObjectName("primary")
         edit_btn.clicked.connect(self._edit)
         bar.addWidget(QLabel("Entity:"))
         bar.addWidget(self.entity_combo)
@@ -247,9 +277,17 @@ class VoucherTab(QWidget):
         bar.addWidget(edit_btn)
         layout.addLayout(bar)
 
+        hint = QLabel("Tip: double-click any voucher (or select it and click "
+                      "'Edit splits…') to split its amount between cost "
+                      "centres, managers and services.")
+        hint.setObjectName("pageNote")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.doubleClicked.connect(self._edit)
         layout.addWidget(self.table)
 
