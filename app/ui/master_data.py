@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from .. import repository as repo
 from ..util import fmt_inr
+from .widgets import fill_table_with_actions, setup_data_table
 
 
 # --- Field & table specifications -------------------------------------------
@@ -200,18 +201,9 @@ class RecordTab(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        self.add_btn = QPushButton("＋ Add new")
-        self.add_btn.setObjectName("primary")
-        self.edit_btn = QPushButton("Edit")
-        self.del_btn = QPushButton(
-            "Deactivate" if spec.soft_delete else "Delete")
-        self.del_btn.setObjectName("danger")
-        self.add_btn.clicked.connect(self._add)
-        self.edit_btn.clicked.connect(self._edit)
-        self.del_btn.clicked.connect(self._delete)
-        toolbar.addWidget(self.add_btn)
-        toolbar.addWidget(self.edit_btn)
-        toolbar.addWidget(self.del_btn)
+        self.summary = QLabel("")
+        self.summary.setObjectName("sectionTitle")
+        toolbar.addWidget(self.summary)
         toolbar.addStretch(1)
         if spec.soft_delete:
             self.show_inactive = QCheckBox("Show inactive")
@@ -219,18 +211,24 @@ class RecordTab(QWidget):
             toolbar.addWidget(self.show_inactive)
         else:
             self.show_inactive = None
+        self.add_btn = QPushButton(f"＋ Add {spec.title.rstrip('s').lower()}")
+        self.add_btn.setObjectName("primary")
+        self.add_btn.clicked.connect(self._add)
+        toolbar.addWidget(self.add_btn)
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.doubleClicked.connect(self._edit)
+        setup_data_table(self.table)
+        self.table.doubleClicked.connect(
+            lambda idx: self._edit_row(idx.row()))
         layout.addWidget(self.table)
 
         self._fk_maps = {f.fk_table: repo.fk_label_map(f.fk_table)
                          for f in spec.fields if f.kind == "fk"}
         self.reload()
+
+    def count_active(self) -> int:
+        return sum(1 for r in self._rows if r.get("active", 1))
 
     # -- data ----------------------------------------------------------------
     def reload(self) -> None:
@@ -239,26 +237,62 @@ class RecordTab(QWidget):
         self._rows = repo.fetch_all(
             self.spec.table, include_inactive=include_inactive,
             order_by=self.spec.order_by)
+        active = self.count_active()
+        total = len(self._rows)
+        self.summary.setText(
+            f"{active} record{'s' if active != 1 else ''}"
+            + (f"  ·  {total - active} inactive shown" if total > active else "")
+            if total else "No records yet")
         self._render()
 
     def _render(self) -> None:
         headers = [f.label for f in self.spec.fields]
-        if self.spec.soft_delete:
-            headers.append("Status")
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
-        self.table.setRowCount(len(self._rows))
+        body_rows = []
+        for row in self._rows:
+            body = [self._display(f, row) for f in self.spec.fields]
+            body_rows.append(body)
 
-        for r, row in enumerate(self._rows):
-            for c, f in enumerate(self.spec.fields):
-                self.table.setItem(r, c, QTableWidgetItem(self._display(f, row)))
+        def status_for(i: int):
+            if not self.spec.soft_delete:
+                return ("Active", "statusOk")
+            return (("Active", "statusOk")
+                    if self._rows[i].get("active", 1)
+                    else ("Inactive", "statusMuted"))
+
+        if not body_rows:
+            self.table.setRowCount(0)
+            return
+
+        action_label = []
+        for r in self._rows:
             if self.spec.soft_delete:
-                status = "Active" if row.get("active", 1) else "Inactive"
-                self.table.setItem(r, len(self.spec.fields),
-                                   QTableWidgetItem(status))
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setStretchLastSection(True)
+                action_label.append("Activate"
+                                    if not r.get("active", 1) else "Edit")
+            else:
+                action_label.append("Edit")
+
+        secondary_label = None
+        secondary_callback = None
+        secondary_object_name = "rowAction"
+        if self.spec.soft_delete:
+            secondary_label = "Deactivate"
+            secondary_callback = self._deactivate_row
+            secondary_object_name = "rowActionDanger"
+        else:
+            secondary_label = "Delete"
+            secondary_callback = self._delete_row
+            secondary_object_name = "rowActionDanger"
+
+        fill_table_with_actions(
+            self.table, headers, body_rows,
+            action_label=action_label,
+            action_callback=self._edit_row,
+            secondary_label=secondary_label,
+            secondary_callback=secondary_callback,
+            secondary_object_name=secondary_object_name,
+            status_for_row=status_for,
+            stretch_col=0,
+        )
 
     def _display(self, f: Field, row: dict[str, Any]) -> str:
         value = row.get(f.key)
@@ -270,10 +304,6 @@ class RecordTab(QWidget):
             return fmt_inr(value, 2)
         return str(value)
 
-    def _selected(self) -> dict[str, Any] | None:
-        rows = {i.row() for i in self.table.selectedIndexes()}
-        return self._rows[rows.pop()] if rows else None
-
     # -- actions -------------------------------------------------------------
     def _add(self) -> None:
         dlg = RecordDialog(self.spec, None, self)
@@ -284,9 +314,15 @@ class RecordTab(QWidget):
                 QMessageBox.critical(self, "Could not add", str(exc))
             self.reload()
 
-    def _edit(self) -> None:
-        record = self._selected()
-        if not record:
+    def _edit_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        record = self._rows[idx]
+        # If the row is inactive in a soft-delete table, "Activate" replaces
+        # the edit dialog.
+        if self.spec.soft_delete and not record.get("active", 1):
+            repo.set_active(self.spec.table, record["id"], True)
+            self.reload()
             return
         dlg = RecordDialog(self.spec, record, self)
         if dlg.exec() == QDialog.Accepted:
@@ -296,26 +332,31 @@ class RecordTab(QWidget):
                 QMessageBox.critical(self, "Could not save", str(exc))
             self.reload()
 
-    def _delete(self) -> None:
-        record = self._selected()
-        if not record:
+    def _deactivate_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
             return
-        if self.spec.soft_delete:
-            active = bool(record.get("active", 1))
-            verb = "deactivate" if active else "reactivate"
-            if QMessageBox.question(
-                    self, "Confirm", f"{verb.capitalize()} this record?") \
-                    == QMessageBox.Yes:
-                repo.set_active(self.spec.table, record["id"], not active)
-        else:
-            if QMessageBox.question(
-                    self, "Confirm", "Delete this record permanently?") \
-                    == QMessageBox.Yes:
-                try:
-                    repo.delete(self.spec.table, record["id"])
-                except Exception as exc:
-                    QMessageBox.critical(self, "Could not delete", str(exc))
-        self.reload()
+        record = self._rows[idx]
+        if QMessageBox.question(
+                self, "Deactivate",
+                "Deactivate this record? Existing history that references it "
+                "is preserved; you won't see it in dropdowns going forward."
+                ) == QMessageBox.Yes:
+            repo.set_active(self.spec.table, record["id"], False)
+            self.reload()
+
+    def _delete_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        record = self._rows[idx]
+        if QMessageBox.question(
+                self, "Delete permanently",
+                "Delete this record permanently? This cannot be undone."
+                ) == QMessageBox.Yes:
+            try:
+                repo.delete(self.spec.table, record["id"])
+            except Exception as exc:
+                QMessageBox.critical(self, "Could not delete", str(exc))
+            self.reload()
 
 
 # --- The page itself ---------------------------------------------------------
@@ -350,8 +391,20 @@ class MasterDataPage(QWidget):
             self.tabs.addTab(tab, spec.title)
         self.tabs.currentChanged.connect(self._refresh_current)
         layout.addWidget(self.tabs, 1)
+        self._refresh_badges()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._refresh_badges()
 
     def _refresh_current(self, index: int) -> None:
         # FK dropdowns may have changed on another tab — reload on switch.
         if 0 <= index < len(self._tabs):
             self._tabs[index].reload()
+        self._refresh_badges()
+
+    def _refresh_badges(self) -> None:
+        for i, tab in enumerate(self._tabs):
+            base = tab.spec.title
+            n = tab.count_active()
+            self.tabs.setTabText(i, f"{base}  ({n})" if n else base)

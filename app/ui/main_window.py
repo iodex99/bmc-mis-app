@@ -85,6 +85,11 @@ class MainWindow(QMainWindow):
         self._settings_page = self.stack.widget(NAV_ITEMS_INDEX["Settings"])
         self._settings_page.update_state_changed.connect(self._set_update_state)
 
+        # The Dashboard's quick-action cards emit a nav index to jump to.
+        dashboard = self.stack.widget(NAV_ITEMS_INDEX["Dashboard"])
+        if hasattr(dashboard, "navigate"):
+            dashboard.navigate.connect(self.nav.setCurrentRow)
+
         # Silent auto-check on launch (off the UI thread, fail-quietly).
         self._auto_check_thread: QThread | None = None
         self._auto_check_worker: QObject | None = None

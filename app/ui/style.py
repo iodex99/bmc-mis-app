@@ -405,4 +405,168 @@ QPushButton#updatePill {{
 QPushButton#updatePill:hover {{
     background: #DDE2FB;
 }}
+
+/* ============ ROW-LEVEL ACTION BUTTONS ============ */
+
+QPushButton#rowAction {{
+    background: {INDIGO};
+    color: {WHITE};
+    border: 1px solid {INDIGO_DARK};
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-weight: 600;
+    font-size: 12px;
+    min-height: 14px;
+}}
+QPushButton#rowAction:hover {{
+    background: {INDIGO_DARK};
+    border-color: {INDIGO_DARK};
+}}
+QPushButton#rowActionDanger {{
+    background: {WHITE};
+    color: #B91C1C;
+    border: 1px solid #FCA5A5;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-weight: 600;
+    font-size: 12px;
+}}
+QPushButton#rowActionDanger:hover {{
+    background: #FEF2F2;
+    border-color: #F87171;
+}}
+
+/* ============ STATUS PILLS ============ */
+
+QLabel#statusOk {{
+    background: #DCFCE7;
+    color: #166534;
+    border: 1px solid #BBF7D0;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 600;
+    font-size: 11px;
+    qproperty-alignment: AlignCenter;
+}}
+QLabel#statusWarn {{
+    background: #FEF3C7;
+    color: #92400E;
+    border: 1px solid #FDE68A;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 600;
+    font-size: 11px;
+    qproperty-alignment: AlignCenter;
+}}
+QLabel#statusMuted {{
+    background: {SLATE_100};
+    color: {SLATE_500};
+    border: 1px solid {SLATE_200};
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 500;
+    font-size: 11px;
+    qproperty-alignment: AlignCenter;
+}}
+
+/* ============ SECTION & EMPTY STATE ============ */
+
+QLabel#sectionTitle {{
+    font-size: 13px;
+    font-weight: 600;
+    color: {SLATE_600};
+}}
+QLabel#emptyState {{
+    background: {WHITE};
+    border: 1px dashed {SLATE_200};
+    border-radius: 10px;
+    padding: 36px 28px;
+    color: {SLATE_500};
+    font-size: 14px;
+}}
+
+/* ============ WELCOME PANEL ============ */
+
+QFrame#welcomePanel {{
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+        stop:0 #EEF2FF, stop:1 #FAF5FF);
+    border: 1px solid #C7D2FE;
+    border-radius: 14px;
+}}
+QLabel#welcomeTitle {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {NAVY};
+}}
+QLabel#welcomeBody {{
+    font-size: 14px;
+    color: {SLATE_600};
+    line-height: 1.5;
+}}
+
+/* ============ METRIC + QUICK-ACTION CARDS ============ */
+
+QFrame#metricCard {{
+    background: {WHITE};
+    border: 1px solid {SLATE_200};
+    border-radius: 12px;
+}}
+QFrame#metricCard[accent="indigo"] {{ border-top: 3px solid {INDIGO}; }}
+QFrame#metricCard[accent="rose"]   {{ border-top: 3px solid #F43F5E; }}
+QFrame#metricCard[accent="emerald"] {{ border-top: 3px solid #10B981; }}
+QFrame#metricCard[accent="amber"]  {{ border-top: 3px solid #F59E0B; }}
+
+QLabel#cardLabel {{
+    color: {SLATE_500};
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}}
+QLabel#metricValue {{
+    font-size: 26px;
+    font-weight: 700;
+    color: {NAVY};
+    margin-top: 2px;
+}}
+QLabel#metricDetail {{
+    color: {SLATE_500};
+    font-size: 12px;
+}}
+
+QFrame#quickCard {{
+    background: {WHITE};
+    border: 1px solid {SLATE_200};
+    border-radius: 12px;
+}}
+QFrame#quickCard:hover {{
+    border-color: {INDIGO};
+    background: #FAFBFF;
+}}
+QLabel#quickIcon {{
+    font-size: 22px;
+}}
+QLabel#quickTitle {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {NAVY};
+}}
+QLabel#quickArrow {{
+    font-size: 18px;
+    color: {INDIGO};
+    font-weight: 700;
+}}
+QLabel#quickSubtitle {{
+    color: {SLATE_500};
+    font-size: 12px;
+}}
+
+QGroupBox#nextStepsCard {{
+    background: {INDIGO_TINT};
+    border: 1px solid #C7D2FE;
+    border-radius: 10px;
+}}
+
+/* ============ TAB BAR (tweaks for badges) ============ */
+
+QTabBar::tab {{ min-width: 110px; }}
 """

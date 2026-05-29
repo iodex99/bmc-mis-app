@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
     QTableWidget,
-    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -26,70 +25,100 @@ from .review_dialogs import (
     ResolveEmployeeDialog,
     SplitEditorDialog,
 )
+from .widgets import (
+    NoScrollComboBox,
+    fill_table_with_actions,
+    setup_data_table,
+)
 
 
-def _fill(table: QTableWidget, headers: list[str], rows: list[list]) -> None:
-    table.setColumnCount(len(headers))
-    table.setHorizontalHeaderLabels(headers)
-    table.setRowCount(len(rows))
-    for r, row in enumerate(rows):
-        for c, val in enumerate(row):
-            table.setItem(r, c, QTableWidgetItem("" if val is None else str(val)))
-    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-    table.horizontalHeader().setStretchLastSection(True)
+def _warn_pill(_: int) -> tuple[str, str]:
+    return "Unmapped", "statusWarn"
 
 
-# --- Client resolution tab ---------------------------------------------------
+def _empty_state(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("emptyState")
+    label.setAlignment(Qt.AlignCenter)
+    label.setWordWrap(True)
+    return label
+
+
+# --- Client tab --------------------------------------------------------------
 
 class ClientTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rows: list[dict] = []
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "These client names appeared in your files but aren't linked to "
+            "your master list yet. Click <b>Resolve →</b> on each row to "
+            "match it to an existing client or create a new one.")
+        intro.setObjectName("pageNote")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         bar = QHBoxLayout()
+        bar.setSpacing(8)
         self.info = QLabel()
-        auto_btn = QPushButton("Auto-resolve known")
-        bulk_btn = QPushButton("Create all as new clients")
-        resolve_btn = QPushButton("Resolve selected…")
-        resolve_btn.setObjectName("primary")
-        auto_btn.clicked.connect(self._auto)
-        bulk_btn.clicked.connect(self._bulk)
-        resolve_btn.clicked.connect(self._resolve)
+        self.info.setObjectName("sectionTitle")
         bar.addWidget(self.info)
         bar.addStretch(1)
+        auto_btn = QPushButton("⚡ Auto-resolve known")
+        bulk_btn = QPushButton("➕ Create all as new")
+        auto_btn.clicked.connect(self._auto)
+        bulk_btn.clicked.connect(self._bulk)
         bar.addWidget(auto_btn)
         bar.addWidget(bulk_btn)
-        bar.addWidget(resolve_btn)
         layout.addLayout(bar)
 
-        hint = QLabel("Tip: double-click a row, or select it and click "
-                      "'Resolve selected…', to map a client.")
-        hint.setObjectName("pageNote")
-        layout.addWidget(hint)
-
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.doubleClicked.connect(self._resolve)
-        layout.addWidget(self.table)
+        setup_data_table(self.table)
+        self.table.doubleClicked.connect(
+            lambda idx: self._resolve_row(idx.row()))
+        layout.addWidget(self.table, 1)
+
+        self.empty = _empty_state(
+            "✓  Every client name is mapped.<br>"
+            "<span style='color:#64748B;'>Once you import more files, any new "
+            "names will show up here.</span>")
+        self.empty.setVisible(False)
+        layout.addWidget(self.empty, 1)
+
+    def count(self) -> int:
+        return len(self._rows)
 
     def reload(self) -> None:
+        # Always re-apply known aliases first — picks up newly-imported rows.
+        resolution.apply_known_client_aliases()
         self._rows = resolution.unresolved_clients()
-        _fill(self.table, ["Raw client name", "Seen in", "Rows"],
-              [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
-               for r in self._rows])
         n = len(self._rows)
-        self.info.setText("All clients resolved ✓" if n == 0
-                          else f"{n} unresolved client name(s)")
+        self.info.setText(
+            "All clients mapped" if n == 0
+            else f"{n} client name{'s' if n != 1 else ''} need mapping")
+        self.empty.setVisible(n == 0)
+        self.table.setVisible(n > 0)
         if n:
-            self.table.selectRow(0)
+            rows = [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
+                    for r in self._rows]
+            fill_table_with_actions(
+                self.table,
+                ["Raw client name", "Seen in", "Rows"],
+                rows,
+                action_label="Resolve →",
+                action_callback=self._resolve_row,
+                status_for_row=_warn_pill,
+                stretch_col=0,
+            )
 
     def _auto(self) -> None:
-        linked = resolution.apply_known_client_aliases()
-        QMessageBox.information(self, "Auto-resolve",
-                                f"{linked} row(s) linked via known names.")
+        n = resolution.apply_known_client_aliases()
+        QMessageBox.information(
+            self, "Auto-resolve",
+            f"{n} row(s) linked using previously saved names.")
         self.reload()
 
     def _bulk(self) -> None:
@@ -105,86 +134,105 @@ class ClientTab(QWidget):
         QMessageBox.information(self, "Done", f"{n} client(s) created.")
         self.reload()
 
-    def _resolve(self) -> None:
-        sel = {i.row() for i in self.table.selectedIndexes()}
-        if not sel:
+    def _resolve_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
             return
-        raw = self._rows[sel.pop()]["raw"]
+        raw = self._rows[idx]["raw"]
         dlg = ResolveClientDialog(raw, self)
         if dlg.exec() == ResolveClientDialog.Accepted:
             dlg.apply()
             self.reload()
 
 
-# --- Employee resolution tab -------------------------------------------------
+# --- Employee tab ------------------------------------------------------------
 
 class EmployeeTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rows: list[dict] = []
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "Employees seen in the timesheet or salary sheet that don't yet "
+            "have a master record. Resolve each row to assign their manager "
+            "and cost centre.")
+        intro.setObjectName("pageNote")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         bar = QHBoxLayout()
+        bar.setSpacing(8)
         self.info = QLabel()
-        bulk_btn = QPushButton("Create all as new employees")
-        resolve_btn = QPushButton("Resolve selected…")
-        resolve_btn.setObjectName("primary")
-        bulk_btn.clicked.connect(self._bulk)
-        resolve_btn.clicked.connect(self._resolve)
+        self.info.setObjectName("sectionTitle")
         bar.addWidget(self.info)
         bar.addStretch(1)
+        bulk_btn = QPushButton("➕ Create all as new")
+        bulk_btn.clicked.connect(self._bulk)
         bar.addWidget(bulk_btn)
-        bar.addWidget(resolve_btn)
         layout.addLayout(bar)
 
-        hint = QLabel("Tip: double-click a row, or select it and click "
-                      "'Resolve selected…', to map an employee.")
-        hint.setObjectName("pageNote")
-        layout.addWidget(hint)
-
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.doubleClicked.connect(self._resolve)
-        layout.addWidget(self.table)
+        setup_data_table(self.table)
+        self.table.doubleClicked.connect(
+            lambda idx: self._resolve_row(idx.row()))
+        layout.addWidget(self.table, 1)
+
+        self.empty = _empty_state(
+            "✓  Every employee is mapped.<br>"
+            "<span style='color:#64748B;'>New employees from future timesheet "
+            "/ salary imports will appear here.</span>")
+        self.empty.setVisible(False)
+        layout.addWidget(self.empty, 1)
+
+    def count(self) -> int:
+        return len(self._rows)
 
     def reload(self) -> None:
         self._rows = resolution.unresolved_employees()
-        _fill(self.table, ["Raw employee name", "Seen in", "Rows"],
-              [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
-               for r in self._rows])
         n = len(self._rows)
-        self.info.setText("All employees resolved ✓" if n == 0
-                          else f"{n} unresolved employee name(s)")
+        self.info.setText(
+            "All employees mapped" if n == 0
+            else f"{n} employee name{'s' if n != 1 else ''} need mapping")
+        self.empty.setVisible(n == 0)
+        self.table.setVisible(n > 0)
         if n:
-            self.table.selectRow(0)
+            rows = [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
+                    for r in self._rows]
+            fill_table_with_actions(
+                self.table,
+                ["Raw employee name", "Seen in", "Rows"],
+                rows,
+                action_label="Resolve →",
+                action_callback=self._resolve_row,
+                status_for_row=_warn_pill,
+                stretch_col=0,
+            )
 
     def _bulk(self) -> None:
         if not self._rows:
             return
         if QMessageBox.question(
                 self, "Create all as new employees",
-                f"Create {len(self._rows)} new employee record(s) from the raw "
-                "names (manager and cost centre left blank)?\n\nYou can set "
-                "those afterwards in Master Data.") != QMessageBox.Yes:
+                f"Create {len(self._rows)} new employee record(s)?\n\n"
+                "Manager and cost centre are left blank — you can fill them "
+                "in afterwards in Master Data.") != QMessageBox.Yes:
             return
         n = resolution.bulk_create_employees()
         QMessageBox.information(self, "Done", f"{n} employee(s) created.")
         self.reload()
 
-    def _resolve(self) -> None:
-        sel = {i.row() for i in self.table.selectedIndexes()}
-        if not sel:
+    def _resolve_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
             return
-        raw = self._rows[sel.pop()]["raw"]
+        raw = self._rows[idx]["raw"]
         dlg = ResolveEmployeeDialog(raw, self)
         if dlg.exec() == ResolveEmployeeDialog.Accepted:
             dlg.apply()
             self.reload()
 
 
-# --- Voucher review tab ------------------------------------------------------
+# --- Cost-centre string tab --------------------------------------------------
 
 class CcStringTab(QWidget):
     """Resolve raw Tally Cost Centre strings to (partner, manager) pairs."""
@@ -193,80 +241,107 @@ class CcStringTab(QWidget):
         super().__init__()
         self._rows: list[dict] = []
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "Tally's <b>Cost Center</b> column carries the partner / manager "
+            "behind each invoice. Map each distinct string to a partner (and "
+            "optionally a manager) — the mapping is remembered, so future "
+            "imports auto-resolve.")
+        intro.setObjectName("pageNote")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         bar = QHBoxLayout()
+        bar.setSpacing(8)
         self.info = QLabel()
-        auto_btn = QPushButton("Auto-apply known")
-        resolve_btn = QPushButton("Resolve selected…")
-        resolve_btn.setObjectName("primary")
-        auto_btn.clicked.connect(self._auto)
-        resolve_btn.clicked.connect(self._resolve)
+        self.info.setObjectName("sectionTitle")
         bar.addWidget(self.info)
         bar.addStretch(1)
+        auto_btn = QPushButton("⚡ Re-apply known")
+        auto_btn.clicked.connect(self._auto)
         bar.addWidget(auto_btn)
-        bar.addWidget(resolve_btn)
         layout.addLayout(bar)
 
-        hint = QLabel("Tip: double-click a row, or select it and click "
-                      "'Resolve selected…', to map a cost-centre string "
-                      "to a partner (and optionally a manager).")
-        hint.setObjectName("pageNote")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.doubleClicked.connect(self._resolve)
-        layout.addWidget(self.table)
+        setup_data_table(self.table)
+        self.table.doubleClicked.connect(
+            lambda idx: self._resolve_row(idx.row()))
+        layout.addWidget(self.table, 1)
+
+        self.empty = _empty_state(
+            "✓  Every Cost Centre string is mapped.<br>"
+            "<span style='color:#64748B;'>Tally invoices route to the right "
+            "partner automatically.</span>")
+        self.empty.setVisible(False)
+        layout.addWidget(self.empty, 1)
+
+    def count(self) -> int:
+        return len(self._rows)
 
     def reload(self) -> None:
+        resolution.apply_known_cc_string_mappings()
         self._rows = resolution.unresolved_cc_strings()
-        _fill(self.table, ["Cost Centre string", "Invoices"],
-              [[r["raw"], r["count"]] for r in self._rows])
         n = len(self._rows)
-        self.info.setText("All cost-centre strings mapped ✓" if n == 0
-                          else f"{n} unmapped cost-centre string(s)")
+        self.info.setText(
+            "All Cost Centre strings mapped" if n == 0
+            else f"{n} Cost Centre string{'s' if n != 1 else ''} need mapping")
+        self.empty.setVisible(n == 0)
+        self.table.setVisible(n > 0)
         if n:
-            self.table.selectRow(0)
+            rows = [[r["raw"], r["count"]] for r in self._rows]
+            fill_table_with_actions(
+                self.table, ["Cost Centre string", "Invoices"], rows,
+                action_label="Resolve →",
+                action_callback=self._resolve_row,
+                status_for_row=_warn_pill,
+                stretch_col=0,
+            )
 
     def _auto(self) -> None:
         n = resolution.apply_known_cc_string_mappings()
-        QMessageBox.information(self, "Auto-apply",
-                                f"{n} voucher split(s) updated from saved "
-                                "mappings.")
+        QMessageBox.information(
+            self, "Re-apply", f"{n} voucher split(s) updated from saved mappings.")
         self.reload()
 
-    def _resolve(self) -> None:
-        sel = {i.row() for i in self.table.selectedIndexes()}
-        if not sel:
+    def _resolve_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
             return
-        raw = self._rows[sel.pop()]["raw"]
+        raw = self._rows[idx]["raw"]
         dlg = ResolveCcStringDialog(raw, self)
         if dlg.exec() == ResolveCcStringDialog.Accepted:
             dlg.apply()
             self.reload()
 
 
+# --- Voucher review tab ------------------------------------------------------
+
 class VoucherTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rows: list[dict] = []
+        self._loading = False
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "Every voucher's amount can be split across cost centres, "
+            "managers and services. Use the filters to find what you need; "
+            "click <b>Edit splits →</b> on any row to adjust its attribution.")
+        intro.setObjectName("pageNote")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         bar = QHBoxLayout()
-        self.entity_combo = QComboBox()
-        self.period_combo = QComboBox()
-        self.kind_combo = QComboBox()
+        bar.setSpacing(8)
+        self.entity_combo = NoScrollComboBox()
+        self.period_combo = NoScrollComboBox()
+        self.kind_combo = NoScrollComboBox()
         self.kind_combo.addItem("All", None)
         self.kind_combo.addItem("Sales", config.VCH_SALES)
         self.kind_combo.addItem("Expenses", config.VCH_EXPENSE)
         for w in (self.entity_combo, self.period_combo, self.kind_combo):
             w.currentIndexChanged.connect(self.reload)
-        edit_btn = QPushButton("Edit splits…")
-        edit_btn.setObjectName("primary")
-        edit_btn.clicked.connect(self._edit)
         bar.addWidget(QLabel("Entity:"))
         bar.addWidget(self.entity_combo)
         bar.addWidget(QLabel("Period:"))
@@ -274,31 +349,37 @@ class VoucherTab(QWidget):
         bar.addWidget(QLabel("Kind:"))
         bar.addWidget(self.kind_combo)
         bar.addStretch(1)
-        bar.addWidget(edit_btn)
+        self.summary = QLabel("")
+        self.summary.setObjectName("sectionTitle")
+        bar.addWidget(self.summary)
         layout.addLayout(bar)
 
-        hint = QLabel("Tip: double-click any voucher (or select it and click "
-                      "'Edit splits…') to split its amount between cost "
-                      "centres, managers and services.")
-        hint.setObjectName("pageNote")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.doubleClicked.connect(self._edit)
-        layout.addWidget(self.table)
+        setup_data_table(self.table)
+        self.table.doubleClicked.connect(
+            lambda idx: self._edit_row(idx.row()))
+        layout.addWidget(self.table, 1)
 
-        self._loading = False
+        self.empty = _empty_state(
+            "No vouchers match these filters yet.<br>"
+            "<span style='color:#64748B;'>Try a different period or import "
+            "more files.</span>")
+        self.empty.setVisible(False)
+        layout.addWidget(self.empty, 1)
+
         self._reload_filters()
+
+    def count(self) -> int:
+        # The badge shows vouchers still needing attention (unassigned splits).
+        return sum(1 for v in self._rows if v.get("n_unassigned"))
 
     def _reload_filters(self) -> None:
         self._loading = True
         for combo, items in (
-            (self.entity_combo, [("(all)", None)] + repo.fk_options("entities")),
-            (self.period_combo, [("(all)", None)] +
+            (self.entity_combo,
+             [("(all entities)", None)] + repo.fk_options("entities")),
+            (self.period_combo,
+             [("(all periods)", None)] +
              [(p, p) for p in vsvc.list_periods()]),
         ):
             keep = combo.currentData()
@@ -318,32 +399,67 @@ class VoucherTab(QWidget):
             self.entity_combo.currentData(),
             self.period_combo.currentData(),
             self.kind_combo.currentData())
-        out = []
-        for v in self._rows:
-            if v["n_unassigned"]:
-                splits = f"⚠ {v['n_unassigned']} unassigned"
-            else:
-                splits = f"{v['n_splits']} split(s)"
-            out.append([v["txn_date"] or "", v["vch_no"], v["party_name"],
-                        v["client_name"] or "—", v["kind"],
-                        fmt_inr(v['net_amount'], 2), splits])
-        _fill(self.table, ["Date", "Vch No.", "Party", "Client", "Kind",
-                           "Net Amount", "Splits"], out)
+        n = len(self._rows)
+        unassigned = self.count()
+        if unassigned:
+            self.summary.setText(
+                f"{n} voucher{'s' if n != 1 else ''}  ·  "
+                f"<span style='color:#B91C1C;'>{unassigned} unassigned</span>")
+        else:
+            self.summary.setText(f"{n} voucher{'s' if n != 1 else ''}")
+        self.empty.setVisible(n == 0)
+        self.table.setVisible(n > 0)
 
-    def _edit(self) -> None:
-        sel = {i.row() for i in self.table.selectedIndexes()}
-        if not sel:
+        if n == 0:
             return
-        voucher = self._rows[sel.pop()]
+
+        rows = []
+        labels = []
+        for v in self._rows:
+            rows.append([
+                v["txn_date"] or "",
+                v["vch_no"], v["party_name"],
+                v["client_name"] or "—",
+                v["kind"].capitalize(),
+                fmt_inr(v["net_amount"], 0),
+                (f"⚠ {v['n_unassigned']} unassigned"
+                 if v["n_unassigned"] else f"{v['n_splits']} split(s)"),
+            ])
+            labels.append("Edit splits →")
+
+        def status_for(i):
+            return ("Needs fix" if self._rows[i]["n_unassigned"]
+                    else "OK"), \
+                ("statusWarn" if self._rows[i]["n_unassigned"]
+                    else "statusOk")
+
+        fill_table_with_actions(
+            self.table,
+            ["Date", "Vch No.", "Party", "Client", "Kind",
+             "Net amount", "Splits"],
+            rows,
+            action_label=labels,
+            action_callback=self._edit_row,
+            status_for_row=status_for,
+            stretch_col=2,
+        )
+
+    def _edit_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        voucher = self._rows[idx]
         dlg = SplitEditorDialog(voucher, self)
         if dlg.exec() == SplitEditorDialog.Accepted:
             self.reload()
 
 
-# --- The page ----------------------------------------------------------------
+# --- the page ----------------------------------------------------------------
+
+_TAB_BASE_NAMES = ["Clients", "Employees", "Cost Centres", "Vouchers"]
+
 
 class ReviewPage(QWidget):
-    """Hosts the client, employee and voucher review tabs."""
+    """Hosts the client, employee, cc-string and voucher review tabs."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -353,8 +469,9 @@ class ReviewPage(QWidget):
         heading = QLabel("Review & Map")
         heading.setObjectName("pageHeading")
         layout.addWidget(heading)
-        note = QLabel("Resolve unknown clients and employees, and split / "
-                      "attribute vouchers to 'Partner – Manager' strings.")
+        note = QLabel(
+            "Resolve unknown clients, employees and Cost Centre strings, "
+            "then split / attribute vouchers across partners and services.")
         note.setObjectName("pageNote")
         layout.addWidget(note)
 
@@ -363,18 +480,23 @@ class ReviewPage(QWidget):
         self.employee_tab = EmployeeTab()
         self.cc_tab = CcStringTab()
         self.voucher_tab = VoucherTab()
-        self.tabs.addTab(self.client_tab, "Clients")
-        self.tabs.addTab(self.employee_tab, "Employees")
-        self.tabs.addTab(self.cc_tab, "Cost Centres")
-        self.tabs.addTab(self.voucher_tab, "Vouchers & Splits")
+        self.tabs.addTab(self.client_tab, _TAB_BASE_NAMES[0])
+        self.tabs.addTab(self.employee_tab, _TAB_BASE_NAMES[1])
+        self.tabs.addTab(self.cc_tab, _TAB_BASE_NAMES[2])
+        self.tabs.addTab(self.voucher_tab, _TAB_BASE_NAMES[3])
         self.tabs.currentChanged.connect(self._refresh)
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        # Apply saved mappings first so badges show accurate counts.
         resolution.apply_known_client_aliases()
         resolution.apply_known_cc_string_mappings()
-        self._refresh(self.tabs.currentIndex())
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if hasattr(tab, "reload"):
+                tab.reload()
+        self._refresh_badges()
 
     def _refresh(self, index: int) -> None:
         widget = self.tabs.widget(index)
@@ -382,3 +504,11 @@ class ReviewPage(QWidget):
             self.voucher_tab._reload_filters()
         elif hasattr(widget, "reload"):
             widget.reload()
+        self._refresh_badges()
+
+    def _refresh_badges(self) -> None:
+        for i, name in enumerate(_TAB_BASE_NAMES):
+            tab = self.tabs.widget(i)
+            n = tab.count() if hasattr(tab, "count") else 0
+            label = f"{name}  ({n})" if n else name
+            self.tabs.setTabText(i, label)
