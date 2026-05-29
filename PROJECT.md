@@ -1,6 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-05-22
+> Living document. Updated as we discuss. Last updated: 2026-05-29
+>
+> Current version: **v0.3.15** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -232,6 +234,154 @@ hourly-rate basis, MIS views, partner remuneration.
 
 **Status: all 8 phases complete.** App runs via `python run.py`; build the
 Windows .exe with `python build.py`.
+
+---
+
+## 16. Post-launch iterations (v0.2.0 → v0.3.15)
+
+Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
+operator's PC via the in-app updater. Highlights of every release in order:
+
+### v0.2.0 — In-app updater pipeline
+- `app/services/updater.py` checks GitHub Releases (using an embedded
+  fine-grained PAT) and downloads + applies updates in place.
+- Settings page added with version info, "Check for updates", auto-check
+  toggle, and a status-bar pill for available updates.
+- Schema migration runner (`MIGRATIONS = [(version, sql), …]` in
+  `database.py`) so future schema changes apply cleanly to installed copies.
+- GitHub Actions workflow (`.github/workflows/release.yml`) auto-builds the
+  `.exe` on every `vX.Y.Z` tag push.
+
+### v0.3.0 — Sales Register support + service-wise MIS
+- `.xls` reading via `xlrd` (Tally exports Sales Register in legacy format).
+- New **flat-row sales parser** (separate from the voucher-block parser used
+  for purchase) — one voucher per invoice row.
+- Column-mapping dialog gains a **per-column role** section: each column is
+  marked **Ignore / Service / Tax**. Service columns become revenue splits;
+  tax/TDS/round-off columns are summed into the tax total.
+- New master table `cc_string_mappings` (schema v3): the raw Tally
+  "Cost Center" string ("Mr. Shreyans Dedhia", "Prashant - Shreyans", etc.)
+  → (partner cost-centre, manager).
+- New Review tab **Cost Centres** with the same fuzzy-suggest + map flow.
+- ResolveCcStringDialog includes inline "+ New manager" creation for
+  managers not in the master yet.
+- Cancelled invoices (`(cancelled)` cost-centre) are skipped at import.
+
+### v0.3.1 → v0.3.6 — Plumbing for the updater
+- Indian number format (`fmt_inr`) used throughout UI + workbook.
+- Post-import prompt: "X unmapped clients / Y employees / Z cc-strings —
+  Resolve now / Later" with one-click navigation to Review.
+- Updater fixes:
+  - Background-thread workers were getting GC'd before the signal fired —
+    hold `self._worker` references explicitly.
+  - GitHub `/releases/latest` returns 404 when nothing is flagged "latest";
+    fall back to listing `/releases` and picking the highest semver.
+  - PAT permissions matter — fine-grained with `Contents: read-only` works.
+
+### v0.3.7 → v0.3.10 — UI scrollability + headless updater
+- Column Mapping dialog wrapped in a `QScrollArea` so OK/Cancel never fall
+  off the screen.
+- `NoScrollComboBox` / `NoScrollSpinBox` (in `app/ui/widgets.py`) so the
+  mouse wheel scrolls the dialog instead of changing dropdown values.
+- Update helper hardened: `CREATE_NO_WINDOW` flag (no visible cmd window),
+  PID-based wait (more reliable than image name), 5s post-PID sleep so DLL
+  handles release, `update.log` written into the install folder so failures
+  are debuggable, temp-folder cleanup removed (was hanging on the bat's
+  own working dir).
+
+### v0.3.12 — Whitespace-insensitive name matching
+- Client → voucher matching now uses Python `norm()` (collapses runs of
+  whitespace) instead of SQL `LOWER(TRIM(…))`. Without this the operator
+  would map "Daftary -Descon Engineering Private  Limited" (two spaces) and
+  it'd never link to the voucher row because SQL TRIM keeps the double
+  space. Same fix already in place for cc_string mappings.
+- Voucher Split Editor combos / amount spinbox use NoScroll variants.
+
+### v0.3.13 — UX overhaul
+- **Inline row action buttons** on every Review and Master Data table:
+  `Resolve →` / `Edit` (indigo primary) and `Deactivate` / `Delete`
+  (light red). No more "double-click a row to do anything".
+- **Status pills** per row: yellow "Unmapped", green "Active", grey
+  "Inactive", red "Needs fix".
+- **Tab badges** show unresolved / active counts: "Clients (4)",
+  "Cost Centres (3)", "Vouchers (12)".
+- **Dashboard welcome state**: when there's no data, a friendly
+  gradient panel with one-click jumps to Import or Master Data.
+- **Dashboard metric cards** (revenue / costs / profit / items to
+  review) with accent-bordered tiles + quick-action cards that emit a
+  `navigate` signal to jump to the relevant page.
+- Empty states: "✓ Every client name is mapped" instead of empty tables.
+- Stylesheet polish: hover effects on quick cards, accent borders on
+  metric tiles, status pill colors, danger-zone styling.
+
+### v0.3.14 — Sales-Register-aware client cost-centre inference
+- `infer_client_cost_centres()`: walks every client without a
+  `cost_centre_id` and sets it to the dominant cost centre seen on its
+  sales voucher splits.
+- `suggest_cc_for_raw_client(raw)`: looks up the dominant cost centre for
+  a raw client name. Used to pre-fill the **Resolve Client** dialog's
+  cost-centre dropdown with a green "✓ inferred from Sales Register"
+  confirmation banner.
+- Inference runs at end of import commit, in `apply_known_client_aliases`,
+  in `link_client` / `create_client` / `bulk_create_clients`, and after
+  `map_cc_string`.
+
+### v0.3.15 — Auto-inference for everything + Clear All Data
+- Auto-inference extended to **every link the system can derive**:
+  - `infer_employee_cost_centres()` — Salary sheet `cost centre` →
+    `employees.default_cost_centre_id`.
+  - `infer_employee_managers()` — Timesheet `Reporting Manager` →
+    `employees.manager_id` (only when that name fuzzy-matches a manager
+    already in the master).
+  - `infer_manager_cost_centres()` — dominant cost centre of an
+    manager's employees → `managers.cost_centre_id`.
+  - `infer_client_cost_centres()` — as in v0.3.14.
+- Umbrella function **`infer_all_masters()`** runs all four passes;
+  called after import commit, every resolve dialog, every bulk-create
+  and every cc-string mapping save.
+- All inference is whitespace-insensitive (via `norm()`), idempotent,
+  and **never overwrites operator-set values**.
+- New module **`app/services/reset.py`** — `reset_all_data()` deletes
+  every row from every user table (foreign-keys-off so order doesn't
+  matter), resets `sqlite_sequence`, then re-runs `_seed()` to restore
+  firm defaults.
+- New **Danger Zone** section in Settings:
+  - **Clear all data…** — two-step confirmation (warning + type
+    `RESET`), then wipe + relaunch prompt.
+  - **Open data folder** — opens `%LOCALAPPDATA%\BMC MIS\` in Explorer.
+- Stylesheet adds `QGroupBox#dangerZone` styling (red border, light red
+  background, red title).
+
+---
+
+## 17. Operator's data location
+
+| What | Path on the installed PC |
+|---|---|
+| Database (everything the app knows) | `%LOCALAPPDATA%\BMC MIS\mis.db` |
+| Generated MIS workbooks | `%LOCALAPPDATA%\BMC MIS\exports\` |
+| Update helper log (when applicable) | `<install folder>\update.log` |
+
+The data folder is **completely separate from the install folder**, so the
+auto-updater never touches it. Backup = close the app, copy `mis.db`.
+
+---
+
+## 18. Workflow for shipping an update
+
+From the dev PC:
+
+1. Make code changes.
+2. Bump `__version__` in `app/__init__.py`.
+3. `git commit -am "..." && git push`.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+GitHub Actions takes over: builds the `.exe` (embedding the
+`UPDATER_TOKEN` PAT from repo secrets), zips the output, attaches it to a
+new Release with `make_latest: true`. Within a minute or two the installed
+copy's silent auto-check on launch picks it up; the operator clicks the
+pill in the status bar → Install update → app restarts on the new version
+hands-off.
 
 **Verified parser behaviour (sample files):**
 - Purchase register: voucher blocks detected, GST/TDS/round-off separated into
