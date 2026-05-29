@@ -158,8 +158,14 @@ def commit_result(result: ParseResult, entity_id: int | None,
                  _entity_id(conn, s.raw_entity), s.raw_entity, s.category,
                  s.salary_paid, s.reimbursement),
             )
-    # Apply any saved cc-string -> (partner, manager) mappings to the new
-    # vouchers (whitespace-insensitive, handled in the resolution service).
-    from ..services.resolution import apply_known_cc_string_mappings
+    # Apply any saved cc-string -> (partner, manager) mappings, then
+    # propagate the resolved cost centres to any matching client masters.
+    from ..services.resolution import (
+        apply_known_client_aliases,
+        apply_known_cc_string_mappings,
+        infer_client_cost_centres,
+    )
     apply_known_cc_string_mappings()
+    apply_known_client_aliases()       # also infers client cost centres
+    infer_client_cost_centres()        # belt-and-braces for new clients
     return batch_id

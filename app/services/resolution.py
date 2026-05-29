@@ -68,7 +68,10 @@ def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
 
 
 def apply_known_client_aliases() -> int:
-    """Auto-link unresolved rows whose raw name matches a known client/alias."""
+    """Auto-link unresolved rows whose raw name matches a known client/alias.
+
+    Also infers client → cost-centre links from the freshly-linked vouchers.
+    """
     with transaction() as conn:
         pairs: dict[str, int] = {}
         for r in conn.execute("SELECT id, canonical_name FROM clients"):
@@ -76,7 +79,9 @@ def apply_known_client_aliases() -> int:
         for r in conn.execute(
                 "SELECT client_id, alias_text FROM client_aliases"):
             pairs[norm(r["alias_text"])] = r["client_id"]
-        return _apply_client_norm_mapping(conn, pairs)
+        linked = _apply_client_norm_mapping(conn, pairs)
+    infer_client_cost_centres()
+    return linked
 
 
 def unresolved_clients() -> list[dict]:
@@ -119,12 +124,17 @@ def link_client(raw: str, client_id: int) -> int:
             "INSERT OR IGNORE INTO client_aliases (client_id, alias_text, source) "
             "VALUES (?, ?, 'tally')", (client_id, raw))
         n = _link_client_rows(conn, raw, client_id)
+    infer_client_cost_centres()
     return n
 
 
 def create_client(raw: str, canonical_name: str,
                    cost_centre_id: int | None) -> int:
     """Create a new client from a raw name and link all matching rows."""
+    # If the operator didn't pick a cost centre, use the one we can infer from
+    # the underlying sales vouchers.
+    if cost_centre_id is None:
+        cost_centre_id = suggest_cc_for_raw_client(raw)
     with transaction() as conn:
         cid = conn.execute(
             "INSERT INTO clients (canonical_name, cost_centre_id) VALUES (?, ?)",
@@ -142,11 +152,73 @@ def _link_client_rows(conn, raw: str, client_id: int) -> int:
     return _apply_client_norm_mapping(conn, {norm(raw): client_id})
 
 
+def infer_client_cost_centres() -> int:
+    """For every client without a cost centre, set it to the dominant cost
+    centre seen on its sales voucher splits.
+
+    Tally's Sales Register carries the partner ("Cost Center" column) right
+    next to the client name. Once the operator has mapped those cost-centre
+    strings to partners, we can flow that information into the clients master
+    so the operator doesn't have to set it manually on every client.
+
+    Returns the number of clients updated. Existing cost-centre assignments
+    are never overwritten.
+    """
+    updated = 0
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT c.id, "
+            "  (SELECT s.cost_centre_id "
+            "     FROM voucher_splits s "
+            "     JOIN vouchers v ON v.id = s.voucher_id "
+            "     WHERE v.kind = 'sales' AND v.client_id = c.id "
+            "       AND s.cost_centre_id IS NOT NULL "
+            "     GROUP BY s.cost_centre_id "
+            "     ORDER BY COUNT(*) DESC LIMIT 1) AS suggested "
+            "FROM clients c "
+            "WHERE c.cost_centre_id IS NULL AND c.active = 1").fetchall()
+        for r in rows:
+            if r["suggested"] is not None:
+                conn.execute(
+                    "UPDATE clients SET cost_centre_id = ? WHERE id = ?",
+                    (r["suggested"], r["id"]))
+                updated += 1
+    return updated
+
+
+def suggest_cc_for_raw_client(raw: str) -> int | None:
+    """Return the dominant cost-centre id seen on sales vouchers whose party
+    matches *raw*, or ``None``. Used to pre-fill the resolve dialog."""
+    if not raw:
+        return None
+    key = norm(raw)
+    with transaction() as conn:
+        # Pull all matching vouchers in Python so whitespace differences in
+        # party_name don't kill the match.
+        rows = conn.execute(
+            "SELECT v.id, v.party_name "
+            "FROM vouchers v WHERE v.kind = 'sales' "
+            "AND v.party_name <> ''").fetchall()
+        ids = [r["id"] for r in rows if norm(r["party_name"]) == key]
+        if not ids:
+            return None
+        ph = ",".join("?" * len(ids))
+        row = conn.execute(
+            f"SELECT s.cost_centre_id, COUNT(*) AS n "
+            f"FROM voucher_splits s "
+            f"WHERE s.voucher_id IN ({ph}) "
+            f"AND s.cost_centre_id IS NOT NULL "
+            f"GROUP BY s.cost_centre_id ORDER BY n DESC LIMIT 1",
+            ids).fetchone()
+    return row["cost_centre_id"] if row else None
+
+
 def bulk_create_clients() -> int:
     """Create a client master record for every still-unresolved raw name.
 
-    Cost centre is left unassigned — the operator sets it later in Master Data
-    or the Vouchers tab. A one-time escape hatch for the first big import.
+    Cost centre is inferred from the underlying sales vouchers when possible;
+    otherwise it's left unassigned and the operator can set it later in
+    Master Data. A one-shot escape hatch for the first big import.
     """
     count = 0
     for item in unresolved_clients():
@@ -157,10 +229,14 @@ def bulk_create_clients() -> int:
                 (norm(raw),)).fetchone()
         cid = exists["id"] if exists else None
         if cid is None:
-            cid = create_client(raw, raw, None)
+            cid = create_client(raw, raw, None)        # auto-infers CC
         else:
             link_client(raw, cid)
         count += 1
+    # One more sweep — bulk-create just created N clients; any that still
+    # have NULL cost centre but linked to vouchers with resolved splits
+    # should pick those up.
+    infer_client_cost_centres()
     return count
 
 
@@ -321,7 +397,10 @@ def map_cc_string(raw: str, cost_centre_id: int | None,
             "  manager_id = excluded.manager_id, "
             "  active = 1",
             (raw, cost_centre_id, manager_id))
-    return apply_known_cc_string_mappings()
+    n = apply_known_cc_string_mappings()
+    # Now that cost centres are populated on splits, clients can pick them up.
+    infer_client_cost_centres()
+    return n
 
 
 def _bump(agg: dict[str, dict], raw: str, source: str, n: int) -> None:

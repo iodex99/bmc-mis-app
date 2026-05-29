@@ -127,11 +127,16 @@ class ClientTab(QWidget):
         if QMessageBox.question(
                 self, "Create all as new clients",
                 f"Create {len(self._rows)} new client record(s) from the raw "
-                "names (cost centre left unassigned)?\n\nYou can set cost "
-                "centres afterwards in Master Data.") != QMessageBox.Yes:
+                "names?\n\nWhere the Sales Register's Cost Center column has a "
+                "saved partner mapping, the cost centre is filled in "
+                "automatically; otherwise it's left blank for you to set "
+                "later in Master Data.") != QMessageBox.Yes:
             return
         n = resolution.bulk_create_clients()
-        QMessageBox.information(self, "Done", f"{n} client(s) created.")
+        QMessageBox.information(
+            self, "Done",
+            f"{n} client(s) created. Open the Master Data → Clients tab to "
+            "review which ones got a cost centre auto-assigned.")
         self.reload()
 
     def _resolve_row(self, idx: int) -> None:

@@ -74,10 +74,24 @@ class ResolveClientDialog(QDialog):
         layout.addWidget(self.create_radio)
         form = QFormLayout()
         self.name_edit = QLineEdit(raw)
-        self.cc_combo = _combo(repo.fk_options("cost_centres"), none_label="(unassigned)")
+        # If the Tally Sales Register already told us the partner for this
+        # client (via the Cost Center column → cc-string mapping), pre-select
+        # it. The operator can change it before saving.
+        suggested_cc = resolution.suggest_cc_for_raw_client(raw)
+        self.cc_combo = _combo(
+            repo.fk_options("cost_centres"),
+            current=suggested_cc,
+            none_label="(unassigned)")
         form.addRow("Client name:", self.name_edit)
         form.addRow("Cost centre:", self.cc_combo)
-        form.addRow("", QLabel("New clients without a cost centre can be set later."))
+        if suggested_cc is not None:
+            note = QLabel(
+                "<span style='color:#166534;'>✓ Cost centre inferred from the "
+                "Sales Register's Cost Center column. Change it if needed.</span>")
+            note.setWordWrap(True)
+            form.addRow("", note)
+        else:
+            form.addRow("", QLabel("New clients without a cost centre can be set later."))
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
