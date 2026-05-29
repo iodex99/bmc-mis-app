@@ -9,16 +9,19 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 from rapidfuzz import fuzz
 
@@ -54,17 +57,35 @@ class ColumnMappingDialog(QDialog):
         self.file_type = file_type
         self.fields = fields_for(file_type)
         self.setWindowTitle("Map Columns to Fields")
-        self.resize(960, 760)
+        self.resize(980, 720)
+        self.setMinimumSize(720, 500)
 
+        # The dialog itself stays a fixed shell: title at top, OK/Cancel at the
+        # bottom, and a scroll area in the middle for everything else — so
+        # the buttons never get pushed off-screen no matter how many service
+        # columns a file has.
         root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
         root.addWidget(QLabel(
             "Set the header row, then map each field to its column. This "
             "layout is remembered — you only do it once per file format."))
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll_body = QWidget()
+        body = QVBoxLayout(scroll_body)
+        body.setContentsMargins(0, 0, 4, 0)
+        body.setSpacing(10)
+        scroll.setWidget(scroll_body)
+        root.addWidget(scroll, 1)
+
         # --- preview table --------------------------------------------------
         self.preview = QTableWidget()
         self.preview.setEditTriggers(QTableWidget.NoEditTriggers)
-        root.addWidget(self.preview, 2)
+        self.preview.setMinimumHeight(180)
+        body.addWidget(self.preview)
 
         # --- header row selector -------------------------------------------
         hdr_row = QHBoxLayout()
@@ -74,7 +95,7 @@ class ColumnMappingDialog(QDialog):
         self.header_spin.valueChanged.connect(self._refresh_labels)
         hdr_row.addWidget(self.header_spin)
         hdr_row.addStretch(1)
-        root.addLayout(hdr_row)
+        body.addLayout(hdr_row)
 
         # --- field -> column combos ----------------------------------------
         box = QGroupBox("Field mapping")
@@ -85,7 +106,7 @@ class ColumnMappingDialog(QDialog):
             self.combos[f.key] = combo
             label = f.label + (" *" if f.required else "")
             form.addRow(label, combo)
-        root.addWidget(box)
+        body.addWidget(box)
 
         # --- per-column roles (sales only) ---------------------------------
         self.roles_box: QGroupBox | None = None
@@ -107,8 +128,11 @@ class ColumnMappingDialog(QDialog):
             self.role_table.horizontalHeader().setStretchLastSection(True)
             self.role_table.setEditTriggers(
                 QAbstractItemView.NoEditTriggers)
+            self.role_table.setMinimumHeight(200)
             rb.addWidget(self.role_table)
-            root.addWidget(self.roles_box, 2)
+            body.addWidget(self.roles_box)
+
+        body.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
