@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -128,6 +131,28 @@ class SettingsPage(QWidget):
             u.addWidget(self.auto_check)
 
         root.addWidget(upd)
+
+        # --- danger zone ----------------------------------------------------
+        danger = QGroupBox("Danger zone")
+        danger.setObjectName("dangerZone")
+        d = QVBoxLayout(danger)
+        d.addWidget(QLabel(
+            "Permanently delete every imported voucher, timesheet and salary "
+            "row, plus every mapping and operator-created master record. "
+            "Firm masters (entities, partners, managers) are reset to their "
+            "factory defaults. This cannot be undone."))
+        reset_row = QHBoxLayout()
+        reset_btn = QPushButton("Clear all data…")
+        reset_btn.setObjectName("danger")
+        reset_btn.clicked.connect(self._reset_all)
+        open_folder_btn = QPushButton("Open data folder")
+        open_folder_btn.clicked.connect(self._open_data_folder)
+        reset_row.addWidget(open_folder_btn)
+        reset_row.addStretch(1)
+        reset_row.addWidget(reset_btn)
+        d.addLayout(reset_row)
+        root.addWidget(danger)
+
         root.addStretch(1)
 
     # -- update flow ---------------------------------------------------------
@@ -205,6 +230,58 @@ class SettingsPage(QWidget):
             QMessageBox.critical(self, "Update failed", str(exc))
             self.install_btn.setEnabled(True)
             self.check_btn.setEnabled(True)
+
+    # -- danger zone ---------------------------------------------------------
+    def _reset_all(self) -> None:
+        first = QMessageBox.warning(
+            self, "Clear all data?",
+            "<b>This will permanently delete:</b>"
+            "<ul>"
+            "<li>All imported vouchers, timesheets and salary rows</li>"
+            "<li>All client / employee / cost-centre-string mappings</li>"
+            "<li>All saved column-mapping templates</li>"
+            "<li>All operator-created clients, employees, services and "
+            "targets</li>"
+            "</ul>"
+            "<p>Firm masters (entities, partners and the 4 named managers) "
+            "are reset to factory defaults.</p>"
+            "<p><b>This cannot be undone.</b></p>",
+            QMessageBox.Cancel | QMessageBox.Yes, QMessageBox.Cancel)
+        if first != QMessageBox.Yes:
+            return
+
+        text, ok = QInputDialog.getText(
+            self, "Final confirmation",
+            "Type <b>RESET</b> (capitals) to confirm:",
+            QLineEdit.Normal)
+        if not ok or text.strip() != "RESET":
+            QMessageBox.information(self, "Cancelled", "No changes made.")
+            return
+
+        from ..services.reset import reset_all_data
+        try:
+            reset_all_data()
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Reset failed",
+                f"Could not clear data:\n\n{exc}")
+            return
+
+        QMessageBox.information(
+            self, "Done",
+            "All data cleared. The app will close now — relaunch to start "
+            "fresh.")
+        QApplication.instance().quit()
+
+    def _open_data_folder(self) -> None:
+        import os
+        from .. import config
+        try:
+            os.startfile(str(config.DATA_DIR))  # noqa: S606 (Windows)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Couldn't open",
+                f"Couldn't open {config.DATA_DIR}:\n\n{exc}")
 
     # -- thread plumbing -----------------------------------------------------
     def _run_thread(self, worker: QObject, on_finished) -> None:

@@ -80,7 +80,7 @@ def apply_known_client_aliases() -> int:
                 "SELECT client_id, alias_text FROM client_aliases"):
             pairs[norm(r["alias_text"])] = r["client_id"]
         linked = _apply_client_norm_mapping(conn, pairs)
-    infer_client_cost_centres()
+    infer_all_masters()
     return linked
 
 
@@ -124,7 +124,7 @@ def link_client(raw: str, client_id: int) -> int:
             "INSERT OR IGNORE INTO client_aliases (client_id, alias_text, source) "
             "VALUES (?, ?, 'tally')", (client_id, raw))
         n = _link_client_rows(conn, raw, client_id)
-    infer_client_cost_centres()
+    infer_all_masters()
     return n
 
 
@@ -186,6 +186,126 @@ def infer_client_cost_centres() -> int:
     return updated
 
 
+def infer_employee_cost_centres() -> int:
+    """For every employee without a default cost centre, set it to the
+    dominant cost centre seen on their salary rows (matching by name +
+    aliases, whitespace-insensitive)."""
+    updated = 0
+    with transaction() as conn:
+        emp_lookup: dict[str, int] = {
+            norm(e["name"]): e["id"]
+            for e in conn.execute(
+                "SELECT id, name FROM employees "
+                "WHERE default_cost_centre_id IS NULL AND active = 1")}
+        if not emp_lookup:
+            return 0
+        ids = set(emp_lookup.values())
+        for a in conn.execute(
+                "SELECT employee_id, alias_text FROM employee_aliases"):
+            if a["employee_id"] in ids:
+                emp_lookup[norm(a["alias_text"])] = a["employee_id"]
+
+        counts: dict[int, dict[int, int]] = {}
+        for r in conn.execute(
+                "SELECT employee_name, cost_centre_id FROM salary_entries "
+                "WHERE cost_centre_id IS NOT NULL AND employee_name <> ''"):
+            eid = emp_lookup.get(norm(r["employee_name"]))
+            if eid is not None:
+                bucket = counts.setdefault(eid, {})
+                bucket[r["cost_centre_id"]] = bucket.get(r["cost_centre_id"], 0) + 1
+        for eid, cc_counts in counts.items():
+            dominant = max(cc_counts, key=cc_counts.get)
+            conn.execute(
+                "UPDATE employees SET default_cost_centre_id = ? WHERE id = ?",
+                (dominant, eid))
+            updated += 1
+    return updated
+
+
+def infer_employee_managers() -> int:
+    """For every employee without a manager, infer the manager from the
+    dominant Reporting Manager column on their timesheet entries — only when
+    that name fuzzy-matches a manager already in the master list."""
+    updated = 0
+    with transaction() as conn:
+        mgr_lookup: dict[str, int] = {
+            norm(m["name"]): m["id"]
+            for m in conn.execute(
+                "SELECT id, name FROM managers WHERE active = 1")}
+        if not mgr_lookup:
+            return 0
+
+        emp_lookup: dict[str, int] = {
+            norm(e["name"]): e["id"]
+            for e in conn.execute(
+                "SELECT id, name FROM employees "
+                "WHERE manager_id IS NULL AND active = 1")}
+        if not emp_lookup:
+            return 0
+        ids = set(emp_lookup.values())
+        for a in conn.execute(
+                "SELECT employee_id, alias_text FROM employee_aliases"):
+            if a["employee_id"] in ids:
+                emp_lookup[norm(a["alias_text"])] = a["employee_id"]
+
+        counts: dict[int, dict[int, int]] = {}
+        for r in conn.execute(
+                "SELECT emp_name, reporting_manager FROM timesheet_entries "
+                "WHERE reporting_manager <> '' AND emp_name <> ''"):
+            eid = emp_lookup.get(norm(r["emp_name"]))
+            mid = mgr_lookup.get(norm(r["reporting_manager"]))
+            if eid is None or mid is None:
+                continue
+            bucket = counts.setdefault(eid, {})
+            bucket[mid] = bucket.get(mid, 0) + 1
+        for eid, mgr_counts in counts.items():
+            dominant = max(mgr_counts, key=mgr_counts.get)
+            conn.execute(
+                "UPDATE employees SET manager_id = ? WHERE id = ?",
+                (dominant, eid))
+            updated += 1
+    return updated
+
+
+def infer_manager_cost_centres() -> int:
+    """For every manager without a cost centre, take the dominant cost centre
+    of the employees who report to them."""
+    updated = 0
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT m.id, "
+            "  (SELECT e.default_cost_centre_id "
+            "     FROM employees e "
+            "     WHERE e.manager_id = m.id "
+            "       AND e.default_cost_centre_id IS NOT NULL "
+            "     GROUP BY e.default_cost_centre_id "
+            "     ORDER BY COUNT(*) DESC LIMIT 1) AS suggested "
+            "FROM managers m "
+            "WHERE m.cost_centre_id IS NULL AND m.active = 1").fetchall()
+        for r in rows:
+            if r["suggested"] is not None:
+                conn.execute(
+                    "UPDATE managers SET cost_centre_id = ? WHERE id = ?",
+                    (r["suggested"], r["id"]))
+                updated += 1
+    return updated
+
+
+def infer_all_masters() -> dict[str, int]:
+    """Run every auto-inference pass over the masters. Idempotent, cheap, and
+    safe to call after any operator action or import.
+
+    Order matters: employee cost-centres come from salary; employee managers
+    come from timesheet; manager cost-centres come from their employees; and
+    client cost-centres come from sales voucher splits."""
+    return {
+        "employees_cc": infer_employee_cost_centres(),
+        "employees_mgr": infer_employee_managers(),
+        "managers_cc": infer_manager_cost_centres(),
+        "clients_cc": infer_client_cost_centres(),
+    }
+
+
 def suggest_cc_for_raw_client(raw: str) -> int | None:
     """Return the dominant cost-centre id seen on sales vouchers whose party
     matches *raw*, or ``None``. Used to pre-fill the resolve dialog."""
@@ -236,7 +356,7 @@ def bulk_create_clients() -> int:
     # One more sweep — bulk-create just created N clients; any that still
     # have NULL cost centre but linked to vouchers with resolved splits
     # should pick those up.
-    infer_client_cost_centres()
+    infer_all_masters()
     return count
 
 
@@ -292,6 +412,7 @@ def link_employee(raw: str, employee_id: int, source: str = "timesheet") -> None
         conn.execute(
             "INSERT OR IGNORE INTO employee_aliases (employee_id, alias_text, source) "
             "VALUES (?, ?, ?)", (employee_id, raw, source))
+    infer_all_masters()
 
 
 def create_employee(raw: str, name: str, category: str | None,
@@ -308,6 +429,8 @@ def create_employee(raw: str, name: str, category: str | None,
                 "INSERT OR IGNORE INTO employee_aliases "
                 "(employee_id, alias_text, source) VALUES (?, ?, 'timesheet')",
                 (eid, raw))
+    # If the operator didn't pick manager / cost centre, see if we can.
+    infer_all_masters()
     return int(eid)
 
 
@@ -316,12 +439,15 @@ def create_employee(raw: str, name: str, category: str | None,
 def bulk_create_employees() -> int:
     """Create an employee master record for every still-unresolved raw name.
 
-    Manager and cost centre are left blank for the operator to fill in later.
+    Manager and cost centre are auto-inferred from the timesheet / salary
+    sheet after creation; whatever can't be inferred is left blank for the
+    operator to fill in later.
     """
     count = 0
     for item in unresolved_employees():
         create_employee(item["raw"], item["raw"], "Employee", None, None)
         count += 1
+    infer_all_masters()
     return count
 
 
@@ -399,7 +525,7 @@ def map_cc_string(raw: str, cost_centre_id: int | None,
             (raw, cost_centre_id, manager_id))
     n = apply_known_cc_string_mappings()
     # Now that cost centres are populated on splits, clients can pick them up.
-    infer_client_cost_centres()
+    infer_all_masters()
     return n
 
 

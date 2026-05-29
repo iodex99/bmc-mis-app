@@ -569,4 +569,15 @@ QGroupBox#nextStepsCard {{
 /* ============ TAB BAR (tweaks for badges) ============ */
 
 QTabBar::tab {{ min-width: 110px; }}
+
+/* ============ DANGER ZONE ============ */
+
+QGroupBox#dangerZone {{
+    border: 1px solid #FCA5A5;
+    background: #FEF2F2;
+}}
+QGroupBox#dangerZone::title {{
+    color: #B91C1C;
+    background: #FEF2F2;
+}}
 """
