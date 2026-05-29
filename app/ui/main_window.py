@@ -21,6 +21,7 @@ from .dashboard_page import DashboardPage
 from .generate_page import GeneratePage
 from .import_page import ImportPage
 from .master_data import MasterDataPage
+from .records_page import RecordsPage
 from .review_page import ReviewPage
 from .settings_page import SettingsPage
 
@@ -30,6 +31,7 @@ NAV_ITEMS = [
     ("Dashboard", DashboardPage),
     ("Import Files", ImportPage),
     ("Review & Map", ReviewPage),
+    ("Records", RecordsPage),
     ("Master Data", MasterDataPage),
     ("Generate MIS", GeneratePage),
     ("Settings", SettingsPage),

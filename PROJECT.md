@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.15** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.16** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -237,7 +237,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.15)
+## 16. Post-launch iterations (v0.2.0 → v0.3.16)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -325,6 +325,27 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.16 — Records page (browse stored data, delete an import)
+- New top-level nav **Records** (between Review & Map and Master Data)
+  with three tabs:
+  - **Import batches** — every file ever imported, newest first, with
+    row counts and a per-row **Delete** action (cascades to vouchers /
+    timesheet / salary rows; preserves saved column-mapping templates
+    and the master records you mapped from those rows).
+  - **Salary** — every salary row across every period; filter by period
+    + employee name; running totals (rows, employees, ₹ salary,
+    ₹ reimbursement).
+  - **Timesheet** — every line across every period; filter by period +
+    employee + client; running totals (rows, employees, clients, hours,
+    billable hours).
+- New service module `app/services/records.py` for the underlying
+  queries; UI in `app/ui/records_page.py`.
+- Closes the previously-invisible UX gap: salary & timesheet rows were
+  being stored period-tagged in `salary_entries` / `timesheet_entries`,
+  but there was no way to verify what was loaded short of generating an
+  MIS workbook. Operator can now see every row, filter by month, and
+  undo a wrong import without nuking everything via Clear All Data.
 
 ### v0.3.15 — Auto-inference for everything + Clear All Data
 - Auto-inference extended to **every link the system can derive**:

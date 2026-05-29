@@ -24,8 +24,9 @@ from ..util import fmt_inr
 # Indices match app/ui/main_window.NAV_ITEMS exactly.
 NAV_IMPORT = 1
 NAV_REVIEW = 2
-NAV_MASTER = 3
-NAV_GENERATE = 4
+NAV_RECORDS = 3
+NAV_MASTER = 4
+NAV_GENERATE = 5
 
 
 def _counts() -> dict:

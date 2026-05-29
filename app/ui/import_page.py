@@ -298,7 +298,7 @@ class ImportPage(QWidget):
             if box.clickedButton() is yes:
                 win = self.window()
                 if hasattr(win, "nav"):
-                    win.nav.setCurrentRow(2)        # Review & Map
+                    win.nav.setCurrentRow(2)        # Review & Map (index 2)
         else:
             QMessageBox.information(
                 self, "Imported",
