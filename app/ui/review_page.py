@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -27,6 +28,7 @@ from .review_dialogs import (
 )
 from .widgets import (
     NoScrollComboBox,
+    debounced,
     fill_table_with_actions,
     setup_data_table,
 )
@@ -80,6 +82,16 @@ class ClientTab(QWidget):
         bar.addWidget(bulk_btn)
         layout.addLayout(bar)
 
+        # Search row.
+        search_bar = QHBoxLayout()
+        search_bar.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search by name…")
+        self._sched_reload, self._search_timer = debounced(self.reload)
+        self.search.textChanged.connect(self._sched_reload)
+        search_bar.addWidget(self.search)
+        layout.addLayout(search_bar)
+
         self.table = QTableWidget()
         setup_data_table(self.table, multi_select=True)
         self.table.doubleClicked.connect(
@@ -100,13 +112,23 @@ class ClientTab(QWidget):
     def reload(self) -> None:
         # Always re-apply known aliases first — picks up newly-imported rows.
         resolution.apply_known_client_aliases()
-        self._rows = resolution.unresolved_clients()
+        all_rows = resolution.unresolved_clients()
+        q = self.search.text().strip().lower()
+        if q:
+            self._rows = [r for r in all_rows if q in r["raw"].lower()]
+        else:
+            self._rows = all_rows
         n = len(self._rows)
-        self.info.setText(
-            "All clients mapped" if n == 0
-            else f"{n} client name{'s' if n != 1 else ''} need mapping")
-        self.empty.setVisible(n == 0)
-        self.table.setVisible(n > 0)
+        total = len(all_rows)
+        if total == 0:
+            self.info.setText("All clients mapped")
+        elif n == total:
+            self.info.setText(f"{n} client name{'s' if n != 1 else ''} need mapping")
+        else:
+            self.info.setText(
+                f"{n} of {total} match{'es' if n != 1 else ''} your search")
+        self.empty.setVisible(total == 0)
+        self.table.setVisible(n > 0 or total > 0)
         if n:
             rows = [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
                     for r in self._rows]
@@ -122,6 +144,11 @@ class ClientTab(QWidget):
                 status_for_row=_warn_pill,
                 stretch_col=0,
             )
+        else:
+            # search returned nothing
+            fill_table_with_actions(
+                self.table, ["Raw client name", "Seen in", "Rows"], [],
+                stretch_col=0)
         self._update_bulk_button()
 
     def _update_bulk_button(self) -> None:
@@ -233,6 +260,15 @@ class EmployeeTab(QWidget):
         bar.addWidget(bulk_btn)
         layout.addLayout(bar)
 
+        search_bar = QHBoxLayout()
+        search_bar.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search by name…")
+        self._sched_reload, self._search_timer = debounced(self.reload)
+        self.search.textChanged.connect(self._sched_reload)
+        search_bar.addWidget(self.search)
+        layout.addLayout(search_bar)
+
         self.table = QTableWidget()
         setup_data_table(self.table, multi_select=True)
         self.table.doubleClicked.connect(
@@ -251,13 +287,23 @@ class EmployeeTab(QWidget):
         return len(self._rows)
 
     def reload(self) -> None:
-        self._rows = resolution.unresolved_employees()
+        all_rows = resolution.unresolved_employees()
+        q = self.search.text().strip().lower()
+        if q:
+            self._rows = [r for r in all_rows if q in r["raw"].lower()]
+        else:
+            self._rows = all_rows
         n = len(self._rows)
-        self.info.setText(
-            "All employees mapped" if n == 0
-            else f"{n} employee name{'s' if n != 1 else ''} need mapping")
-        self.empty.setVisible(n == 0)
-        self.table.setVisible(n > 0)
+        total = len(all_rows)
+        if total == 0:
+            self.info.setText("All employees mapped")
+        elif n == total:
+            self.info.setText(f"{n} employee name{'s' if n != 1 else ''} need mapping")
+        else:
+            self.info.setText(
+                f"{n} of {total} match{'es' if n != 1 else ''} your search")
+        self.empty.setVisible(total == 0)
+        self.table.setVisible(n > 0 or total > 0)
         if n:
             rows = [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
                     for r in self._rows]
@@ -273,6 +319,10 @@ class EmployeeTab(QWidget):
                 status_for_row=_warn_pill,
                 stretch_col=0,
             )
+        else:
+            fill_table_with_actions(
+                self.table, ["Raw employee name", "Seen in", "Rows"], [],
+                stretch_col=0)
         self._update_bulk_button()
 
     def _update_bulk_button(self) -> None:
@@ -375,6 +425,15 @@ class CcStringTab(QWidget):
         bar.addWidget(auto_btn)
         layout.addLayout(bar)
 
+        search_bar = QHBoxLayout()
+        search_bar.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search by Cost Centre string…")
+        self._sched_reload, self._search_timer = debounced(self.reload)
+        self.search.textChanged.connect(self._sched_reload)
+        search_bar.addWidget(self.search)
+        layout.addLayout(search_bar)
+
         self.table = QTableWidget()
         setup_data_table(self.table, multi_select=True)
         self.table.doubleClicked.connect(
@@ -394,13 +453,24 @@ class CcStringTab(QWidget):
 
     def reload(self) -> None:
         resolution.apply_known_cc_string_mappings()
-        self._rows = resolution.unresolved_cc_strings()
+        all_rows = resolution.unresolved_cc_strings()
+        q = self.search.text().strip().lower()
+        if q:
+            self._rows = [r for r in all_rows if q in r["raw"].lower()]
+        else:
+            self._rows = all_rows
         n = len(self._rows)
-        self.info.setText(
-            "All Cost Centre strings mapped" if n == 0
-            else f"{n} Cost Centre string{'s' if n != 1 else ''} need mapping")
-        self.empty.setVisible(n == 0)
-        self.table.setVisible(n > 0)
+        total = len(all_rows)
+        if total == 0:
+            self.info.setText("All Cost Centre strings mapped")
+        elif n == total:
+            self.info.setText(
+                f"{n} Cost Centre string{'s' if n != 1 else ''} need mapping")
+        else:
+            self.info.setText(
+                f"{n} of {total} match{'es' if n != 1 else ''} your search")
+        self.empty.setVisible(total == 0)
+        self.table.setVisible(n > 0 or total > 0)
         if n:
             rows = [[r["raw"], r["count"]] for r in self._rows]
             fill_table_with_actions(
@@ -413,6 +483,10 @@ class CcStringTab(QWidget):
                 status_for_row=_warn_pill,
                 stretch_col=0,
             )
+        else:
+            fill_table_with_actions(
+                self.table, ["Cost Centre string", "Invoices"], [],
+                stretch_col=0)
         self._update_bulk_button()
 
     def _update_bulk_button(self) -> None:
@@ -489,25 +563,28 @@ class CcStringTab(QWidget):
 class VoucherTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self._rows: list[dict] = []
+        self._all_rows: list[dict] = []   # everything from the DB query
+        self._rows: list[dict] = []       # post-filter, what the table shows
         self._loading = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
         intro = QLabel(
             "Every voucher's amount can be split across cost centres, "
-            "managers and services. Use the filters to find what you need; "
-            "click <b>Edit splits →</b> on any row to adjust its attribution.")
+            "managers and services. Use the filters to narrow down what you "
+            "need; click <b>Edit splits →</b> on any row to adjust its "
+            "attribution.")
         intro.setObjectName("pageNote")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        # --- row 1: DB-side filters (Entity / Period / Kind) ---------------
         bar = QHBoxLayout()
         bar.setSpacing(8)
         self.entity_combo = NoScrollComboBox()
         self.period_combo = NoScrollComboBox()
         self.kind_combo = NoScrollComboBox()
-        self.kind_combo.addItem("All", None)
+        self.kind_combo.addItem("All kinds", None)
         self.kind_combo.addItem("Sales", config.VCH_SALES)
         self.kind_combo.addItem("Expenses", config.VCH_EXPENSE)
         for w in (self.entity_combo, self.period_combo, self.kind_combo):
@@ -523,6 +600,25 @@ class VoucherTab(QWidget):
         self.summary.setObjectName("sectionTitle")
         bar.addWidget(self.summary)
         layout.addLayout(bar)
+
+        # --- row 2: in-Python filters (Status + Search) --------------------
+        bar2 = QHBoxLayout()
+        bar2.setSpacing(8)
+        self.status_combo = NoScrollComboBox()
+        self.status_combo.addItem("All statuses", None)
+        self.status_combo.addItem("⚠ Needs fix only", "needs_fix")
+        self.status_combo.addItem("✓ OK only", "ok")
+        self.status_combo.currentIndexChanged.connect(self._refilter)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(
+            "Search by party / client / voucher no…")
+        self._sched_filter, self._search_timer = debounced(
+            self._refilter, ms=200)
+        self.search.textChanged.connect(self._sched_filter)
+        bar2.addWidget(QLabel("Status:"))
+        bar2.addWidget(self.status_combo)
+        bar2.addWidget(self.search, 1)
+        layout.addLayout(bar2)
 
         self.table = QTableWidget()
         setup_data_table(self.table)
@@ -545,48 +641,77 @@ class VoucherTab(QWidget):
 
     def _reload_filters(self) -> None:
         self._loading = True
-        for combo, items in (
-            (self.entity_combo,
-             [("(all entities)", None)] + repo.fk_options("entities")),
-            (self.period_combo,
-             [("(all periods)", None)] +
-             [(p, p) for p in vsvc.list_periods()]),
-        ):
-            keep = combo.currentData()
-            combo.clear()
-            for label, data in items:
-                combo.addItem(str(label), data)
-            pos = combo.findData(keep)
-            if pos >= 0:
-                combo.setCurrentIndex(pos)
+        # Entity combo — use the entity name as the visible label and the id
+        # as the user data. (Was inverted before, hence the numbers showing.)
+        keep_e = self.entity_combo.currentData()
+        self.entity_combo.clear()
+        self.entity_combo.addItem("(all entities)", None)
+        for entity_id, name in repo.fk_options("entities"):
+            self.entity_combo.addItem(name, entity_id)
+        pos = self.entity_combo.findData(keep_e)
+        if pos >= 0:
+            self.entity_combo.setCurrentIndex(pos)
+
+        # Period combo — string label = string data.
+        keep_p = self.period_combo.currentData()
+        self.period_combo.clear()
+        self.period_combo.addItem("(all periods)", None)
+        for p in vsvc.list_periods():
+            self.period_combo.addItem(p, p)
+        pos = self.period_combo.findData(keep_p)
+        if pos >= 0:
+            self.period_combo.setCurrentIndex(pos)
+
         self._loading = False
         self.reload()
 
     def reload(self) -> None:
+        """Re-fetch from the DB (entity / period / kind filters) and then
+        refilter in Python (status + search)."""
         if self._loading:
             return
-        self._rows = vsvc.list_vouchers(
+        self._all_rows = vsvc.list_vouchers(
             self.entity_combo.currentData(),
             self.period_combo.currentData(),
             self.kind_combo.currentData())
+        self._refilter()
+
+    def _refilter(self) -> None:
+        """Apply status + search to the already-fetched rows. Cheap — runs
+        on every keystroke without re-hitting the DB."""
+        rows = list(self._all_rows)
+        status = self.status_combo.currentData()
+        if status == "needs_fix":
+            rows = [v for v in rows if v.get("n_unassigned")]
+        elif status == "ok":
+            rows = [v for v in rows if not v.get("n_unassigned")]
+        q = self.search.text().strip().lower()
+        if q:
+            rows = [v for v in rows
+                    if q in (v.get("party_name") or "").lower()
+                    or q in (v.get("client_name") or "").lower()
+                    or q in (v.get("vch_no") or "").lower()]
+        self._rows = rows
+
         n = len(self._rows)
+        total = len(self._all_rows)
         unassigned = self.count()
+        parts = [f"{n} voucher{'s' if n != 1 else ''}"]
+        if n != total:
+            parts.append(f"<span style='color:#64748B;'>of {total}</span>")
         if unassigned:
-            self.summary.setText(
-                f"{n} voucher{'s' if n != 1 else ''}  ·  "
+            parts.append(
                 f"<span style='color:#B91C1C;'>{unassigned} unassigned</span>")
-        else:
-            self.summary.setText(f"{n} voucher{'s' if n != 1 else ''}")
+        self.summary.setText("  ·  ".join(parts))
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
-
         if n == 0:
             return
 
-        rows = []
+        rows_body = []
         labels = []
         for v in self._rows:
-            rows.append([
+            rows_body.append([
                 v["txn_date"] or "",
                 v["vch_no"], v["party_name"],
                 v["client_name"] or "—",
@@ -607,7 +732,7 @@ class VoucherTab(QWidget):
             self.table,
             ["Date", "Vch No.", "Party", "Client", "Kind",
              "Net amount", "Splits"],
-            rows,
+            rows_body,
             action_label=labels,
             action_callback=self._edit_row,
             status_for_row=status_for,

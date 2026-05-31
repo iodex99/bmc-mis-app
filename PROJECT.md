@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.21** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.22** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.21)
+## 16. Post-launch iterations (v0.2.0 → v0.3.22)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,28 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.22 — Filters & search across Review and Master Data; header sort
+- **Voucher Entity dropdown bug fix.** The combo was showing integer ids
+  ("1", "6", "2"…) instead of entity names because the `(label, data)`
+  iteration was inverted against what `repo.fk_options()` returns. The
+  filter was also broken — selecting "1" sent the entity *name* into the
+  WHERE clause, so it never matched. Both fixed.
+- **New Status filter** on the Vouchers tab: All / ⚠ Needs fix only /
+  ✓ OK only.
+- **New search box** on the Vouchers tab: matches party, client or
+  voucher no. Debounced 200 ms so it doesn't refilter on every keystroke.
+- **Search boxes** added to Review → Clients, Employees, Cost Centres
+  (debounced; counts show "X of Y matches…" when filtering).
+- **Search box** added to every Master Data tab (Entities, Cost Centres,
+  Managers, Employees, Clients, Services, Annual Targets); matches any
+  field on each row.
+- **Header-click sorting** enabled on every table via
+  `setSortingEnabled(True)` in `setup_data_table`. Default sort by
+  display text — fine for names and dates, less precise for numeric
+  columns (good-enough for now).
+- New helper `widgets.debounced(callback, ms=250)` shared by all the
+  search inputs so we don't duplicate timer plumbing.
 
 ### v0.3.21 — Smart auto-matching of Tally Cost-Centre strings
 - New `resolution.auto_match_cc_strings()` does fuzzy matching to find

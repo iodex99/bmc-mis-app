@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -34,6 +34,20 @@ class NoScrollSpinBox(QSpinBox):
         event.ignore()
 
 
+def debounced(callback, *, ms: int = 250):
+    """Return ``(trigger_fn, timer)`` — calls *callback* once after *ms* of
+    quiet typing. Use as ``trigger, timer = debounced(self.reload)`` and
+    connect ``trigger`` to a ``textChanged`` signal."""
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.setInterval(ms)
+    timer.timeout.connect(callback)
+
+    def trigger(*_args):
+        timer.start()
+    return trigger, timer
+
+
 # --- table helpers ----------------------------------------------------------
 
 def setup_data_table(table: QTableWidget, *, multi_select: bool = False) -> None:
@@ -51,6 +65,10 @@ def setup_data_table(table: QTableWidget, *, multi_select: bool = False) -> None
     table.verticalHeader().setMinimumSectionSize(28)
     table.setShowGrid(False)
     table.horizontalHeader().setHighlightSections(False)
+    # Header-click sorting. fill_table_with_actions() suspends sorting while
+    # the table is being populated, then restores it.
+    table.setSortingEnabled(True)
+    table.horizontalHeader().setSectionsClickable(True)
     table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
     table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
 

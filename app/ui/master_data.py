@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from .. import repository as repo
 from ..util import fmt_inr
-from .widgets import fill_table_with_actions, setup_data_table
+from .widgets import debounced, fill_table_with_actions, setup_data_table
 
 
 # --- Field & table specifications -------------------------------------------
@@ -217,6 +217,16 @@ class RecordTab(QWidget):
         toolbar.addWidget(self.add_btn)
         layout.addLayout(toolbar)
 
+        # Search row.
+        search_bar = QHBoxLayout()
+        search_bar.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search…")
+        self._sched_reload, self._search_timer = debounced(self.reload)
+        self.search.textChanged.connect(self._sched_reload)
+        search_bar.addWidget(self.search)
+        layout.addLayout(search_bar)
+
         self.table = QTableWidget()
         setup_data_table(self.table)
         self.table.doubleClicked.connect(
@@ -234,15 +244,33 @@ class RecordTab(QWidget):
     def reload(self) -> None:
         include_inactive = bool(self.show_inactive and self.show_inactive.isChecked())
         self._fk_maps = {t: repo.fk_label_map(t) for t in self._fk_maps}
-        self._rows = repo.fetch_all(
+        all_rows = repo.fetch_all(
             self.spec.table, include_inactive=include_inactive,
             order_by=self.spec.order_by)
+        # Apply text search across every visible field on each row.
+        q = self.search.text().strip().lower()
+        if q:
+            def matches(row):
+                for f in self.spec.fields:
+                    val = self._display(f, row).lower()
+                    if q in val:
+                        return True
+                return False
+            self._rows = [r for r in all_rows if matches(r)]
+        else:
+            self._rows = all_rows
         active = self.count_active()
-        total = len(self._rows)
-        self.summary.setText(
-            f"{active} record{'s' if active != 1 else ''}"
-            + (f"  ·  {total - active} inactive shown" if total > active else "")
-            if total else "No records yet")
+        total = len(all_rows)
+        showing = len(self._rows)
+        if total == 0:
+            summary = "No records yet"
+        elif showing == total:
+            summary = f"{active} record{'s' if active != 1 else ''}"
+            if total > active:
+                summary += f"  ·  {total - active} inactive shown"
+        else:
+            summary = f"{showing} of {total} match{'es' if showing != 1 else ''}"
+        self.summary.setText(summary)
         self._render()
 
     def _render(self) -> None:
