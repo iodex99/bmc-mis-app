@@ -215,6 +215,18 @@ MIGRATIONS: list[tuple[int, str]] = [
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """),
+    (4, """
+        -- Re-bucket existing timesheet rows from the calendar month they
+        -- were imported under to the firm's 21st→20th MIS month. Day ≤ 20
+        -- stays in the current month; day ≥ 21 rolls into the next month.
+        UPDATE timesheet_entries
+        SET period = CASE
+            WHEN CAST(strftime('%d', txn_date) AS INTEGER) <= 20
+                THEN strftime('%Y-%m', txn_date)
+            ELSE strftime('%Y-%m', date(txn_date, '+1 month'))
+        END
+        WHERE txn_date IS NOT NULL AND txn_date <> '';
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

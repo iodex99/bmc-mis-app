@@ -14,6 +14,7 @@ from .valueutils import (
     clean,
     hours_from_duration,
     is_tax_head,
+    mis_period_for_timesheet_date,
     period_of,
     to_date,
     to_number,
@@ -145,7 +146,9 @@ def parse_timesheet(grid: list[list[Any]], colmap: ColMap,
             emp_code=clean(_cell(row, colmap.get("emp_code"))),
             emp_name=name,
             date=date,
-            period=period_of(date),
+            # Timesheet uses the firm's 21st→20th cycle: day ≤ 20 is the
+            # current MIS month, day ≥ 21 rolls into next month's MIS.
+            period=mis_period_for_timesheet_date(date),
             client_raw=client,
             task=clean(_cell(row, colmap.get("task"))),
             hours=hours,

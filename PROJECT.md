@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.17** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.18** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -172,8 +172,14 @@ hourly-rate basis, MIS views, partner remuneration.
   Partner–Manager P&L, Entity-wise P&L, Service-wise MIS.
 - **2026-05-22** — Partner remuneration/drawings are **NOT** a cost; cost
   centre profit is the partner's earning.
-- **2026-05-22** — Reporting period = **calendar month**; every row is
-  bucketed by its actual date regardless of the file's label.
+- **2026-05-22** — Reporting period = **calendar month** for vouchers
+  (sales / purchase) and salary; every row is bucketed by its actual
+  date regardless of the file's label.
+- **2026-05-29** (v0.3.18) — **Timesheet uses the firm's 21st → 20th
+  cycle** instead of calendar month. A timesheet row from 25 Dec
+  contributes to **Jan MIS** (because the firm's Jan timesheet window
+  is 21 Dec → 20 Jan). Hourly-rate labour allocation in Jan MIS uses
+  Jan salary ÷ (21 Dec → 20 Jan hours).
 - **2026-05-22** — Managers: only the 4 named managers are treated as managers
   for now; system stays flexible (timesheet "Reporting Manager" stored as-is,
   not all 28 names need mapping).
@@ -237,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.17)
+## 16. Post-launch iterations (v0.2.0 → v0.3.18)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -325,6 +331,21 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.18 — Timesheet uses the firm's 21st → 20th cycle
+- Reverses the v1 "all data is calendar-month" decision **for timesheet
+  only**. The firm's reality:
+  - Salary: calendar month (1 Jan → 31 Jan goes under period `2026-01`).
+  - Timesheet: 21st of previous month → 20th of current month (so a row
+    from 25 Dec contributes to **Jan MIS**, not Dec MIS).
+- New helper `valueutils.mis_period_for_timesheet_date(date)` —
+  day ≤ 20 → current month, day ≥ 21 → next month.
+- `parse_timesheet` now uses it instead of `period_of(date)`.
+- **Migration v4** re-buckets every already-imported timesheet row to
+  its correct MIS month via SQL — runs once when the operator updates.
+- Records → Timesheet now shows the convention in its intro text so the
+  operator isn't confused when 25-Dec rows appear under `2026-01`.
+- Vouchers (sales / purchase) and salary still use calendar months.
 
 ### v0.3.17 — Delete unmapped rows + multi-select on Review tabs
 - Every Review tab (Clients, Employees, Cost Centres) now has a per-row

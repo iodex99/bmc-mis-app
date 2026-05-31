@@ -66,6 +66,25 @@ def period_of(value: Any) -> str | None:
     return f"{d.year:04d}-{d.month:02d}" if d else None
 
 
+def mis_period_for_timesheet_date(value: Any) -> str | None:
+    """Return the MIS month a timesheet date contributes to.
+
+    The firm's timesheet cycle runs 21st of the previous month → 20th of the
+    current month, while salary is on the calendar month. So a timesheet
+    entry on **20 Jan** belongs to **Jan MIS**, and one on **25 Dec** also
+    belongs to **Jan MIS** (because it falls in Jan's 21-Dec → 20-Jan window).
+
+    Implementation: day ≤ 20 → current month; day ≥ 21 → next month.
+    """
+    d = to_date(value)
+    if not d:
+        return None
+    if d.day <= 20:
+        return f"{d.year:04d}-{d.month:02d}"
+    year, month = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+    return f"{year:04d}-{month:02d}"
+
+
 def is_tax_head(particulars: str) -> bool:
     """True if a ledger head looks like a tax / round-off line, not a real expense."""
     low = particulars.lower()

@@ -212,7 +212,11 @@ class TimesheetTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.addWidget(_hint(
-            "Every timesheet line imported across every period."))
+            "Every timesheet line, bucketed into the MIS month it "
+            "contributes to. The firm's timesheet cycle runs <b>21st of "
+            "the previous month → 20th of the current month</b>, so a row "
+            "from 25 Dec shows up under <b>2026-01</b> (January MIS), and "
+            "a row from 20 Jan also belongs to <b>2026-01</b>."))
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
