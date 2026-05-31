@@ -161,6 +161,10 @@ def commit_result(result: ParseResult, entity_id: int | None,
     # Auto-mapping after every import:
     #   • apply saved cc-string → (partner, manager) mappings to the new
     #     voucher splits
+    #   • smart fuzzy-match any *new* unmapped cc strings to partners /
+    #     managers (handles "Mr. Shreyans Dedhia" → SD, "Prashant - Shreyans"
+    #     → SD+Prashant, etc.) — the bulk of cc strings get auto-resolved
+    #     on first import
     #   • apply saved client aliases so vouchers / timesheet rows get linked
     #   • run all inference passes — cost centres get propagated from the
     #     Sales Register into clients, from the salary sheet into employees,
@@ -169,9 +173,11 @@ def commit_result(result: ParseResult, entity_id: int | None,
     from ..services.resolution import (
         apply_known_cc_string_mappings,
         apply_known_client_aliases,
+        auto_match_cc_strings,
         infer_all_masters,
     )
     apply_known_cc_string_mappings()
+    auto_match_cc_strings()
     apply_known_client_aliases()
     infer_all_masters()
     return batch_id

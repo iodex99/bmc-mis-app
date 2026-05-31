@@ -368,7 +368,8 @@ class CcStringTab(QWidget):
         self.bulk_delete_btn = QPushButton("🗑 Delete selected")
         self.bulk_delete_btn.setObjectName("danger")
         self.bulk_delete_btn.clicked.connect(self._bulk_delete)
-        auto_btn = QPushButton("⚡ Re-apply known")
+        auto_btn = QPushButton("⚡ Auto-match all")
+        auto_btn.setObjectName("primary")
         auto_btn.clicked.connect(self._auto)
         bar.addWidget(self.bulk_delete_btn)
         bar.addWidget(auto_btn)
@@ -421,9 +422,21 @@ class CcStringTab(QWidget):
             f"🗑 Delete selected ({sel})" if sel else "🗑 Delete selected")
 
     def _auto(self) -> None:
-        n = resolution.apply_known_cc_string_mappings()
-        QMessageBox.information(
-            self, "Re-apply", f"{n} voucher split(s) updated from saved mappings.")
+        # Two passes: first re-apply saved mappings, then smart fuzzy-match
+        # any new strings against partners / managers. Most rows resolve
+        # themselves on first import — this button is for re-running after
+        # adding a new partner or manager to the masters.
+        applied = resolution.apply_known_cc_string_mappings()
+        matched = resolution.auto_match_cc_strings()
+        msg = []
+        if matched:
+            msg.append(f"{matched} string(s) auto-matched to a partner.")
+        if applied:
+            msg.append(f"{applied} voucher split(s) updated from saved mappings.")
+        if not msg:
+            msg.append("Nothing new to auto-match. Resolve remaining rows "
+                       "manually.")
+        QMessageBox.information(self, "Auto-match", "\n".join(msg))
         self.reload()
 
     def _resolve_row(self, idx: int) -> None:
@@ -646,9 +659,11 @@ class ReviewPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        # Apply saved mappings first so badges show accurate counts.
+        # Apply saved mappings + smart auto-match so badges and tables show
+        # the smallest possible "needs attention" counts to the operator.
         resolution.apply_known_client_aliases()
         resolution.apply_known_cc_string_mappings()
+        resolution.auto_match_cc_strings()
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
             if hasattr(tab, "reload"):

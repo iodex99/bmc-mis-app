@@ -8,6 +8,8 @@ alias, so future imports resolve automatically.
 
 from __future__ import annotations
 
+import re
+
 from rapidfuzz import fuzz, process
 
 from ..database import transaction
@@ -584,6 +586,118 @@ def unresolved_cc_strings() -> list[dict]:
         entry = agg.setdefault(n, {"raw": r["raw"], "count": 0})
         entry["count"] += 1
     return sorted(agg.values(), key=lambda d: -d["count"])
+
+
+# --- Smart auto-match for Cost-Centre strings -------------------------------
+
+_HONORIFICS = re.compile(r'^(mr\.?|mrs\.?|ms\.?|dr\.?|shri\.?|smt\.?)\s+',
+                         re.IGNORECASE)
+_NAME_SEP = re.compile(r'\s*[-–—]\s*')   # hyphen / en-dash / em-dash
+_MIN_SCORE = 80
+
+
+def _best_match(query: str, lookup: dict[str, int]) -> tuple[int | None, int]:
+    """Best (id, score) for *query* in {normalised_name: id}.
+
+    Uses both token-sort and partial-ratio, takes the higher. Token-sort
+    handles word reorderings; partial-ratio handles "Shreyans" matching
+    "Shreyans Dedhia" or "Gaurav S" matching "Gaurav Siroya".
+    """
+    if not query or not lookup:
+        return None, 0
+    if query in lookup:
+        return lookup[query], 100
+    r1 = process.extractOne(query, lookup.keys(), scorer=fuzz.token_sort_ratio)
+    r2 = process.extractOne(query, lookup.keys(), scorer=fuzz.partial_ratio)
+    best = max([r for r in (r1, r2) if r is not None],
+               key=lambda r: r[1], default=None)
+    return (lookup[best[0]], int(best[1])) if best else (None, 0)
+
+
+def auto_match_cc_strings() -> int:
+    """For every still-unmapped Cost-Centre string, fuzzy-match it to a
+    partner (and optionally a manager) and create the mapping automatically.
+
+    Handles patterns like:
+      • "Mr. Shreyans Dedhia"  → SD (strip honorific, exact match)
+      • "Megha Mehta"          → MS (direct match)
+      • "Prashant - Shreyans"  → SD, manager "Prashant" if known
+      • "Gaurav S - Aakash"    → AM, manager GS (fuzzy on both sides)
+      • "Jalpesh - Umesh"      → JV, manager UV (tries both orderings,
+                                  picks whichever yields a partner)
+
+    Returns the number of new mappings created. Existing mappings are
+    overwritten only if the auto-match finds a better fit.
+    """
+    with transaction() as conn:
+        partner_lookup = {
+            norm(r["name"]): r["id"]
+            for r in conn.execute(
+                "SELECT id, name FROM cost_centres "
+                "WHERE active = 1 AND cc_type = 'partner'")}
+        manager_lookup = {
+            norm(r["name"]): r["id"]
+            for r in conn.execute(
+                "SELECT id, name FROM managers WHERE active = 1")}
+
+    if not partner_lookup:
+        return 0
+
+    new_mappings: list[tuple[str, int, int | None]] = []
+    for item in unresolved_cc_strings():
+        raw = item["raw"]
+        cleaned = norm(_HONORIFICS.sub("", raw.strip()))
+
+        cc_id: int | None = None
+        mgr_id: int | None = None
+
+        # Try a "X - Y" split — could be either "Manager - Partner" or the
+        # reverse. Try both orderings; pick the side that maps to a partner.
+        parts = _NAME_SEP.split(cleaned, maxsplit=1)
+        if len(parts) == 2:
+            left, right = parts[0].strip(), parts[1].strip()
+            l_id, l_score = _best_match(left, partner_lookup)
+            r_id, r_score = _best_match(right, partner_lookup)
+            if r_score >= l_score and r_score >= _MIN_SCORE:
+                cc_id = r_id
+                m_id, m_score = _best_match(left, manager_lookup)
+                # Only attach a manager if the match is strong enough —
+                # avoids tagging unrelated managers (e.g. 'Prashant' was
+                # matching RM at a weak score).
+                if m_score >= _MIN_SCORE:
+                    mgr_id = m_id
+            elif l_score >= _MIN_SCORE:
+                cc_id = l_id
+                m_id, m_score = _best_match(right, manager_lookup)
+                if m_score >= _MIN_SCORE:
+                    mgr_id = m_id
+
+        # Plain "Name" — try the whole string as a partner.
+        if cc_id is None:
+            id_w, score_w = _best_match(cleaned, partner_lookup)
+            if score_w >= _MIN_SCORE:
+                cc_id = id_w
+
+        if cc_id is not None:
+            new_mappings.append((raw, cc_id, mgr_id))
+
+    if not new_mappings:
+        return 0
+
+    with transaction() as conn:
+        for raw, cc_id, mgr_id in new_mappings:
+            conn.execute(
+                "INSERT INTO cc_string_mappings "
+                "(raw_text, cost_centre_id, manager_id) VALUES (?, ?, ?) "
+                "ON CONFLICT(raw_text) DO UPDATE SET "
+                "  cost_centre_id = excluded.cost_centre_id, "
+                "  manager_id = excluded.manager_id, "
+                "  active = 1",
+                (raw, cc_id, mgr_id))
+    # Apply the new mappings to existing voucher splits.
+    apply_known_cc_string_mappings()
+    infer_all_masters()
+    return len(new_mappings)
 
 
 def map_cc_string(raw: str, cost_centre_id: int | None,

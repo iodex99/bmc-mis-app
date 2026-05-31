@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.20** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.21** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.20)
+## 16. Post-launch iterations (v0.2.0 → v0.3.21)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,30 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.21 — Smart auto-matching of Tally Cost-Centre strings
+- New `resolution.auto_match_cc_strings()` does fuzzy matching to find
+  the right partner (and manager) for each raw Cost-Centre string:
+  - **Strips honorifics** ("Mr.", "Ms.", "Mrs.", "Dr.", "Shri", "Smt").
+  - **Normalises whitespace** (handles Tally's stray double-spaces).
+  - **Splits on hyphen / dash** to try "Manager - Partner" or
+    "Partner - Manager" orderings; picks the side that maps to a
+    partner; only attaches a manager if its match score ≥ 80%.
+  - **Two scorers**: token-sort-ratio + partial-ratio, takes the
+    higher — so "Shreyans" matches "Shreyans Dedhia" (partial), and
+    "Jalpesh  Vora" with double space matches "Jalpesh Vora"
+    (token-sort).
+- Runs **automatically at import commit** (right after applying saved
+  cc-string mappings), so most cc strings resolve themselves on first
+  import. The remaining few (manager-only strings, genuinely ambiguous)
+  still need operator input.
+- Also runs on Review page open, so the Voucher tab's "needs fix"
+  count drops as soon as you navigate there.
+- Cost Centres tab's "⚡ Re-apply known" button replaced by
+  "⚡ **Auto-match all**" (primary indigo) which runs both passes.
+- Verified against the firm's 11 sample cc strings: **10/11
+  auto-resolved correctly** (the 11th, "Rajesh Malhotra", is a
+  manager-only string with no partner indicator — needs manual input).
 
 ### v0.3.20 — Hotfix: missing QPushButton import
 - v0.3.19 added the "Load all N row(s)" pagination button to the Salary
