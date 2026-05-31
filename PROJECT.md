@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.18** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.19** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.18)
+## 16. Post-launch iterations (v0.2.0 → v0.3.19)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,32 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.19 — Records page performance: doesn't freeze on big data
+- Five separate fixes to `fill_table_with_actions` and the Records tabs:
+  1. **Lazy load** — `RecordsPage.showEvent` only refreshes the active
+     tab. Was loading all three on every nav-click, so even visiting
+     Records re-built the 4k-row timesheet table.
+  2. **Interactive resize mode** — was using
+     `QHeaderView.ResizeToContents` which scans every cell to compute
+     column widths. At ~4 k rows × 7 columns this was a multi-second
+     freeze. Now uses Interactive widths based on header-text length,
+     with one column getting Stretch. User can still drag column edges.
+  3. **Uniform row height via `verticalHeader().setDefaultSectionSize`**
+     — single call instead of N `setRowHeight(r, …)` calls.
+  4. **Batched updates** — wrap the cell-population loop in
+     `setUpdatesEnabled(False)` / `setSortingEnabled(False)` so Qt
+     doesn't repaint and re-sort after every cell.
+  5. **Soft pagination** — `_PAGE_LIMIT = 2000`. Above that, the table
+     shows the first 2 k rows and a "<i>(showing first 2,000)</i>" hint
+     + a "Load all N row(s)" button below the table. Totals (count,
+     sum) always reflect the full dataset.
+- **Default to the latest period** instead of "(all periods)" so a
+  freshly-opened Salary / Timesheet tab loads one month, not all months.
+- `list_salary` and `list_timesheet` gain a `limit` parameter.
+
+Benchmarks (offscreen, simulated): 4 252 timesheet rows fill in
+**~100 ms** (was multi-second); 2 000 rows in **~48 ms**.
 
 ### v0.3.18 — Timesheet uses the firm's 21st → 20th cycle
 - Reverses the v1 "all data is calendar-month" decision **for timesheet

@@ -45,6 +45,10 @@ def setup_data_table(table: QTableWidget, *, multi_select: bool = False) -> None
         else QTableWidget.SingleSelection)
     table.setAlternatingRowColors(True)
     table.verticalHeader().setVisible(False)
+    # Set uniform row height ONCE on the vertical header — avoids the slow
+    # per-row setRowHeight() loop when the table has thousands of rows.
+    table.verticalHeader().setDefaultSectionSize(36)
+    table.verticalHeader().setMinimumSectionSize(28)
     table.setShowGrid(False)
     table.horizontalHeader().setHighlightSections(False)
     table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -72,57 +76,72 @@ def fill_table_with_actions(
     """
     has_status = status_for_row is not None
     has_action = action_callback is not None
-    extra = (1 if has_status else 0) + (1 if has_action else 0)
     all_headers = (
         (["Status"] if has_status else [])
         + headers
         + (["Actions"] if has_action else [])
     )
+    offset = 1 if has_status else 0
+
+    # All-in-one batch: disable repaints and sorting while populating.
+    table.setUpdatesEnabled(False)
+    was_sorting = table.isSortingEnabled()
+    table.setSortingEnabled(False)
+    table.clearContents()
     table.setColumnCount(len(all_headers))
     table.setHorizontalHeaderLabels(all_headers)
     table.setRowCount(len(rows))
 
-    offset = 1 if has_status else 0
-    for r, row in enumerate(rows):
-        if has_status:
-            text, kind = status_for_row(r)
-            pill = QLabel(f"  {text}  ")
-            pill.setAlignment(Qt.AlignCenter)
-            pill.setObjectName(kind)        # "statusOk" / "statusWarn" / "statusBad"
-            table.setCellWidget(r, 0, pill)
-        for c, val in enumerate(row):
-            item = QTableWidgetItem("" if val is None else str(val))
-            table.setItem(r, c + offset, item)
-        if has_action:
-            label = (action_label if isinstance(action_label, str)
-                     else action_label[r])
-            actions_cell = QWidget()
-            cell_lay = QHBoxLayout(actions_cell)
-            cell_lay.setContentsMargins(4, 2, 4, 2)
-            cell_lay.setSpacing(6)
-            cell_lay.addStretch(1)
-            btn = QPushButton(label)
-            btn.setObjectName("rowAction")
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(
-                lambda _checked=False, row_idx=r:
-                action_callback(row_idx))      # type: ignore[misc]
-            cell_lay.addWidget(btn)
-            if secondary_label and secondary_callback:
-                btn2 = QPushButton(secondary_label)
-                btn2.setObjectName(secondary_object_name)
-                btn2.setCursor(Qt.PointingHandCursor)
-                btn2.clicked.connect(
+    try:
+        for r, row in enumerate(rows):
+            if has_status:
+                text, kind = status_for_row(r)
+                pill = QLabel(f"  {text}  ")
+                pill.setAlignment(Qt.AlignCenter)
+                pill.setObjectName(kind)        # statusOk / statusWarn / statusMuted
+                table.setCellWidget(r, 0, pill)
+            for c, val in enumerate(row):
+                item = QTableWidgetItem("" if val is None else str(val))
+                table.setItem(r, c + offset, item)
+            if has_action:
+                label = (action_label if isinstance(action_label, str)
+                         else action_label[r])
+                actions_cell = QWidget()
+                cell_lay = QHBoxLayout(actions_cell)
+                cell_lay.setContentsMargins(4, 2, 4, 2)
+                cell_lay.setSpacing(6)
+                cell_lay.addStretch(1)
+                btn = QPushButton(label)
+                btn.setObjectName("rowAction")
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.clicked.connect(
                     lambda _checked=False, row_idx=r:
-                    secondary_callback(row_idx))  # type: ignore[misc]
-                cell_lay.addWidget(btn2)
-            table.setCellWidget(r, len(all_headers) - 1, actions_cell)
+                    action_callback(row_idx))      # type: ignore[misc]
+                cell_lay.addWidget(btn)
+                if secondary_label and secondary_callback:
+                    btn2 = QPushButton(secondary_label)
+                    btn2.setObjectName(secondary_object_name)
+                    btn2.setCursor(Qt.PointingHandCursor)
+                    btn2.clicked.connect(
+                        lambda _checked=False, row_idx=r:
+                        secondary_callback(row_idx))  # type: ignore[misc]
+                    cell_lay.addWidget(btn2)
+                table.setCellWidget(r, len(all_headers) - 1, actions_cell)
 
-    header = table.horizontalHeader()
-    header.setSectionResizeMode(QHeaderView.ResizeToContents)
-    target = (stretch_col + offset) if stretch_col is not None else (offset)
-    target = min(target, len(all_headers) - 1)
-    header.setSectionResizeMode(target, QHeaderView.Stretch)
-    table.setRowHeight(0, 36) if rows else None
-    for r in range(len(rows)):
-        table.setRowHeight(r, 40)
+        # Resize columns: interactive (fast — no per-cell scan). One column
+        # gets Stretch to fill remaining space. ResizeToContents on every
+        # column would scan every cell, which kills perf at 1000+ rows.
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        for i, h in enumerate(all_headers):
+            # Sensible default widths from header text length.
+            header.resizeSection(i, max(90, min(280, len(str(h)) * 11 + 24)))
+        if has_action:
+            header.resizeSection(len(all_headers) - 1, 180)
+        target = (stretch_col + offset) if stretch_col is not None else offset
+        target = min(target, len(all_headers) - 1)
+        header.setSectionResizeMode(target, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
+    finally:
+        table.setSortingEnabled(was_sorting)
+        table.setUpdatesEnabled(True)

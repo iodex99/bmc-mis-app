@@ -29,6 +29,9 @@ from .widgets import (
 )
 
 
+_PAGE_LIMIT = 2000
+
+
 def _info(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("sectionTitle")
@@ -134,17 +137,20 @@ class ImportsTab(QWidget):
 class SalaryTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._first_load = True
+        self._show_all = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.addWidget(_hint(
-            "Every salary row imported across every period. Switch the "
-            "period to see different months side by side."))
+            "Every salary row imported across every period. Defaults to the "
+            "latest month — switch the dropdown to a different period or "
+            "'(all periods)' to compare months side by side."))
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
         bar.addWidget(QLabel("Period:"))
         self.period_combo = NoScrollComboBox()
-        self.period_combo.currentIndexChanged.connect(self.reload)
+        self.period_combo.currentIndexChanged.connect(self._on_period_change)
         bar.addWidget(self.period_combo)
         bar.addWidget(QLabel("Employee:"))
         self.search = QLineEdit()
@@ -161,17 +167,42 @@ class SalaryTab(QWidget):
         setup_data_table(self.table)
         layout.addWidget(self.table, 1)
 
+        self.load_all_btn = QPushButton("")
+        self.load_all_btn.setVisible(False)
+        self.load_all_btn.clicked.connect(self._load_all)
+        layout.addWidget(self.load_all_btn, alignment=Qt.AlignLeft)
+
+    def _on_period_change(self):
+        # Switching period resets the show_all override.
+        self._show_all = False
+        self.reload()
+
+    def _load_all(self):
+        self._show_all = True
+        self.reload()
+
     def reload(self) -> None:
         self._refill_periods()
         period = self.period_combo.currentData()
         q = self.search.text().strip()
-        rows = records.list_salary(period, q)
+        limit = None if self._show_all else _PAGE_LIMIT
+        rows = records.list_salary(period, q, limit=limit)
         totals = records.salary_totals(period, q)
-        self.summary.setText(
-            f"{fmt_inr(totals.get('n', 0))} row(s) · "
-            f"{fmt_inr(totals.get('people', 0))} employee(s) · "
-            f"Salary ₹ {fmt_inr(totals.get('salary', 0))} · "
-            f"Reimbursement ₹ {fmt_inr(totals.get('reimb', 0))}")
+        total_n = totals.get("n", 0)
+        showing = len(rows)
+        truncated = (not self._show_all) and total_n > showing
+
+        msg = (f"{fmt_inr(total_n)} row(s) · "
+               f"{fmt_inr(totals.get('people', 0))} employee(s) · "
+               f"Salary ₹ {fmt_inr(totals.get('salary', 0))} · "
+               f"Reimbursement ₹ {fmt_inr(totals.get('reimb', 0))}")
+        if truncated:
+            msg += (f"   <span style='color:#92400E;'>"
+                    f"(showing first {fmt_inr(showing)})</span>")
+        self.summary.setText(msg)
+        self.load_all_btn.setVisible(truncated)
+        self.load_all_btn.setText(
+            f"Load all {fmt_inr(total_n)} row(s)" if truncated else "")
 
         body = [[
             r["period"] or "",
@@ -197,7 +228,13 @@ class SalaryTab(QWidget):
         self.period_combo.addItem("(all periods)", None)
         for p in periods:
             self.period_combo.addItem(p, p)
-        if keep is not None:
+        # First load: default to the most recent period. Otherwise preserve.
+        if self._first_load and periods:
+            idx = self.period_combo.findData(periods[0])
+            if idx >= 0:
+                self.period_combo.setCurrentIndex(idx)
+            self._first_load = False
+        elif keep is not None:
             idx = self.period_combo.findData(keep)
             if idx >= 0:
                 self.period_combo.setCurrentIndex(idx)
@@ -209,20 +246,23 @@ class SalaryTab(QWidget):
 class TimesheetTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._first_load = True
+        self._show_all = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.addWidget(_hint(
             "Every timesheet line, bucketed into the MIS month it "
             "contributes to. The firm's timesheet cycle runs <b>21st of "
             "the previous month → 20th of the current month</b>, so a row "
-            "from 25 Dec shows up under <b>2026-01</b> (January MIS), and "
-            "a row from 20 Jan also belongs to <b>2026-01</b>."))
+            "from 25 Dec shows up under <b>2026-01</b> (January MIS). "
+            "Defaults to the latest period — switch the dropdown to a "
+            "different period or '(all periods)' to compare."))
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
         bar.addWidget(QLabel("Period:"))
         self.period_combo = NoScrollComboBox()
-        self.period_combo.currentIndexChanged.connect(self.reload)
+        self.period_combo.currentIndexChanged.connect(self._on_period_change)
         bar.addWidget(self.period_combo)
         bar.addWidget(QLabel("Employee:"))
         self.emp_search = QLineEdit()
@@ -244,19 +284,43 @@ class TimesheetTab(QWidget):
         setup_data_table(self.table)
         layout.addWidget(self.table, 1)
 
+        self.load_all_btn = QPushButton("")
+        self.load_all_btn.setVisible(False)
+        self.load_all_btn.clicked.connect(self._load_all)
+        layout.addWidget(self.load_all_btn, alignment=Qt.AlignLeft)
+
+    def _on_period_change(self):
+        self._show_all = False
+        self.reload()
+
+    def _load_all(self):
+        self._show_all = True
+        self.reload()
+
     def reload(self) -> None:
         self._refill_periods()
         period = self.period_combo.currentData()
         emp_q = self.emp_search.text().strip()
         cli_q = self.client_search.text().strip()
-        rows = records.list_timesheet(period, emp_q, cli_q)
+        limit = None if self._show_all else _PAGE_LIMIT
+        rows = records.list_timesheet(period, emp_q, cli_q, limit=limit)
         totals = records.timesheet_totals(period, emp_q, cli_q)
-        self.summary.setText(
-            f"{fmt_inr(totals.get('n', 0))} row(s) · "
-            f"{fmt_inr(totals.get('people', 0))} employee(s) · "
-            f"{fmt_inr(totals.get('clients', 0))} client(s) · "
-            f"{fmt_inr(totals.get('hours', 0), 1)} hours "
-            f"({fmt_inr(totals.get('billable_hours', 0), 1)} billable)")
+        total_n = totals.get("n", 0)
+        showing = len(rows)
+        truncated = (not self._show_all) and total_n > showing
+
+        msg = (f"{fmt_inr(total_n)} row(s) · "
+               f"{fmt_inr(totals.get('people', 0))} employee(s) · "
+               f"{fmt_inr(totals.get('clients', 0))} client(s) · "
+               f"{fmt_inr(totals.get('hours', 0), 1)} hours "
+               f"({fmt_inr(totals.get('billable_hours', 0), 1)} billable)")
+        if truncated:
+            msg += (f"   <span style='color:#92400E;'>"
+                    f"(showing first {fmt_inr(showing)})</span>")
+        self.summary.setText(msg)
+        self.load_all_btn.setVisible(truncated)
+        self.load_all_btn.setText(
+            f"Load all {fmt_inr(total_n)} row(s)" if truncated else "")
 
         body = [[
             (r["txn_date"] or "")[:10],
@@ -282,7 +346,12 @@ class TimesheetTab(QWidget):
         self.period_combo.addItem("(all periods)", None)
         for p in periods:
             self.period_combo.addItem(p, p)
-        if keep is not None:
+        if self._first_load and periods:
+            idx = self.period_combo.findData(periods[0])
+            if idx >= 0:
+                self.period_combo.setCurrentIndex(idx)
+            self._first_load = False
+        elif keep is not None:
             idx = self.period_combo.findData(keep)
             if idx >= 0:
                 self.period_combo.setCurrentIndex(idx)
@@ -319,10 +388,10 @@ class RecordsPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if hasattr(w, "reload"):
-                w.reload()
+        # Only load the currently-visible tab — loading all three on every
+        # Records nav-click was the main reason the page felt unresponsive
+        # when timesheet had thousands of rows.
+        self._refresh(self.tabs.currentIndex())
 
     def _refresh(self, index: int) -> None:
         w = self.tabs.widget(index)

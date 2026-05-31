@@ -52,8 +52,8 @@ def list_timesheet_periods() -> list[str]:
 
 # --- salary -----------------------------------------------------------------
 
-def list_salary(period: str | None = None,
-                employee_q: str = "") -> list[dict]:
+def list_salary(period: str | None = None, employee_q: str = "",
+                limit: int | None = None) -> list[dict]:
     sql = (
         "SELECT s.period, s.employee_name, "
         "  cc.code AS cc_code, cc.name AS cc_name, "
@@ -72,6 +72,9 @@ def list_salary(period: str | None = None,
         sql += " AND lower(s.employee_name) LIKE ?"
         params.append(f"%{employee_q.lower()}%")
     sql += " ORDER BY s.period DESC, s.employee_name"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
     with transaction() as conn:
         return [dict(r) for r in conn.execute(sql, params)]
 
@@ -99,7 +102,7 @@ def salary_totals(period: str | None = None,
 # --- timesheet --------------------------------------------------------------
 
 def list_timesheet(period: str | None = None, employee_q: str = "",
-                   client_q: str = "") -> list[dict]:
+                   client_q: str = "", limit: int | None = None) -> list[dict]:
     sql = (
         "SELECT t.txn_date, t.emp_name, t.client_raw, "
         "  c.canonical_name AS client_name, "
@@ -120,6 +123,9 @@ def list_timesheet(period: str | None = None, employee_q: str = "",
         like = f"%{client_q.lower()}%"
         params.extend([like, like])
     sql += " ORDER BY t.txn_date, t.emp_name"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
     with transaction() as conn:
         return [dict(r) for r in conn.execute(sql, params)]
 
