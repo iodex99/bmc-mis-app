@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.22** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.23** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.22)
+## 16. Post-launch iterations (v0.2.0 → v0.3.23)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,19 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.23 — Richer Generate-MIS preview (primary + comparison)
+- The "Preview totals" button on the Generate MIS page now shows:
+  - The actual period(s) being included
+  - Revenue (+ number of revenue entries / splits)
+  - Cost (+ split between expense and labour)
+  - Net profit
+  - Cost centres with activity
+- When a comparison period is also selected, the same block is shown
+  for the comparison run beneath the primary, so the operator can
+  sanity-check that the right data is being pulled before exporting.
+- No calc engine changes — period filtering was already correct
+  (`period IN (selected periods)` for vouchers / salary / timesheet).
 
 ### v0.3.22 — Filters & search across Review and Master Data; header sort
 - **Voucher Entity dropdown bug fix.** The combo was showing integer ids

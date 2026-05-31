@@ -184,11 +184,34 @@ class GeneratePage(QWidget):
         if not opts:
             return
         data = compute(opts)
-        self.summary.setText(
-            f"<b>Preview</b><br>Revenue: {fmt_inr(data.total_revenue)}<br>"
-            f"Cost: {fmt_inr(data.total_cost)}<br>"
-            f"Net profit: {fmt_inr(data.total_profit)}<br>"
-            f"Cost centres with activity: {len(data.cost_centres)}")
+        compare_periods = self._compare_periods()
+        compare_data = None
+        if compare_periods:
+            compare_data = compute(MISOptions(
+                periods=compare_periods,
+                include_reimbursement=opts.include_reimbursement,
+                overhead_mode=opts.overhead_mode))
+
+        def block(label: str, periods: list[str], d) -> str:
+            n_rev = len(d.revenue_facts)
+            n_exp = len(d.expense_facts)
+            n_lab = len(d.labour_facts)
+            return (
+                f"<div style='margin-bottom:10px;'>"
+                f"<b>{label}: {', '.join(periods)}</b><br>"
+                f"&nbsp;&nbsp;Revenue: ₹ {fmt_inr(d.total_revenue)} "
+                f"({fmt_inr(n_rev)} entr{'ies' if n_rev != 1 else 'y'})<br>"
+                f"&nbsp;&nbsp;Cost: ₹ {fmt_inr(d.total_cost)} "
+                f"({fmt_inr(n_exp)} expense, {fmt_inr(n_lab)} labour)<br>"
+                f"&nbsp;&nbsp;Net profit: ₹ {fmt_inr(d.total_profit)}<br>"
+                f"&nbsp;&nbsp;Cost centres with activity: "
+                f"{len(d.cost_centres)}"
+                f"</div>")
+
+        text = "<b>Preview</b><br><br>" + block("Primary", opts.periods, data)
+        if compare_data:
+            text += block("Comparison", compare_periods, compare_data)
+        self.summary.setText(text)
 
     def _generate(self) -> None:
         opts = self._options()
