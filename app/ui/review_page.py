@@ -55,8 +55,9 @@ class ClientTab(QWidget):
 
         intro = QLabel(
             "These client names appeared in your files but aren't linked to "
-            "your master list yet. Click <b>Resolve →</b> on each row to "
-            "match it to an existing client or create a new one.")
+            "your master list yet. Click <b>Resolve →</b> on a row to map it, "
+            "or <b>Delete</b> to permanently remove the underlying rows. "
+            "Use Ctrl+click / Shift+click to multi-select.")
         intro.setObjectName("pageNote")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -67,18 +68,23 @@ class ClientTab(QWidget):
         self.info.setObjectName("sectionTitle")
         bar.addWidget(self.info)
         bar.addStretch(1)
+        self.bulk_delete_btn = QPushButton("🗑 Delete selected")
+        self.bulk_delete_btn.setObjectName("danger")
+        self.bulk_delete_btn.clicked.connect(self._bulk_delete)
         auto_btn = QPushButton("⚡ Auto-resolve known")
         bulk_btn = QPushButton("➕ Create all as new")
         auto_btn.clicked.connect(self._auto)
         bulk_btn.clicked.connect(self._bulk)
+        bar.addWidget(self.bulk_delete_btn)
         bar.addWidget(auto_btn)
         bar.addWidget(bulk_btn)
         layout.addLayout(bar)
 
         self.table = QTableWidget()
-        setup_data_table(self.table)
+        setup_data_table(self.table, multi_select=True)
         self.table.doubleClicked.connect(
             lambda idx: self._resolve_row(idx.row()))
+        self.table.itemSelectionChanged.connect(self._update_bulk_button)
         layout.addWidget(self.table, 1)
 
         self.empty = _empty_state(
@@ -110,9 +116,19 @@ class ClientTab(QWidget):
                 rows,
                 action_label="Resolve →",
                 action_callback=self._resolve_row,
+                secondary_label="Delete",
+                secondary_callback=self._delete_row,
+                secondary_object_name="rowActionDanger",
                 status_for_row=_warn_pill,
                 stretch_col=0,
             )
+        self._update_bulk_button()
+
+    def _update_bulk_button(self) -> None:
+        sel = len({i.row() for i in self.table.selectedIndexes()})
+        self.bulk_delete_btn.setEnabled(sel > 0)
+        self.bulk_delete_btn.setText(
+            f"🗑 Delete selected ({sel})" if sel else "🗑 Delete selected")
 
     def _auto(self) -> None:
         n = resolution.apply_known_client_aliases()
@@ -148,6 +164,41 @@ class ClientTab(QWidget):
             dlg.apply()
             self.reload()
 
+    def _delete_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        r = self._rows[idx]
+        n_rows = r["count"]
+        if QMessageBox.warning(
+                self, "Delete this name?",
+                f"This permanently deletes all <b>{n_rows} source row(s)</b> "
+                f"for <b>{r['raw']}</b> (sales vouchers and / or timesheet "
+                "lines).<br><br>The MIS will no longer include any data for "
+                "this name. This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        resolution.delete_unmapped_client_rows(r["raw"])
+        self.reload()
+
+    def _bulk_delete(self) -> None:
+        indices = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not indices:
+            return
+        raws = [self._rows[i]["raw"] for i in indices]
+        total_rows = sum(self._rows[i]["count"] for i in indices)
+        if QMessageBox.warning(
+                self, f"Delete {len(raws)} names?",
+                f"Permanently delete <b>{len(raws)} client name(s)</b> and "
+                f"all <b>{total_rows} underlying row(s)</b>?<br><br>"
+                "This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        for raw in raws:
+            resolution.delete_unmapped_client_rows(raw)
+        self.reload()
+
 
 # --- Employee tab ------------------------------------------------------------
 
@@ -160,8 +211,9 @@ class EmployeeTab(QWidget):
 
         intro = QLabel(
             "Employees seen in the timesheet or salary sheet that don't yet "
-            "have a master record. Resolve each row to assign their manager "
-            "and cost centre.")
+            "have a master record. <b>Resolve →</b> maps them; <b>Delete</b> "
+            "removes their timesheet / salary rows entirely. Ctrl+click / "
+            "Shift+click to multi-select.")
         intro.setObjectName("pageNote")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -172,15 +224,20 @@ class EmployeeTab(QWidget):
         self.info.setObjectName("sectionTitle")
         bar.addWidget(self.info)
         bar.addStretch(1)
+        self.bulk_delete_btn = QPushButton("🗑 Delete selected")
+        self.bulk_delete_btn.setObjectName("danger")
+        self.bulk_delete_btn.clicked.connect(self._bulk_delete)
         bulk_btn = QPushButton("➕ Create all as new")
         bulk_btn.clicked.connect(self._bulk)
+        bar.addWidget(self.bulk_delete_btn)
         bar.addWidget(bulk_btn)
         layout.addLayout(bar)
 
         self.table = QTableWidget()
-        setup_data_table(self.table)
+        setup_data_table(self.table, multi_select=True)
         self.table.doubleClicked.connect(
             lambda idx: self._resolve_row(idx.row()))
+        self.table.itemSelectionChanged.connect(self._update_bulk_button)
         layout.addWidget(self.table, 1)
 
         self.empty = _empty_state(
@@ -210,9 +267,19 @@ class EmployeeTab(QWidget):
                 rows,
                 action_label="Resolve →",
                 action_callback=self._resolve_row,
+                secondary_label="Delete",
+                secondary_callback=self._delete_row,
+                secondary_object_name="rowActionDanger",
                 status_for_row=_warn_pill,
                 stretch_col=0,
             )
+        self._update_bulk_button()
+
+    def _update_bulk_button(self) -> None:
+        sel = len({i.row() for i in self.table.selectedIndexes()})
+        self.bulk_delete_btn.setEnabled(sel > 0)
+        self.bulk_delete_btn.setText(
+            f"🗑 Delete selected ({sel})" if sel else "🗑 Delete selected")
 
     def _bulk(self) -> None:
         if not self._rows:
@@ -220,8 +287,8 @@ class EmployeeTab(QWidget):
         if QMessageBox.question(
                 self, "Create all as new employees",
                 f"Create {len(self._rows)} new employee record(s)?\n\n"
-                "Manager and cost centre are left blank — you can fill them "
-                "in afterwards in Master Data.") != QMessageBox.Yes:
+                "Manager and cost centre are auto-inferred where the system "
+                "can, otherwise left blank.") != QMessageBox.Yes:
             return
         n = resolution.bulk_create_employees()
         QMessageBox.information(self, "Done", f"{n} employee(s) created.")
@@ -235,6 +302,41 @@ class EmployeeTab(QWidget):
         if dlg.exec() == ResolveEmployeeDialog.Accepted:
             dlg.apply()
             self.reload()
+
+    def _delete_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        r = self._rows[idx]
+        n_rows = r["count"]
+        if QMessageBox.warning(
+                self, "Delete this name?",
+                f"This permanently deletes all <b>{n_rows} timesheet / "
+                f"salary row(s)</b> for <b>{r['raw']}</b>.<br><br>"
+                "The MIS will no longer include this person's hours or "
+                "salary. This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        resolution.delete_unmapped_employee_rows(r["raw"])
+        self.reload()
+
+    def _bulk_delete(self) -> None:
+        indices = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not indices:
+            return
+        raws = [self._rows[i]["raw"] for i in indices]
+        total_rows = sum(self._rows[i]["count"] for i in indices)
+        if QMessageBox.warning(
+                self, f"Delete {len(raws)} names?",
+                f"Permanently delete <b>{len(raws)} employee name(s)</b> "
+                f"and all <b>{total_rows} underlying row(s)</b>?<br><br>"
+                "This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        for raw in raws:
+            resolution.delete_unmapped_employee_rows(raw)
+        self.reload()
 
 
 # --- Cost-centre string tab --------------------------------------------------
@@ -250,9 +352,9 @@ class CcStringTab(QWidget):
 
         intro = QLabel(
             "Tally's <b>Cost Center</b> column carries the partner / manager "
-            "behind each invoice. Map each distinct string to a partner (and "
-            "optionally a manager) — the mapping is remembered, so future "
-            "imports auto-resolve.")
+            "behind each invoice. <b>Resolve →</b> maps it; <b>Delete</b> "
+            "drops all invoices that used this string. Ctrl+click / "
+            "Shift+click to multi-select.")
         intro.setObjectName("pageNote")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -263,15 +365,20 @@ class CcStringTab(QWidget):
         self.info.setObjectName("sectionTitle")
         bar.addWidget(self.info)
         bar.addStretch(1)
+        self.bulk_delete_btn = QPushButton("🗑 Delete selected")
+        self.bulk_delete_btn.setObjectName("danger")
+        self.bulk_delete_btn.clicked.connect(self._bulk_delete)
         auto_btn = QPushButton("⚡ Re-apply known")
         auto_btn.clicked.connect(self._auto)
+        bar.addWidget(self.bulk_delete_btn)
         bar.addWidget(auto_btn)
         layout.addLayout(bar)
 
         self.table = QTableWidget()
-        setup_data_table(self.table)
+        setup_data_table(self.table, multi_select=True)
         self.table.doubleClicked.connect(
             lambda idx: self._resolve_row(idx.row()))
+        self.table.itemSelectionChanged.connect(self._update_bulk_button)
         layout.addWidget(self.table, 1)
 
         self.empty = _empty_state(
@@ -299,9 +406,19 @@ class CcStringTab(QWidget):
                 self.table, ["Cost Centre string", "Invoices"], rows,
                 action_label="Resolve →",
                 action_callback=self._resolve_row,
+                secondary_label="Delete",
+                secondary_callback=self._delete_row,
+                secondary_object_name="rowActionDanger",
                 status_for_row=_warn_pill,
                 stretch_col=0,
             )
+        self._update_bulk_button()
+
+    def _update_bulk_button(self) -> None:
+        sel = len({i.row() for i in self.table.selectedIndexes()})
+        self.bulk_delete_btn.setEnabled(sel > 0)
+        self.bulk_delete_btn.setText(
+            f"🗑 Delete selected ({sel})" if sel else "🗑 Delete selected")
 
     def _auto(self) -> None:
         n = resolution.apply_known_cc_string_mappings()
@@ -317,6 +434,41 @@ class CcStringTab(QWidget):
         if dlg.exec() == ResolveCcStringDialog.Accepted:
             dlg.apply()
             self.reload()
+
+    def _delete_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        r = self._rows[idx]
+        n_rows = r["count"]
+        if QMessageBox.warning(
+                self, "Delete this Cost Centre string?",
+                f"This permanently deletes all <b>{n_rows} sales "
+                f"voucher(s)</b> that used <b>{r['raw']}</b>.<br><br>"
+                "The MIS revenue for those invoices will be gone. This "
+                "cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        resolution.delete_unmapped_cc_string_rows(r["raw"])
+        self.reload()
+
+    def _bulk_delete(self) -> None:
+        indices = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not indices:
+            return
+        raws = [self._rows[i]["raw"] for i in indices]
+        total_rows = sum(self._rows[i]["count"] for i in indices)
+        if QMessageBox.warning(
+                self, f"Delete {len(raws)} Cost Centre strings?",
+                f"Permanently delete all <b>{total_rows} sales "
+                f"voucher(s)</b> across <b>{len(raws)} string(s)</b>?"
+                "<br><br>This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        for raw in raws:
+            resolution.delete_unmapped_cc_string_rows(raw)
+        self.reload()
 
 
 # --- Voucher review tab ------------------------------------------------------

@@ -333,6 +333,84 @@ def suggest_cc_for_raw_client(raw: str) -> int | None:
     return row["cost_centre_id"] if row else None
 
 
+# --- "delete unmapped rows" helpers used by the Review page ---------------
+
+def delete_unmapped_client_rows(raw: str) -> int:
+    """Permanently delete every sales voucher + timesheet line whose raw
+    name matches *raw* (whitespace-insensitive). Use when an unmapped client
+    name is bogus / shouldn't be in the MIS at all.
+
+    Returns the number of source rows deleted.
+    """
+    key = norm(raw)
+    deleted = 0
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT id, party_name FROM vouchers "
+            "WHERE kind = 'sales' AND client_id IS NULL "
+            "AND party_name <> ''").fetchall()
+        v_ids = [r["id"] for r in rows if norm(r["party_name"]) == key]
+        if v_ids:
+            ph = ",".join("?" * len(v_ids))
+            conn.execute(f"DELETE FROM vouchers WHERE id IN ({ph})", v_ids)
+            deleted += len(v_ids)
+        rows = conn.execute(
+            "SELECT id, client_raw FROM timesheet_entries "
+            "WHERE client_id IS NULL AND client_raw <> ''").fetchall()
+        t_ids = [r["id"] for r in rows if norm(r["client_raw"]) == key]
+        if t_ids:
+            ph = ",".join("?" * len(t_ids))
+            conn.execute(
+                f"DELETE FROM timesheet_entries WHERE id IN ({ph})", t_ids)
+            deleted += len(t_ids)
+    return deleted
+
+
+def delete_unmapped_employee_rows(raw: str) -> int:
+    """Permanently delete every timesheet + salary row for an employee name
+    (whitespace-insensitive). Returns the number of source rows deleted."""
+    key = norm(raw)
+    deleted = 0
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT id, emp_name FROM timesheet_entries "
+            "WHERE emp_name <> ''").fetchall()
+        ts_ids = [r["id"] for r in rows if norm(r["emp_name"]) == key]
+        if ts_ids:
+            ph = ",".join("?" * len(ts_ids))
+            conn.execute(
+                f"DELETE FROM timesheet_entries WHERE id IN ({ph})", ts_ids)
+            deleted += len(ts_ids)
+        rows = conn.execute(
+            "SELECT id, employee_name FROM salary_entries "
+            "WHERE employee_name <> ''").fetchall()
+        s_ids = [r["id"] for r in rows if norm(r["employee_name"]) == key]
+        if s_ids:
+            ph = ",".join("?" * len(s_ids))
+            conn.execute(
+                f"DELETE FROM salary_entries WHERE id IN ({ph})", s_ids)
+            deleted += len(s_ids)
+    return deleted
+
+
+def delete_unmapped_cc_string_rows(raw: str) -> int:
+    """Permanently delete every sales voucher whose raw Cost-Centre string
+    matches *raw* (whitespace-insensitive)."""
+    key = norm(raw)
+    deleted = 0
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT id, raw_cost_centre FROM vouchers "
+            "WHERE kind = 'sales' AND raw_cost_centre <> ''").fetchall()
+        v_ids = [r["id"] for r in rows
+                 if norm(r["raw_cost_centre"]) == key]
+        if v_ids:
+            ph = ",".join("?" * len(v_ids))
+            conn.execute(f"DELETE FROM vouchers WHERE id IN ({ph})", v_ids)
+            deleted += len(v_ids)
+    return deleted
+
+
 def bulk_create_clients() -> int:
     """Create a client master record for every still-unresolved raw name.
 

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.16** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.17** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -237,7 +237,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.16)
+## 16. Post-launch iterations (v0.2.0 → v0.3.17)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -325,6 +325,21 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.17 — Delete unmapped rows + multi-select on Review tabs
+- Every Review tab (Clients, Employees, Cost Centres) now has a per-row
+  **Delete** button in the Actions column (red, secondary) next to
+  **Resolve →**. Deleting an unmapped name permanently removes the
+  underlying sales-voucher / timesheet / salary rows associated with
+  that raw name. Strongly worded confirmation; no undo.
+- Tables switched from single-select to **extended-select** (Ctrl+click,
+  Shift+click). A "🗑 Delete selected (N)" button appears in the top
+  toolbar and is disabled until at least one row is picked.
+- Resolution service gains `delete_unmapped_client_rows()`,
+  `delete_unmapped_employee_rows()`, `delete_unmapped_cc_string_rows()`
+  — all whitespace-insensitive, all use Python-side `norm()` matching.
+- `voucher_splits` cascades on `vouchers` delete (existing FK), so cleanup
+  is automatic.
 
 ### v0.3.16 — Records page (browse stored data, delete an import)
 - New top-level nav **Records** (between Review & Map and Master Data)
