@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.19** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.20** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.19)
+## 16. Post-launch iterations (v0.2.0 → v0.3.20)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,12 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.20 — Hotfix: missing QPushButton import
+- v0.3.19 added the "Load all N row(s)" pagination button to the Salary
+  and Timesheet tabs but I forgot to import `QPushButton`. The app
+  crashed at launch with `NameError: name 'QPushButton' is not defined`.
+  One-line fix; no behaviour change.
 
 ### v0.3.19 — Records page performance: doesn't freeze on big data
 - Five separate fixes to `fill_table_with_actions` and the Records tabs:
