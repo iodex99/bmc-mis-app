@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.23** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.24** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.23)
+## 16. Post-launch iterations (v0.2.0 → v0.3.24)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,37 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.24 — Bilimoria-style Partner-Manager P&L matrix
+Reference: the firm's actual MIS workbook (Apr'25 → Jan'26) — the
+Partner-Manager P&L there uses a matrix layout where each partner is
+a merged super-header spanning their manager sub-columns, with a
+"Total" column per partner and a final "MIS Total" column on the right.
+Every cell is `SUMIFS` over flat data sheets. Replicated and enhanced:
+
+- **Replaced** the flat "Partner-Manager P&L" sheet with a matrix:
+  - Row 4: Partner names, merged across each partner's manager block.
+  - Row 5: Manager codes ("Self" column uses the partner's own code) +
+    "Total" per partner.
+  - Final column: "MIS Total" summing across all partners.
+- **New P&L rows** matching the firm's standard:
+  - Sales (Income) — `SUMIFS` filtered by Category = "Income"
+  - Reimbursement & OPE — `SUMIFS` filtered by Category IN ("Reimbursement",
+    "OPE")
+  - **Total Income** (bold, highlight) — `=Sales + Reimb`
+  - Salary (labour cost — partner-level, in the "Self" column only)
+  - Other Direct Expenses
+  - **Total Direct Costs** (bold) — `=Salary + Other`
+  - **Gross Profit** (bold) — `=Total Income − Total Direct Costs`
+  - **Gross Profit %** — `=Gross / Total Income`, with proper
+    per-partner-total ratio recomputation (not a sum of percentages).
+- **Service category detection** added to the Revenue data sheet:
+  service names matching "reimbur" → Reimbursement; "out of pocket" / 
+  "ope" → OPE; "round off" → Other; else → Income. The Category becomes
+  column H on the Revenue sheet, used by the SUMIFS in the P&L.
+- Tested against the real samples — sheet builds cleanly, formulas are
+  valid Excel SUMIFS / SUM / IF expressions, matrix scales to however
+  many manager combinations exist in the data.
 
 ### v0.3.23 — Richer Generate-MIS preview (primary + comparison)
 - The "Preview totals" button on the Generate MIS page now shows:

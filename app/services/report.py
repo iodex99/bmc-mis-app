@@ -42,8 +42,32 @@ _NORMAL = Font(name="Segoe UI", size=10)
 _KPI = Font(name="Segoe UI", size=18, bold=True, color=NAVY)
 
 _HEAD_FILL = PatternFill("solid", fgColor=NAVY)
+_SUBHEAD_FILL = PatternFill("solid", fgColor="3D4E70")
 _TOTAL_FILL = PatternFill("solid", fgColor=LIGHT)
+_SECTION_FILL = PatternFill("solid", fgColor="DEE5F1")
 _KPI_FILL = PatternFill("solid", fgColor=GREY)
+
+
+# Heuristic — what counts as "Reimbursement / OPE" income vs Sales income.
+# Used to populate the Category column on the Revenue data sheet so the
+# Partner-Manager P&L can split "Sales" from "Reimb & OPE" via SUMIFS.
+
+_REIMB_KEYWORDS = ("reimbur",)
+_OPE_KEYWORDS = ("out of pocket", "out-of-pocket", " ope", "oop")
+_OTHER_KEYWORDS = ("round off", "roundoff", "round-off")
+
+
+def _service_category(name: str) -> str:
+    if not name:
+        return "Income"
+    s = name.lower()
+    if any(k in s for k in _REIMB_KEYWORDS):
+        return "Reimbursement"
+    if any(k in s for k in _OPE_KEYWORDS) or s.strip() in ("ope",):
+        return "OPE"
+    if any(k in s for k in _OTHER_KEYWORDS):
+        return "Other"
+    return "Income"
 _thin = Side(style="thin", color="D2D6DE")
 _BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 _CENTER = Alignment(horizontal="center", vertical="center")
@@ -340,43 +364,277 @@ def _overhead_formula(r, kind, office_row, first, n_partners, mode) -> str:
             f"{office_cost}*$C{r}/SUM({rev_range}))")
 
 
-# --- Partner – Manager P&L ---------------------------------------------------
+# --- Partner – Manager P&L (matrix layout) ----------------------------------
+
+def _build_pm_matrix(data: MISData, lbl: dict):
+    """Build the partner-manager column structure for the P&L matrix.
+
+    Returns a list of partner blocks, where each block is:
+        (cc_code, cc_name, [(manager_label, manager_filter_value), …, ("Total", None)])
+
+    *manager_filter_value* is the value to SUMIFS against the data sheet's
+    Manager column. "(unassigned)" is used for splits the partner did
+    directly without delegating to a named manager (so the first sub-column
+    inside each partner block is the partner's "own" work).
+    """
+    cc_active_map = {c["id"]: c for c in lbl["cc_active"]}
+
+    pairs: set[tuple[int, int | None]] = set()
+    for f in data.revenue_facts + data.expense_facts + data.labour_facts:
+        cc_id = f.get("cost_centre_id")
+        if cc_id is None:
+            continue
+        mgr_id = f.get("manager_id")  # labour facts have no manager — fine
+        pairs.add((cc_id, mgr_id))
+
+    by_partner: dict[int, list] = {}
+    for cc_id, mgr_id in pairs:
+        cc = cc_active_map.get(cc_id)
+        if cc is None or cc["cc_type"] != "partner":
+            continue
+        by_partner.setdefault(cc_id, []).append(mgr_id)
+
+    result = []
+    for cc_id in sorted(by_partner.keys(),
+                        key=lambda i: cc_active_map[i]["code"]):
+        cc = cc_active_map[cc_id]
+        mgr_ids = set(by_partner[cc_id])
+        managers: list[tuple[str, str | None]] = []
+        # "Self" — partner did the work directly (no manager named).
+        if None in mgr_ids:
+            managers.append((cc["code"], "(unassigned)"))
+            mgr_ids.discard(None)
+        # Then each named manager.
+        for mgr_id in sorted(mgr_ids,
+                             key=lambda m: lbl["mgr"].get(m, "?") or "?"):
+            managers.append((lbl["mgr"].get(mgr_id, "?"),
+                             lbl["mgr"].get(mgr_id)))
+        # Per-partner subtotal column.
+        managers.append(("Total", None))
+        result.append((cc["code"], cc["name"], managers))
+    return result
+
 
 def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
+    """The headline P&L sheet — partner super-headers, manager sub-columns,
+    formula-driven from the Revenue / Expenses / Labour data sheets."""
     ws = wb.create_sheet("Partner-Manager P&L")
     ws.sheet_view.showGridLines = False
-    headers = ["CC", "Mgr", "Partner – Manager", "Revenue",
-               "Direct Expense", "Contribution"]
-    for i, w in enumerate([8, 8, 26, 16, 16, 16]):
-        ws.column_dimensions[get_column_letter(1 + i)].width = w
-    _cell(ws, 1, 1, "Partner – Manager Profitability", font=_TITLE)
-    hrow = 3
-    _header_row(ws, hrow, headers)
 
-    rev, exp = _q("Revenue"), _q("Expenses")
-    r = hrow + 1
-    first = r
-    for pm in data.partner_manager:
-        cc = lbl["cc"].get(pm["cost_centre_id"], "Unassigned")
-        mg = lbl["mgr"].get(pm["manager_id"], "(unassigned)")
-        _cell(ws, r, 1, cc, border=True)
-        _cell(ws, r, 2, mg, border=True)
-        _cell(ws, r, 3, pm["label"], border=True)
-        _cell(ws, r, 4, f"=SUMIFS({rev}!$G:$G,{rev}!$C:$C,$A{r},"
-              f"{rev}!$D:$D,$B{r})", fmt=INR, border=True)
-        _cell(ws, r, 5, f"=SUMIFS({exp}!$F:$F,{exp}!$C:$C,$A{r},"
-              f"{exp}!$D:$D,$B{r})", fmt=INR, border=True)
-        _cell(ws, r, 6, f"=D{r}-E{r}", fmt=INR, border=True)
-        r += 1
-    if r > first:
-        _cell(ws, r, 3, "TOTAL", font=_BOLD, fill=_TOTAL_FILL, border=True)
-        for col in (4, 5, 6):
-            L = get_column_letter(col)
-            _cell(ws, r, col, f"=SUM({L}{first}:{L}{r - 1})", font=_BOLD,
-                  fill=_TOTAL_FILL, fmt=INR, border=True)
-    _cell(ws, r + 2, 1,
-          "Note: labour cost is allocated by cost centre, not by manager.",
+    matrix = _build_pm_matrix(data, lbl)
+    if not matrix:
+        # Nothing to show — still draw a heading so the sheet isn't blank.
+        _cell(ws, 1, 1, "Partner – Manager Profitability", font=_TITLE)
+        _cell(ws, 3, 1,
+              "No data yet — once you import sales / expenses / salary the "
+              "full matrix will appear here.", font=_SUB)
+        return
+
+    # ---- Title + subtitle ----
+    _cell(ws, 1, 1, "Partner – Manager Profitability", font=_TITLE)
+    _cell(ws, 2, 1, "Period(s): " + ", ".join(data.options.periods),
           font=_SUB)
+
+    # ---- Column layout ----
+    # Col 1 = Particulars. Then each partner block contributes (len(managers))
+    # columns. Final column = "MIS Total".
+    block_starts: list[int] = []
+    cols_per_block: list[int] = []
+    col_idx = 2
+    for cc_code, cc_name, managers in matrix:
+        block_starts.append(col_idx)
+        cols_per_block.append(len(managers))
+        col_idx += len(managers)
+    mis_total_col = col_idx
+    last_col = mis_total_col
+
+    # Set column widths.
+    ws.column_dimensions["A"].width = 30
+    for col in range(2, last_col + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 14
+
+    # ---- Header rows ----
+    hdr_partner_row = 4
+    hdr_mgr_row = 5
+    body_start = 7
+
+    # Partner super-header (row 4): merged across each block's columns.
+    for (cc_code, cc_name, managers), start, count in zip(
+            matrix, block_starts, cols_per_block):
+        end = start + count - 1
+        ws.merge_cells(start_row=hdr_partner_row, start_column=start,
+                       end_row=hdr_partner_row, end_column=end)
+        _cell(ws, hdr_partner_row, start, cc_name, font=_HEAD,
+              fill=_HEAD_FILL, align=_CENTER, border=True)
+        for col in range(start, end + 1):
+            ws.cell(row=hdr_partner_row, column=col).fill = _HEAD_FILL
+            ws.cell(row=hdr_partner_row, column=col).border = _BORDER
+    _cell(ws, hdr_partner_row, mis_total_col, "MIS Total", font=_HEAD,
+          fill=_HEAD_FILL, align=_CENTER, border=True)
+    _cell(ws, hdr_partner_row, 1, "", fill=_HEAD_FILL)
+
+    # Manager sub-header (row 5): one cell per manager column + Total.
+    _cell(ws, hdr_mgr_row, 1, "Particulars", font=_HEAD, fill=_SUBHEAD_FILL,
+          align=_CENTER, border=True)
+    for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
+        for offset, (label, _filter) in enumerate(managers):
+            _cell(ws, hdr_mgr_row, start + offset, label, font=_HEAD,
+                  fill=_SUBHEAD_FILL, align=_CENTER, border=True)
+    _cell(ws, hdr_mgr_row, mis_total_col, "Total", font=_HEAD,
+          fill=_SUBHEAD_FILL, align=_CENTER, border=True)
+
+    # ---- P&L lines ----
+    rev, exp, lab = _q("Revenue"), _q("Expenses"), _q("Labour")
+
+    # Returns the SUMIFS formula for a (partner, manager) cell on a given
+    # data sheet's amount column.
+    def sumifs(sheet_q, amount_col, cc_code, mgr_filter, extra=None):
+        parts = [
+            f"{sheet_q}!${amount_col}:${amount_col}",
+            f"{sheet_q}!$C:$C", f'"{cc_code}"',
+        ]
+        if mgr_filter is not None:
+            parts.append(f"{sheet_q}!$D:$D")
+            parts.append(f'"{mgr_filter}"')
+        for col, value in (extra or []):
+            parts.append(f"{sheet_q}!${col}:${col}")
+            parts.append(f'"{value}"')
+        return "=SUMIFS(" + ",".join(parts) + ")"
+
+    def labour_sumifs(cc_code):
+        # Labour facts don't carry a manager, so cells under a manager column
+        # just read the partner-level labour cost. We attribute it to the
+        # partner's "Self" (first) column only, leaving manager columns at 0.
+        return f"=SUMIFS({lab}!$F:$F,{lab}!$B:$B,\"{cc_code}\")"
+
+    # Row layout. Each entry: (label, kind, params)
+    # kinds:
+    #   "sales"     -> Revenue, Category != Reimbursement / OPE
+    #   "reimb"     -> Revenue, Category IN (Reimbursement, OPE)
+    #   "salary"    -> Labour amount (partner-level only)
+    #   "expense"   -> Expenses
+    #   "income_sum"-> SUM of sales + reimb rows
+    #   "cost_sum"  -> SUM of salary + expense rows
+    #   "gross"     -> income_sum - cost_sum
+    #   "gross_pct" -> gross / income
+    #   "net"       -> gross   (until office overhead is added)
+    #   "net_pct"   -> net / income
+    #   "section"   -> bold label spanning a row
+    # We track by row number for cross-referencing.
+    plan = [
+        ("Sales (Income)", "sales"),
+        ("Reimbursement & OPE", "reimb"),
+        ("Total Income", "income_sum"),
+        ("", "blank"),
+        ("Salary (labour cost)", "salary"),
+        ("Other Direct Expenses", "expense"),
+        ("Total Direct Costs", "cost_sum"),
+        ("", "blank"),
+        ("Gross Profit", "gross"),
+        ("Gross Profit %", "gross_pct"),
+    ]
+
+    r = body_start
+    rows_by_kind: dict[str, int] = {}
+    for label, kind in plan:
+        if kind == "blank":
+            r += 1
+            continue
+        rows_by_kind[kind] = r
+        is_total = kind in ("income_sum", "cost_sum", "gross", "gross_pct")
+        font = _BOLD if is_total else _NORMAL
+        fill = _TOTAL_FILL if is_total else None
+        _cell(ws, r, 1, label, font=font, fill=fill, border=True)
+
+        for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
+            for offset, (mgr_label, mgr_filter) in enumerate(managers):
+                col = start + offset
+                is_total_col = (offset == len(managers) - 1)
+                cell_fmt = PCT if kind.endswith("_pct") else INR
+                if is_total_col and kind == "gross_pct":
+                    # Recompute the ratio at the partner level — summing
+                    # percentages doesn't make sense.
+                    inc_r = rows_by_kind["income_sum"]
+                    gross_r = rows_by_kind["gross"]
+                    L = get_column_letter(col)
+                    formula = (f"=IF({L}{inc_r}=0,0,"
+                               f"{L}{gross_r}/{L}{inc_r})")
+                elif is_total_col:
+                    # Plain SUM across the partner's manager columns.
+                    from_col = start
+                    to_col = start + len(managers) - 2
+                    if from_col > to_col:
+                        formula = 0
+                    else:
+                        formula = (f"=SUM({get_column_letter(from_col)}{r}:"
+                                   f"{get_column_letter(to_col)}{r})")
+                elif kind == "sales":
+                    formula = sumifs(rev, "G", cc_code, mgr_filter,
+                                     extra=[("H", "Income")])
+                elif kind == "reimb":
+                    # Reimbursement + OPE together — two SUMIFS summed.
+                    f1 = sumifs(rev, "G", cc_code, mgr_filter,
+                                extra=[("H", "Reimbursement")])
+                    f2 = sumifs(rev, "G", cc_code, mgr_filter,
+                                extra=[("H", "OPE")])
+                    formula = "=" + f1[1:] + "+" + f2[1:]
+                elif kind == "income_sum":
+                    sales_r = rows_by_kind["sales"]
+                    reimb_r = rows_by_kind["reimb"]
+                    formula = (f"={get_column_letter(col)}{sales_r}+"
+                               f"{get_column_letter(col)}{reimb_r}")
+                elif kind == "salary":
+                    # Labour cost is partner-level; attribute to "Self" col.
+                    if offset == 0:
+                        formula = labour_sumifs(cc_code)
+                    else:
+                        formula = 0
+                elif kind == "expense":
+                    formula = sumifs(exp, "F", cc_code, mgr_filter)
+                elif kind == "cost_sum":
+                    sal_r = rows_by_kind["salary"]
+                    exp_r = rows_by_kind["expense"]
+                    formula = (f"={get_column_letter(col)}{sal_r}+"
+                               f"{get_column_letter(col)}{exp_r}")
+                elif kind == "gross":
+                    inc_r = rows_by_kind["income_sum"]
+                    cost_r = rows_by_kind["cost_sum"]
+                    formula = (f"={get_column_letter(col)}{inc_r}-"
+                               f"{get_column_letter(col)}{cost_r}")
+                elif kind == "gross_pct":
+                    inc_r = rows_by_kind["income_sum"]
+                    gross_r = rows_by_kind["gross"]
+                    L = get_column_letter(col)
+                    formula = (f"=IF({L}{inc_r}=0,0,"
+                               f"{L}{gross_r}/{L}{inc_r})")
+                else:
+                    formula = 0
+
+                _cell(ws, r, col, formula, font=font, fill=fill, fmt=cell_fmt,
+                      border=True)
+
+        # MIS Total column — sum across each partner's "Total" sub-column.
+        L = get_column_letter(mis_total_col)
+        if kind == "gross_pct":
+            inc_r = rows_by_kind["income_sum"]
+            gross_r = rows_by_kind["gross"]
+            mis_formula = (f"=IF({L}{inc_r}=0,0,"
+                           f"{L}{gross_r}/{L}{inc_r})")
+        else:
+            total_refs = [f"{get_column_letter(start + count - 1)}{r}"
+                          for start, count in zip(block_starts, cols_per_block)]
+            mis_formula = "=" + "+".join(total_refs) if total_refs else 0
+        _cell(ws, r, mis_total_col, mis_formula, font=_BOLD,
+              fill=_TOTAL_FILL,
+              fmt=PCT if kind == "gross_pct" else INR, border=True)
+
+        r += 1
+
+    ws.freeze_panes = f"B{body_start}"
+    _cell(ws, r + 1, 1,
+          "Labour is allocated to the partner cost-centre (not split by "
+          "manager); other expenses follow the Cost Center column on the "
+          "voucher split.", font=_SUB)
 
 
 # --- Entity & Service --------------------------------------------------------
@@ -443,16 +701,24 @@ def _write_data_sheet(wb, name, headers, widths, rows):
 
 
 def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
-    rows = [[f["period"], lbl["ent"].get(f["entity_id"], "(unspecified)"),
-             lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
-             lbl["mgr"].get(f["manager_id"], "(unassigned)"),
-             lbl["svc"].get(f["service_id"], "(unspecified)"),
-             lbl["cli"].get(f["client_id"], "(unmapped)"),
-             round(f["amount"], 2)]
-            for f in data.revenue_facts]
-    _write_data_sheet(wb, "Revenue" + suffix,
-                      ["Period", "Entity", "CostCentre", "Manager", "Service",
-                       "Client", "Amount"], [10, 24, 12, 12, 20, 28, 14], rows)
+    rows = []
+    for f in data.revenue_facts:
+        svc_name = lbl["svc"].get(f["service_id"], "(unspecified)")
+        rows.append([
+            f["period"],
+            lbl["ent"].get(f["entity_id"], "(unspecified)"),
+            lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+            lbl["mgr"].get(f["manager_id"], "(unassigned)"),
+            svc_name,
+            lbl["cli"].get(f["client_id"], "(unmapped)"),
+            round(f["amount"], 2),
+            _service_category(svc_name),
+        ])
+    _write_data_sheet(
+        wb, "Revenue" + suffix,
+        ["Period", "Entity", "CostCentre", "Manager", "Service",
+         "Client", "Amount", "Category"],
+        [10, 24, 12, 12, 22, 28, 14, 14], rows)
 
 
 def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
