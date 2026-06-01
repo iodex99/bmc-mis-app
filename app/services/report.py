@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 from .. import config
 from ..database import transaction
 from ..util import fmt_inr
-from .calc import MISData, OVERHEAD_EQUAL, OVERHEAD_REVENUE
+from .calc import MISData, OVERHEAD_EQUAL, OVERHEAD_REVENUE, financial_year
 
 # --- palette & formats -------------------------------------------------------
 
@@ -138,6 +138,7 @@ def generate(data: MISData, path: str | Path,
 
     _sheet_cover(wb, data, compare)
     _sheet_dashboard(wb, data)
+    _sheet_budget_monthly(wb, data, lbl)
     rows_pl = _sheet_cost_centre(wb, data, lbl)
     _sheet_partner_manager(wb, data, lbl)
     _sheet_entity(wb, data, lbl)
@@ -247,6 +248,140 @@ def _link_dashboard(wb: Workbook, rows_pl: dict) -> None:
         cell = ws.cell(row=r, column=c, value=formula)
         cell.font = _KPI
         cell.number_format = INR
+
+
+# --- Budget vs Monthly Sales -------------------------------------------------
+
+def _fy_months_through(fy: str, end_period: str) -> list[str]:
+    """All FY months (Apr-start to Mar-end) up to and including *end_period*.
+
+    Indian financial year, e.g. ``fy='2025-26'`` → ``['2025-04', ..., '2026-03']``.
+    Truncated to *end_period* (so a Jan run shows Apr-Jan, not the empty
+    Feb-Mar months ahead).
+    """
+    try:
+        start_year = int(fy.split('-')[0])
+    except (ValueError, IndexError):
+        return []
+    months = [f"{start_year:04d}-{m:02d}" for m in range(4, 13)]
+    months += [f"{start_year + 1:04d}-{m:02d}" for m in range(1, 4)]
+    if end_period in months:
+        return months[:months.index(end_period) + 1]
+    return months
+
+
+def _month_short(period: str) -> str:
+    """``'2025-04'`` → ``'Apr 25'`` for compact column headers."""
+    try:
+        return _dt.date(int(period[:4]), int(period[5:7]), 1) \
+            .strftime("%b %y")
+    except (ValueError, IndexError):
+        return period
+
+
+def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
+    """Year-to-date monthly sales per partner cost centre, vs annual budget.
+
+    Independent of the selected MIS period: always shows the full FY-to-date
+    picture so the board sees trend context alongside the headline P&L.
+    Monthly cells are values (read from DB) since the Revenue data sheet only
+    contains the selected periods; totals/variance/average are formulas so
+    edits still recalculate.
+    """
+    if not data.options.periods:
+        return
+    latest = max(data.options.periods)
+    fy = financial_year(latest)
+    months = _fy_months_through(fy, latest)
+    partners = [c for c in lbl["cc_active"] if c["cc_type"] == "partner"]
+    if not months or not partners:
+        return
+
+    placeholders = ','.join('?' * len(months))
+    with transaction() as conn:
+        sales_rows = conn.execute(
+            f"SELECT cc.code AS code, v.period AS period, "
+            f"       COALESCE(SUM(s.amount), 0) AS amount "
+            f"FROM voucher_splits s "
+            f"JOIN vouchers v ON v.id = s.voucher_id "
+            f"JOIN cost_centres cc ON cc.id = s.cost_centre_id "
+            f"WHERE v.kind = 'sales' AND v.period IN ({placeholders}) "
+            f"  AND cc.cc_type = 'partner' "
+            f"GROUP BY cc.code, v.period",
+            months).fetchall()
+        budget_rows = conn.execute(
+            "SELECT cc.code AS code, t.target_amount AS amount "
+            "FROM targets t "
+            "JOIN cost_centres cc ON cc.id = t.cost_centre_id "
+            "WHERE t.financial_year = ?", (fy,)).fetchall()
+
+    monthly: dict[str, dict[str, float]] = {}
+    for row in sales_rows:
+        monthly.setdefault(row["code"], {})[row["period"]] = row["amount"]
+    budgets = {row["code"]: row["amount"] for row in budget_rows}
+
+    ws = wb.create_sheet("Budget vs Monthly Sales")
+    ws.sheet_view.showGridLines = False
+
+    ws.column_dimensions["A"].width = 10  # Code
+    ws.column_dimensions["B"].width = 26  # Cost Centre
+    ws.column_dimensions["C"].width = 18  # Annual Budget
+    for i, _ in enumerate(months):
+        ws.column_dimensions[get_column_letter(4 + i)].width = 13
+    ytd_col = 4 + len(months)
+    var_col = ytd_col + 1
+    avg_col = var_col + 1
+    for col in (ytd_col, var_col, avg_col):
+        ws.column_dimensions[get_column_letter(col)].width = 16
+
+    _cell(ws, 1, 1, f"Budget vs Monthly Sales  —  FY {fy}", font=_TITLE)
+    _cell(ws, 2, 1, "Year-to-date sales by partner cost centre. Annual budget "
+                    "is read from the Targets master.", font=_SUB)
+
+    headers = (["Code", "Cost Centre", "Annual Budget"]
+               + [_month_short(m) for m in months]
+               + ["YTD Total", "Variance vs Budget", "Avg / Active Month"])
+    hrow = 4
+    _header_row(ws, hrow, headers)
+
+    body_start = hrow + 1
+    r = body_start
+    first_m = get_column_letter(4)
+    last_m = get_column_letter(4 + len(months) - 1)
+    ytd_L = get_column_letter(ytd_col)
+
+    for partner in partners:
+        code = partner["code"]
+        _cell(ws, r, 1, code, border=True)
+        _cell(ws, r, 2, partner["name"], border=True)
+        _cell(ws, r, 3, round(budgets.get(code, 0.0), 2),
+              fmt=INR, border=True)
+        for i, period in enumerate(months):
+            col = 4 + i
+            amount = monthly.get(code, {}).get(period, 0.0)
+            _cell(ws, r, col, round(amount, 2), fmt=INR, border=True)
+        _cell(ws, r, ytd_col, f"=SUM({first_m}{r}:{last_m}{r})",
+              font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
+        _cell(ws, r, var_col, f"=C{r}-{ytd_L}{r}", fmt=INR, border=True)
+        _cell(ws, r, avg_col,
+              f'=IFERROR({ytd_L}{r}/COUNTIF({first_m}{r}:{last_m}{r},'
+              f'">0"),0)', fmt=INR, border=True)
+        r += 1
+
+    last_body = r - 1
+    _cell(ws, r, 1, "", fill=_TOTAL_FILL, border=True)
+    _cell(ws, r, 2, "TOTAL", font=_BOLD, fill=_TOTAL_FILL, border=True)
+    for col in range(3, avg_col + 1):
+        L = get_column_letter(col)
+        if col == avg_col:
+            formula = (f'=IFERROR({ytd_L}{r}/COUNTIF({first_m}{r}:{last_m}{r},'
+                       f'">0"),0)')
+        else:
+            formula = f"=SUM({L}{body_start}:{L}{last_body})"
+        _cell(ws, r, col, formula, font=_BOLD, fill=_TOTAL_FILL,
+              fmt=INR, border=True)
+
+    ws.freeze_panes = f"D{body_start}"
 
 
 # --- Cost Centre P&L (the core sheet) ----------------------------------------
@@ -521,6 +656,12 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
     #   "net_pct"   -> net / income
     #   "section"   -> bold label spanning a row
     # We track by row number for cross-referencing.
+    # Allocated overhead per partner (computed by calc engine; depends on the
+    # operator's overhead-allocation mode). Written into the Total column of
+    # the "Office Overhead" row.
+    overhead_by_code = {c.code: c.allocated_overhead
+                         for c in data.cost_centres if not c.is_office}
+
     plan = [
         ("Sales (Income)", "sales"),
         ("Reimbursement & OPE", "reimb"),
@@ -532,6 +673,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         ("", "blank"),
         ("Gross Profit", "gross"),
         ("Gross Profit %", "gross_pct"),
+        ("", "blank"),
+        ("Office Overhead (allocated)", "overhead"),
+        ("Net Profit", "net"),
+        ("Net Profit %", "net_pct"),
     ]
 
     r = body_start
@@ -541,7 +686,8 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
             r += 1
             continue
         rows_by_kind[kind] = r
-        is_total = kind in ("income_sum", "cost_sum", "gross", "gross_pct")
+        is_total = kind in ("income_sum", "cost_sum", "gross", "gross_pct",
+                            "net", "net_pct")
         font = _BOLD if is_total else _NORMAL
         fill = _TOTAL_FILL if is_total else None
         _cell(ws, r, 1, label, font=font, fill=fill, border=True)
@@ -559,6 +705,21 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     L = get_column_letter(col)
                     formula = (f"=IF({L}{inc_r}=0,0,"
                                f"{L}{gross_r}/{L}{inc_r})")
+                elif is_total_col and kind == "overhead":
+                    # Allocated office overhead is partner-level, not
+                    # manager-level — write the value into the Total column.
+                    formula = round(overhead_by_code.get(cc_code, 0.0), 2)
+                elif is_total_col and kind == "net":
+                    gross_r = rows_by_kind["gross"]
+                    overhead_r = rows_by_kind["overhead"]
+                    L = get_column_letter(col)
+                    formula = f"={L}{gross_r}-{L}{overhead_r}"
+                elif is_total_col and kind == "net_pct":
+                    inc_r = rows_by_kind["income_sum"]
+                    net_r = rows_by_kind["net"]
+                    L = get_column_letter(col)
+                    formula = (f"=IF({L}{inc_r}=0,0,"
+                               f"{L}{net_r}/{L}{inc_r})")
                 elif is_total_col:
                     # Plain SUM across the partner's manager columns.
                     from_col = start
@@ -568,6 +729,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     else:
                         formula = (f"=SUM({get_column_letter(from_col)}{r}:"
                                    f"{get_column_letter(to_col)}{r})")
+                elif kind in ("overhead", "net", "net_pct"):
+                    # Manager-level cells for overhead / net are blank —
+                    # office overhead doesn't break down by manager.
+                    formula = 0
                 elif kind == "sales":
                     formula = sumifs(rev, "G", cc_code, mgr_filter,
                                      extra=[("H", "Income")])
@@ -620,13 +785,18 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
             gross_r = rows_by_kind["gross"]
             mis_formula = (f"=IF({L}{inc_r}=0,0,"
                            f"{L}{gross_r}/{L}{inc_r})")
+        elif kind == "net_pct":
+            inc_r = rows_by_kind["income_sum"]
+            net_r = rows_by_kind["net"]
+            mis_formula = (f"=IF({L}{inc_r}=0,0,"
+                           f"{L}{net_r}/{L}{inc_r})")
         else:
             total_refs = [f"{get_column_letter(start + count - 1)}{r}"
                           for start, count in zip(block_starts, cols_per_block)]
             mis_formula = "=" + "+".join(total_refs) if total_refs else 0
         _cell(ws, r, mis_total_col, mis_formula, font=_BOLD,
               fill=_TOTAL_FILL,
-              fmt=PCT if kind == "gross_pct" else INR, border=True)
+              fmt=PCT if kind.endswith("_pct") else INR, border=True)
 
         r += 1
 

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.24** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.25** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.24)
+## 16. Post-launch iterations (v0.2.0 → v0.3.25)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,35 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.25 — Budget vs Monthly Sales sheet; Net Profit on the matrix
+Picking up where v0.3.24 left off — three more pieces lifted from the firm's
+reference workbook layout:
+
+- **New "Budget vs Monthly Sales" sheet** (between Dashboard and Cost Centre
+  P&L). Layout mirrors their "Budget and P&L" top block:
+  - One row per partner cost centre, one column per FY month from April
+    through the latest selected period (so a January MIS shows Apr–Jan).
+  - "Annual Budget" column reads from the Targets master for the relevant
+    Indian FY (e.g. `2025-26`).
+  - Monthly cells are values queried directly from the database — they show
+    the full FY-to-date picture regardless of which periods the operator
+    selected for the main MIS (so the board still sees prior-month context
+    on a single-month run).
+  - "YTD Total", "Variance vs Budget", "Avg / Active Month" are formula-
+    driven (`SUM`, `COUNTIF`), so editing a monthly value recalculates.
+  - Total row at the bottom; freeze panes after the Budget column.
+- **Office Overhead, Net Profit, Net Profit % rows added to the Partner-
+  Manager P&L matrix.** Office overhead is partner-level (allocated by the
+  calc engine's overhead-mode), so manager columns stay blank and only the
+  Total column carries the value. Net Profit = Gross − Overhead; Net Profit
+  % is recomputed (not summed) at every Total / MIS Total cell.
+- **Wired into `generate()`** in the right order: Cover → Dashboard →
+  Budget vs Monthly Sales → Cost Centre P&L → Partner-Manager P&L → …
+- Smoke-tested with synthetic data: all formulas render as valid Excel
+  expressions; per-cell values match expectations (manager columns = 0
+  on overhead/net rows, Total columns carry the values, MIS Total sums
+  across partner Totals for amounts and recomputes ratios for percentages).
 
 ### v0.3.24 — Bilimoria-style Partner-Manager P&L matrix
 Reference: the firm's actual MIS workbook (Apr'25 → Jan'26) — the
