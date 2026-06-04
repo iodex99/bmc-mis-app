@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.25** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.26** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.25)
+## 16. Post-launch iterations (v0.2.0 → v0.3.26)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,62 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.26 — Smart Tally voucher-dump parser + dedup
+The user's "actual" Tally export — multi-row voucher blocks with indented
+Dr/Cr cost-centre sub-rows — is now the primary supported format. Goal: zero
+manual column mapping, per-line cost-centre attribution, idempotent
+re-uploads. Verified against the four sample files (BMCA sale, Corporate
+sale, BMCA purchase, Corporate purchase).
+
+- **Header sniffer** (`app/importing/sniffer.py`). Scans the first ~30 rows
+  for a Tally-style header (Date + Particulars + Vch No + Debit + Credit;
+  synonyms tolerated — "Vch No.", "Voucher No.", "Vch Num", etc.). Returns
+  the column map auto-derived from the header text — column positions can
+  differ entity-to-entity. Also detects "Sales Register" / "Purchase
+  Register" banner and overrides the file-type dropdown if the operator
+  picked the wrong one. Import UI bypasses the column-mapping dialog
+  entirely when the sniffer succeeds.
+- **`parse_tally` rewritten** for per-line splits. Each ledger row inside a
+  voucher block becomes its own `VoucherLine` (service + cost-centre +
+  amount + is_tax flag). Multi-service vouchers where audit goes to one
+  partner and certification goes to another now split correctly — the
+  previous version aggregated to a single "dominant" CC per voucher.
+- **`VoucherLine` dataclass** added to `app/importing/models.py`; populated
+  by the voucher-dump parser via the new `ParsedVoucher.line_splits` list.
+- **Per-split cost-centre string.** New `voucher_splits.raw_cost_centre`
+  column (migration v5) — each split carries its own Tally CC string so
+  multi-CC vouchers stay attributed line-by-line. Existing splits are
+  back-filled from their parent voucher's `raw_cost_centre`.
+- **`apply_known_cc_string_mappings`** now updates each split using the
+  split's own `raw_cost_centre` (falling back to the parent voucher's for
+  legacy data). `unresolved_cc_strings` and `delete_unmapped_cc_string_rows`
+  follow the same pattern.
+- **Dedup on re-import.** Vouchers carry a natural key of `(entity_id,
+  kind, vch_no)`. On commit, vouchers with a matching key are skipped;
+  amount mismatches are recorded and surfaced in the post-import dialog.
+  New `CommitReport` dataclass replaces the bare `batch_id` return so the
+  UI can show a per-batch breakdown ("19 new, 0 duplicates, 0 mismatches").
+  Migration v5 adds an index on `(entity_id, kind, vch_no)` for the lookup.
+- **GST / TDS rows** are detected by keyword (`is_tax_head`) and rolled
+  into `voucher.tax_amount` instead of becoming splits — keeps partner
+  revenue numbers clean.
+- **Service auto-create** unchanged but now exercised by the new parser —
+  unrecognised ledger names ("Certification", "Audit & Assurance", etc.)
+  get inserted into the services master on first sight.
+- **Verified results** against the real files:
+  - BMCA sale: 19 vouchers, splits attributed to VK / JV / SD / AM by the
+    existing fuzzy CC matcher (including the partner-manager string
+    "Gaurav S -Aakash" → AM).
+  - Corporate sale: 31 parsed → 30 inserted + 1 intra-file dedup
+    ("CSM/26-27/74" appears twice in the source); per-line CC splits like
+    "Shreyans-Bhavya" resolve to (SD, Bhavya-as-manager) correctly.
+  - Purchase BMCA / Corporate: Staff Welfare / Professional Charges
+    attributed to `Office` cost centre.
+  - Re-importing the same file: 19 new on first pass, 0 new + 19 skipped
+    on the second.
+  - Modifying one voucher's gross amount and re-uploading: 18 skipped +
+    1 flagged as an amount mismatch with the prior gross + new gross.
 
 ### v0.3.25 — Budget vs Monthly Sales sheet; Net Profit on the matrix
 Picking up where v0.3.24 left off — three more pieces lifted from the firm's

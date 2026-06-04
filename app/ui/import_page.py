@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config, repository as repo
-from ..importing import commit, excel_reader, parsers, templates
+from ..importing import commit, excel_reader, parsers, sniffer, templates
 from ..services import resolution
 from ..util import fmt_inr
 from .column_mapping import ColumnMappingDialog
@@ -159,6 +159,36 @@ class ImportPage(QWidget):
         self._result = None
         guess = excel_reader.guess_header_row(self._grid)
         self._signature = templates.layout_signature(self._grid, guess)
+
+        # 1. Voucher-dump sniffer — handles the "actual" Tally export format
+        #    automatically. If the file's headers fingerprint as a Tally
+        #    voucher-dump (Date + Particulars + Vch No + Debit + Credit),
+        #    we bypass the column-mapping dialog entirely and parse straight
+        #    away. Column positions can differ between entities and Tally
+        #    versions; the sniffer reads them from the header text.
+        ft = self.file_type
+        if ft in (config.FILE_TYPE_SALES, config.FILE_TYPE_PURCHASE):
+            sniffed = sniffer.sniff(self._grid)
+            if sniffed:
+                # If the banner says "Sales/Purchase Register" and disagrees
+                # with the file-type dropdown, prefer the banner — the
+                # operator may have picked the wrong type by mistake.
+                if sniffed["kind"] and sniffed["kind"] != ft:
+                    pos = self.type_combo.findData(sniffed["kind"])
+                    if pos >= 0:
+                        self.type_combo.setCurrentIndex(pos)
+                self._mapping = {
+                    "header_row": sniffed["header_row"],
+                    "columns": sniffed["colmap"],
+                }
+                self.status.setText(
+                    f"{self._path.name} — auto-detected voucher-dump layout "
+                    f"(header on row {sniffed['header_row'] + 1}).")
+                self._parse_and_preview()
+                return
+
+        # 2. Template cache — used by the wide-flat sales format and the
+        #    timesheet / salary sheets.
         saved = templates.find_template(self.file_type, self._signature)
         if saved:
             self._mapping = saved
@@ -249,14 +279,18 @@ class ImportPage(QWidget):
         period = _dominant_period(self._result)
         prior = commit.existing_batch(entity_id, self.file_type, period)
         if prior:
+            # An existing batch is only an issue if the new file isn't just a
+            # re-upload of the same data. Dedup runs anyway — let the user
+            # proceed if they want; the dedup count tells them what happened.
             if QMessageBox.question(
                     self, "Already imported",
                     f"A {self.file_type} import for this entity/period already "
                     f"exists ('{prior['file_name']}', {prior['imported_at']}).\n\n"
-                    "Import this file as well?") != QMessageBox.Yes:
+                    "Continue? Vouchers with a matching voucher number will be "
+                    "skipped automatically.") != QMessageBox.Yes:
                 return
         try:
-            batch_id = commit.commit_result(
+            report = commit.commit_result(
                 self._result, entity_id, self._path.name)
         except Exception as exc:
             QMessageBox.critical(self, "Import failed", str(exc))
@@ -269,9 +303,27 @@ class ImportPage(QWidget):
         unmapped_e = len(resolution.unresolved_employees())
         unmapped_cc = len(resolution.unresolved_cc_strings())
 
-        rows = self._result.row_count
-        head = (f"Import committed — batch #{batch_id}, {fmt_inr(rows)} row(s) "
-                "added.")
+        head_lines = [
+            f"Import committed — batch #{report.batch_id}.",
+            f"  • {fmt_inr(report.new_vouchers)} new voucher(s) added.",
+        ]
+        if report.skipped_duplicates:
+            head_lines.append(
+                f"  • {fmt_inr(report.skipped_duplicates)} duplicate "
+                "voucher(s) skipped (same voucher number, same amount).")
+        if report.amount_mismatches:
+            head_lines.append(
+                f"  ⚠ {fmt_inr(len(report.amount_mismatches))} voucher(s) "
+                "had a matching number but a different amount — they were "
+                "skipped. Review the prior batch in Records if needed.")
+        if report.timesheet_rows:
+            head_lines.append(
+                f"  • {fmt_inr(report.timesheet_rows)} timesheet row(s) added.")
+        if report.salary_rows:
+            head_lines.append(
+                f"  • {fmt_inr(report.salary_rows)} salary row(s) added.")
+        head = "\n".join(head_lines)
+
         auto_total = auto_linked + cc_linked
         if auto_total:
             head += (f"\n\n{fmt_inr(auto_total)} row(s) auto-mapped from "

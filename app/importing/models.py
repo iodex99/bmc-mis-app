@@ -7,6 +7,22 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class VoucherLine:
+    """One ledger line inside a Tally voucher block.
+
+    A real-world voucher splits into several lines — typically one revenue
+    line ("Professional Fees") plus separate tax lines ("Output CGST 9%",
+    "Output SGST 9%"). Each line can carry its own Cost Centre tag from
+    Tally (the indented Dr/Cr sub-row); a multi-service voucher may have
+    different partners attributed to different lines.
+    """
+    service: str = ""                    # ledger head text from Tally
+    cost_centre: str | None = None       # raw CC string ("Mr. Vishal Kothari")
+    amount: float = 0.0
+    is_tax: bool = False                 # CGST / SGST / IGST / TDS / round-off
+
+
+@dataclass
 class ParsedVoucher:
     """One Tally voucher (sales or expense) extracted from a register."""
     date: _dt.date | None = None
@@ -25,6 +41,11 @@ class ParsedVoucher:
     # service column in the row. When set, the importer creates one
     # voucher_split per entry instead of a single full-amount split.
     service_splits: list[tuple[str, float]] = field(default_factory=list)
+    # Voucher-dump parser output: one VoucherLine per ledger row inside the
+    # block, each carrying its own service + cost-centre + amount. When set,
+    # commit produces one split per non-tax line; tax lines roll into
+    # ``tax_amount``. Takes precedence over ``service_splits``.
+    line_splits: list[VoucherLine] = field(default_factory=list)
 
     @property
     def description(self) -> str:

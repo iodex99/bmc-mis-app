@@ -396,20 +396,34 @@ def delete_unmapped_employee_rows(raw: str) -> int:
 
 
 def delete_unmapped_cc_string_rows(raw: str) -> int:
-    """Permanently delete every sales voucher whose raw Cost-Centre string
-    matches *raw* (whitespace-insensitive)."""
+    """Permanently delete every voucher split whose raw Cost-Centre string
+    matches *raw* (whitespace-insensitive). A voucher is removed entirely
+    only when all of its splits get deleted (FK cascade on the splits).
+
+    Uses each split's own ``raw_cost_centre`` (falling back to the parent
+    voucher's for legacy data), so a multi-CC voucher only loses the splits
+    tagged with the offending string — the rest of the voucher stays.
+    """
     key = norm(raw)
     deleted = 0
     with transaction() as conn:
         rows = conn.execute(
-            "SELECT id, raw_cost_centre FROM vouchers "
-            "WHERE kind = 'sales' AND raw_cost_centre <> ''").fetchall()
-        v_ids = [r["id"] for r in rows
-                 if norm(r["raw_cost_centre"]) == key]
-        if v_ids:
-            ph = ",".join("?" * len(v_ids))
-            conn.execute(f"DELETE FROM vouchers WHERE id IN ({ph})", v_ids)
-            deleted += len(v_ids)
+            "SELECT s.id, "
+            "       coalesce(s.raw_cost_centre, v.raw_cost_centre) AS raw "
+            "FROM voucher_splits s "
+            "JOIN vouchers v ON v.id = s.voucher_id "
+            "WHERE coalesce(s.raw_cost_centre, v.raw_cost_centre) <> ''"
+        ).fetchall()
+        s_ids = [r["id"] for r in rows if norm(r["raw"]) == key]
+        if s_ids:
+            ph = ",".join("?" * len(s_ids))
+            conn.execute(
+                f"DELETE FROM voucher_splits WHERE id IN ({ph})", s_ids)
+            deleted += len(s_ids)
+            # Clean up any vouchers that lost their last split.
+            conn.execute(
+                "DELETE FROM vouchers WHERE id NOT IN "
+                "  (SELECT DISTINCT voucher_id FROM voucher_splits)")
     return deleted
 
 
@@ -535,7 +549,14 @@ def bulk_create_employees() -> int:
 
 def apply_known_cc_string_mappings() -> int:
     """For each saved mapping, set the cost-centre / manager on every
-    voucher_split whose voucher carries the matching ``raw_cost_centre``.
+    voucher_split whose own ``raw_cost_centre`` matches the saved string.
+
+    The voucher-dump parser tags each split with its line-level cost-centre
+    string (different services on the same voucher can go to different
+    partners), so we resolve at split level — not at voucher level.
+
+    Falls back to the parent voucher's ``raw_cost_centre`` for legacy splits
+    that don't have their own string yet (pre-v5 schema rows).
 
     Returns the number of split rows updated. Comparison is whitespace-
     insensitive (Tally sometimes writes multiple spaces in cost-centre names).
@@ -549,35 +570,49 @@ def apply_known_cc_string_mappings() -> int:
                 "FROM cc_string_mappings WHERE active = 1")}
         if not mappings:
             return 0
-        vouchers = conn.execute(
-            "SELECT id, raw_cost_centre FROM vouchers "
-            "WHERE kind = 'sales' AND raw_cost_centre <> ''").fetchall()
-        # Bucket voucher ids by their normalised raw_cost_centre.
+        # Per-split mapping — splits with their own raw_cost_centre.
+        splits = conn.execute(
+            "SELECT s.id, "
+            "       coalesce(s.raw_cost_centre, v.raw_cost_centre) AS cc "
+            "FROM voucher_splits s "
+            "JOIN vouchers v ON v.id = s.voucher_id "
+            "WHERE s.cost_centre_id IS NULL "
+            "  AND coalesce(s.raw_cost_centre, v.raw_cost_centre) <> ''"
+        ).fetchall()
         buckets: dict[str, list[int]] = {}
-        for v in vouchers:
-            n = norm(v["raw_cost_centre"])
+        for s in splits:
+            n = norm(s["cc"])
             if n in mappings:
-                buckets.setdefault(n, []).append(v["id"])
+                buckets.setdefault(n, []).append(s["id"])
         for n, ids in buckets.items():
             cc_id, mgr_id = mappings[n]
             placeholders = ",".join("?" * len(ids))
             cur = conn.execute(
                 f"UPDATE voucher_splits SET cost_centre_id = ?, manager_id = ? "
-                f"WHERE voucher_id IN ({placeholders})",
+                f"WHERE id IN ({placeholders})",
                 (cc_id, mgr_id, *ids))
             updated += cur.rowcount
     return updated
 
 
 def unresolved_cc_strings() -> list[dict]:
-    """Distinct ``raw_cost_centre`` strings (from sales vouchers) that have no
-    saved mapping yet. Whitespace-insensitive."""
+    """Distinct ``raw_cost_centre`` strings (from voucher splits) that have
+    no saved mapping yet. Whitespace-insensitive.
+
+    Pulled from ``voucher_splits.raw_cost_centre`` first (per-line CC from
+    the voucher-dump parser), falling back to ``vouchers.raw_cost_centre``
+    when the split doesn't carry its own string (legacy data).
+    """
     with transaction() as conn:
         known = {norm(r["raw_text"]) for r in conn.execute(
             "SELECT raw_text FROM cc_string_mappings WHERE active = 1")}
         rows = conn.execute(
-            "SELECT raw_cost_centre AS raw FROM vouchers "
-            "WHERE kind = 'sales' AND raw_cost_centre <> ''").fetchall()
+            "SELECT coalesce(s.raw_cost_centre, v.raw_cost_centre) AS raw "
+            "FROM voucher_splits s "
+            "JOIN vouchers v ON v.id = s.voucher_id "
+            "WHERE s.cost_centre_id IS NULL "
+            "  AND coalesce(s.raw_cost_centre, v.raw_cost_centre) <> ''"
+        ).fetchall()
     agg: dict[str, dict] = {}
     for r in rows:
         n = norm(r["raw"])

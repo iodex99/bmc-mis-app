@@ -9,7 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 from .. import config
-from .models import ParsedSalaryRow, ParsedTimesheetRow, ParsedVoucher, ParseResult
+from .models import (
+    ParsedSalaryRow,
+    ParsedTimesheetRow,
+    ParsedVoucher,
+    ParseResult,
+    VoucherLine,
+)
 from .valueutils import (
     clean,
     hours_from_duration,
@@ -48,12 +54,31 @@ def _first_number(row: list[Any]) -> float | None:
 
 # --- Tally sales / purchase register ----------------------------------------
 
+def _marker_side(row: list[Any]) -> str | None:
+    """Return ``'dr'``, ``'cr'`` or ``None`` for a Dr/Cr cost-centre sub-row."""
+    for cell in row:
+        t = clean(cell).lower()
+        if t == "dr":
+            return "dr"
+        if t == "cr":
+            return "cr"
+    return None
+
+
 def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
                 kind: str) -> ParseResult:
-    """Parse a Tally register into vouchers.
+    """Parse a Tally voucher-dump register into vouchers with per-line splits.
 
-    Vouchers are multi-row blocks: a row carrying a date starts a new voucher;
-    following rows are ledger heads and 'Dr'/'Cr' cost-centre allocations.
+    Layout: a row carrying a date starts a new voucher; following sub-rows are
+    either ledger lines (service name + amount on Debit/Credit) or indented
+    Dr/Cr cost-centre tags. Each ledger line is followed by zero or more
+    matching-side Dr/Cr sub-rows naming the cost centre(s) the amount is
+    attributed to. Tax / GST / round-off lines are detected by keyword and
+    aggregated into the voucher's ``tax_amount`` rather than becoming splits.
+
+    The same parser handles both **sales** (revenue lines on the Credit side,
+    Cr cost-centre tags) and **purchase** (expense lines on the Debit side,
+    Dr cost-centre tags) by flipping the "revenue side" based on *kind*.
     """
     result = ParseResult(file_type=kind)
     d_i = colmap.get("date")
@@ -62,10 +87,22 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
     vn_i = colmap.get("vch_no")
     dr_i = colmap.get("debit")
     cr_i = colmap.get("credit")
-    tx_i = colmap.get("taxable_amount")
+
+    # For sales the items we care about (revenue, GST collected) live on the
+    # Credit side and their Dr/Cr tags say "Cr". For purchase it's the
+    # opposite — expense lines on Debit, with "Dr" tags.
+    revenue_side = "cr" if kind == config.VCH_SALES else "dr"
+    revenue_col = cr_i if kind == config.VCH_SALES else dr_i
 
     current: ParsedVoucher | None = None
-    head_is_tax = False
+    pending_line: VoucherLine | None = None
+
+    def flush_pending():
+        """Commit the in-flight ledger line to the current voucher."""
+        nonlocal pending_line
+        if current is not None and pending_line is not None:
+            current.line_splits.append(pending_line)
+        pending_line = None
 
     for row in grid[data_start:]:
         if _is_blank(row):
@@ -73,10 +110,10 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
         date = to_date(_cell(row, d_i))
 
         if date is not None:                       # ---- voucher header ----
+            flush_pending()
             credit = to_number(_cell(row, cr_i)) or 0.0
             debit = to_number(_cell(row, dr_i)) or 0.0
-            taxable = to_number(_cell(row, tx_i))
-            gross = credit if kind == config.VCH_EXPENSE else debit
+            gross = debit if kind == config.VCH_SALES else credit
             if gross == 0:
                 gross = max(credit, debit)
             current = ParsedVoucher(
@@ -87,32 +124,59 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
                 party_name=clean(_cell(row, p_i)),
                 kind=kind,
                 gross_amount=gross,
-                net_amount=taxable if taxable is not None else gross,
             )
-            head_is_tax = False
             result.vouchers.append(current)
+            continue
 
-        elif current is not None:                  # ---- sub-rows ----
-            if _marker(row):
-                if not head_is_tax:
-                    name = clean(_cell(row, p_i))
-                    amount = _first_number(row)
-                    if name and amount is not None:
-                        current.cc_allocations.append((name, amount))
-            else:
-                head = clean(_cell(row, p_i))
-                if head:
-                    if is_tax_head(head):
-                        head_is_tax = True
-                        amt = (to_number(_cell(row, dr_i)) or 0.0) + \
-                              (to_number(_cell(row, cr_i)) or 0.0)
-                        current.tax_amount += amt
-                    else:
-                        head_is_tax = False
-                        current.ledger_heads.append(head)
+        if current is None:
+            continue
 
-    # Pick the dominant cost centre seen for each voucher (a hint for review).
+        side = _marker_side(row)
+        if side is not None:
+            # An indented Dr/Cr cost-centre tag. We only attribute the
+            # revenue-side tag to the current line — the other side is the
+            # contra (receivable for sales, payable for purchase) and not
+            # relevant to partner-level revenue.
+            if side == revenue_side and pending_line is not None:
+                pending_line.cost_centre = clean(_cell(row, p_i)) or None
+                # An amount cross-check — first numeric cell on the row.
+                tag_amt = _first_number(row)
+                if tag_amt is not None and pending_line.amount == 0:
+                    pending_line.amount = float(tag_amt)
+                flush_pending()
+            continue
+
+        # Plain ledger line (no Dr/Cr marker). Its amount is on the
+        # revenue side (Credit for sales, Debit for purchase).
+        head = clean(_cell(row, p_i))
+        if not head:
+            continue
+        amt = to_number(_cell(row, revenue_col))
+        if amt is None or amt == 0:
+            # Some Tally exports put the amount on the other side for
+            # contra-entries — ignore those, they're not revenue.
+            continue
+
+        flush_pending()
+        pending_line = VoucherLine(
+            service=head,
+            amount=float(amt),
+            is_tax=is_tax_head(head),
+        )
+
+    flush_pending()
+
+    # Aggregate net / tax + pick the dominant non-tax CC for backward compat.
     for v in result.vouchers:
+        for line in v.line_splits:
+            if line.is_tax:
+                v.tax_amount += line.amount
+            else:
+                v.net_amount += line.amount
+            if line.service and line.service not in v.ledger_heads:
+                v.ledger_heads.append(line.service)
+            if line.cost_centre:
+                v.cc_allocations.append((line.cost_centre, line.amount))
         if v.cc_allocations:
             agg: dict[str, float] = {}
             for name, amt in v.cc_allocations:
@@ -258,13 +322,24 @@ def parse_sales_flat(grid: list[list[Any]], colmap: ColMap, data_start: int,
 
 def parse(file_type: str, grid: list[list[Any]], colmap: ColMap,
           data_start: int, **extras) -> ParseResult:
-    """Dispatch to the right parser for *file_type*."""
+    """Dispatch to the right parser for *file_type*.
+
+    Sales has two valid layouts: the Tally voucher-dump (multi-row blocks
+    with per-line cost-centre tags — preferred) and the legacy wide flat
+    format (one row per invoice, columns per service). We pick by what the
+    column map looks like:
+
+    * ``debit`` + ``credit`` in *colmap* → voucher-dump → :func:`parse_tally`
+    * ``service_map`` provided in *extras* → legacy wide → :func:`parse_sales_flat`
+    """
     if file_type == config.FILE_TYPE_PURCHASE:
         return parse_tally(grid, colmap, data_start, config.VCH_EXPENSE)
     if file_type == config.FILE_TYPE_SALES:
+        service_map = extras.get("service_map") or {}
+        if "debit" in colmap and "credit" in colmap and not service_map:
+            return parse_tally(grid, colmap, data_start, config.VCH_SALES)
         return parse_sales_flat(
-            grid, colmap, data_start,
-            extras.get("service_map", {}),
+            grid, colmap, data_start, service_map,
             extras.get("tax_cols", []))
     if file_type == config.FILE_TYPE_TIMESHEET:
         return parse_timesheet(grid, colmap, data_start)

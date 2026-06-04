@@ -227,6 +227,25 @@ MIGRATIONS: list[tuple[int, str]] = [
         END
         WHERE txn_date IS NOT NULL AND txn_date <> '';
     """),
+    (5, """
+        -- Per-line cost-centre attribution: when the Tally voucher-dump
+        -- parser splits a multi-service voucher across different partners,
+        -- each split now carries its own raw cost-centre string. Back-fill
+        -- existing rows from the parent voucher so the resolution sweeps
+        -- keep working over pre-v5 data.
+        ALTER TABLE voucher_splits ADD COLUMN raw_cost_centre TEXT;
+        UPDATE voucher_splits
+        SET raw_cost_centre = (
+            SELECT v.raw_cost_centre FROM vouchers v
+            WHERE v.id = voucher_splits.voucher_id)
+        WHERE raw_cost_centre IS NULL;
+
+        -- Dedup support: a fast index over the natural key. We do *not*
+        -- add a UNIQUE constraint here (would break on legacy data with
+        -- duplicates); the app-level check in commit.py handles dedup.
+        CREATE INDEX IF NOT EXISTS idx_vouchers_dedup
+            ON vouchers(entity_id, kind, vch_no);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
