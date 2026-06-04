@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.26** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.27** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.26)
+## 16. Post-launch iterations (v0.2.0 → v0.3.27)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,27 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.27 — Clean number format for small values
+The previous Indian-grouping format string was over-provisioned for
+crore-level values — it had escaped commas (``\,``) all the way out to
+10,000 crore in both positive and negative sections. Escaped commas in
+Excel format strings are **literal**: they render even when the preceding
+``#`` placeholder has no digit to fill. Result: a cell holding ``1,500``
+could pick up phantom commas on screen, and the format string shown in
+Excel's cell-format dialog looked ugly even for hundreds/thousands cells.
+
+- **New three-tier `INR` format** in `app/services/report.py`:
+  - ≥ 1 crore → ``1,23,45,678`` (full lakh-crore grouping)
+  - ≥ 1 lakh, < 1 crore → ``1,23,456`` (lakh grouping)
+  - < 1 lakh → ``1,500`` (standard 3-digit grouping)
+- Excel allows only 3 conditional numeric sections, so big-negative red
+  styling was dropped in favour of clean small-number rendering — most MIS
+  values are positive and negatives are usually small variance numbers.
+  Negatives render with a regular minus sign.
+- Applies to every money cell across Cover, Dashboard, Cost Centre P&L,
+  Partner-Manager P&L, Entity P&L, Service MIS, Budget vs Monthly Sales,
+  Comparatives, and the Revenue / Expenses / Labour data sheets.
 
 ### v0.3.26 — Smart Tally voucher-dump parser + dedup
 The user's "actual" Tally export — multi-row voucher blocks with indented

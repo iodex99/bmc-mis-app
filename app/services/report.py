@@ -26,10 +26,19 @@ NAVY = "1F2A44"
 BLUE = "2F7DF6"
 LIGHT = "EAF0FB"
 GREY = "F0F1F4"
-# Indian-grouped: lakh/crore style with literal commas (escape commas with \).
-# Two-condition format covers up to ~10000 crore on either side.
-INR = (r'[<=-100000][Red]-##\,##\,##\,##\,##0;'
-       r'[>=100000]##\,##\,##\,##\,##0;'
+# Indian lakh/crore grouping, right-sized per value magnitude so small numbers
+# don't pick up phantom commas. Escaped commas (``\,``) in an Excel format
+# string are literal — they render even when the preceding ``#`` placeholder
+# has no digit to fill. The previous one-size-fits-crore format meant a
+# ``1,500`` cell would show garbage commas on screen. Tiered conditional
+# sections keep each magnitude clean:
+#   - ≥ 1 crore (10000000) → ``1,23,45,678``
+#   - ≥ 1 lakh (100000)    → ``1,23,456``
+#   - < 1 lakh             → ``1,500`` (standard 3-digit grouping)
+# Excel allows max 3 conditional numeric sections, so big-negative red
+# styling was dropped — negatives render in regular grouping with a minus.
+INR = (r'[>=10000000]##\,##\,##\,##0;'
+       r'[>=100000]##\,##\,##0;'
        r'##,##0')
 PCT = '0.0%'
 HOURS = '#,##0.0'
