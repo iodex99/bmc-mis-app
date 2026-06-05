@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.28** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.29** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.28)
+## 16. Post-launch iterations (v0.2.0 → v0.3.29)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,14 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.29 — Fix calendar popup truncating day numbers
+On Windows + Fusion style, the QDateEdit calendar popup was rendering
+two-digit day numbers as ``...`` because its columns squeezed below the
+text width. Forcing a 340x260 minimum size on the underlying
+QCalendarWidget (plus a stylesheet that gives each cell breathing room
+and matches the app's indigo / navy palette) makes every day fully
+readable in both From and To pickers on the Pull-from-Tally section.
 
 ### v0.3.28 — Pull data directly from Tally (primary workflow)
 The MIS app now talks to Tally's built-in HTTP/XML gateway on the same

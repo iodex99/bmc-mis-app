@@ -26,6 +26,48 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+def _make_date_edit(default: QDate) -> QDateEdit:
+    """A QDateEdit with a properly-sized calendar popup.
+
+    Default Qt calendar columns on Windows + Fusion style sometimes squeeze
+    to the point that two-digit day numbers render as ``...``. Forcing a
+    minimum width on the underlying ``QCalendarWidget`` (and giving it
+    enough breathing room via stylesheet) keeps every cell readable.
+    """
+    edit = QDateEdit(calendarPopup=True)
+    edit.setDisplayFormat("dd MMM yyyy")
+    edit.setDate(default)
+    edit.setMinimumWidth(140)
+    cal = edit.calendarWidget()
+    if cal is not None:
+        cal.setMinimumWidth(340)
+        cal.setMinimumHeight(260)
+        cal.setGridVisible(True)
+        cal.setStyleSheet(
+            "QCalendarWidget QAbstractItemView:enabled {"
+            "  background: white; color: #1F2A44;"
+            "  selection-background-color: #4F46E5;"
+            "  selection-color: white;"
+            "  font-size: 11pt;"
+            "}"
+            "QCalendarWidget QAbstractItemView:disabled { color: #C0C4CC; }"
+            "QCalendarWidget QWidget#qt_calendar_navigationbar {"
+            "  background: #1F2A44;"
+            "}"
+            "QCalendarWidget QToolButton {"
+            "  color: white; background: transparent;"
+            "  padding: 4px 10px;"
+            "  font-size: 11pt; font-weight: bold;"
+            "}"
+            "QCalendarWidget QToolButton::menu-indicator { image: none; }"
+            "QCalendarWidget QSpinBox {"
+            "  background: white; color: #1F2A44;"
+            "  padding: 2px 4px;"
+            "}"
+        )
+    return edit
+
 from .. import repository as repo
 from ..importing import commit, tally_client, tally_xml
 from ..services import resolution
@@ -122,15 +164,11 @@ class TallyPullWidget(QGroupBox):
         grid.setColumnStretch(3, 1)
 
         grid.addWidget(QLabel("From date:"), 0, 0)
-        self.from_date = QDateEdit(calendarPopup=True)
-        self.from_date.setDisplayFormat("dd MMM yyyy")
-        self.from_date.setDate(_default_from())
+        self.from_date = _make_date_edit(_default_from())
         grid.addWidget(self.from_date, 0, 1)
 
         grid.addWidget(QLabel("To date:"), 0, 2)
-        self.to_date = QDateEdit(calendarPopup=True)
-        self.to_date.setDisplayFormat("dd MMM yyyy")
-        self.to_date.setDate(_default_to())
+        self.to_date = _make_date_edit(_default_to())
         grid.addWidget(self.to_date, 0, 3)
 
         grid.addWidget(QLabel("Map to entity:"), 1, 0)
