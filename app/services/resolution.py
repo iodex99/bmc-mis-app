@@ -627,8 +627,13 @@ def unresolved_cc_strings() -> list[dict]:
 
 _HONORIFICS = re.compile(r'^(mr\.?|mrs\.?|ms\.?|dr\.?|shri\.?|smt\.?)\s+',
                          re.IGNORECASE)
-_NAME_SEP = re.compile(r'\s*[-–—]\s*')   # hyphen / en-dash / em-dash
-_MIN_SCORE = 80
+_NAME_SEP = re.compile(r'\s*[-–—/]\s*')   # hyphen / en-dash / em-dash / slash
+# Fuzzy threshold for the partner match. Partners are a small fixed set
+# (8 known names), so we can be more lenient than for clients/employees
+# without risking wrong matches. 70 catches first-name-only ("Vishal"
+# matches "Vishal Kothari" with partial_ratio = 100) and abbreviations
+# while still rejecting unrelated strings.
+_MIN_SCORE = 70
 
 
 def _best_match(query: str, lookup: dict[str, int]) -> tuple[int | None, int]:
@@ -665,15 +670,28 @@ def auto_match_cc_strings() -> int:
     overwritten only if the auto-match finds a better fit.
     """
     with transaction() as conn:
-        partner_lookup = {
-            norm(r["name"]): r["id"]
-            for r in conn.execute(
-                "SELECT id, name FROM cost_centres "
-                "WHERE active = 1 AND cc_type = 'partner'")}
-        manager_lookup = {
-            norm(r["name"]): r["id"]
-            for r in conn.execute(
-                "SELECT id, name FROM managers WHERE active = 1")}
+        partner_lookup: dict[str, int] = {}
+        for r in conn.execute(
+                "SELECT id, code, name FROM cost_centres "
+                "WHERE active = 1 AND cc_type = 'partner'"):
+            # Match against full name AND code, so "VK", "VKothari",
+            # "Vishal", "Vishal K" all hit the right partner.
+            partner_lookup[norm(r["name"])] = r["id"]
+            partner_lookup[norm(r["code"])] = r["id"]
+            # Also seed first-name and last-name singletons so a Tally
+            # CC like "Vishal" or "Kothari" lands on the partner without
+            # needing fuzzy matching.
+            for part in norm(r["name"]).split():
+                if len(part) > 2:
+                    partner_lookup.setdefault(part, r["id"])
+        manager_lookup: dict[str, int] = {}
+        for r in conn.execute(
+                "SELECT id, code, name FROM managers WHERE active = 1"):
+            manager_lookup[norm(r["name"])] = r["id"]
+            manager_lookup[norm(r["code"])] = r["id"]
+            for part in norm(r["name"]).split():
+                if len(part) > 2:
+                    manager_lookup.setdefault(part, r["id"])
 
     if not partner_lookup:
         return 0

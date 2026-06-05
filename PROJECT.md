@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.32** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.33** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.32)
+## 16. Post-launch iterations (v0.2.0 → v0.3.33)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,45 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.33 — Forex vouchers + custom voucher types + lenient CC match
+Second batch of live-pull feedback: forex (USD/EUR) invoices were
+skipped, custom voucher types like "Sales - Delhi" weren't picked up,
+and many vouchers landed in Review with "needs fix" status.
+
+- **Forex amounts now parse.** Tally's AMOUNT field for foreign-currency
+  vouchers comes as ``$ 1000.00 @ 80.00/Re = -80000.00``. ``float()``
+  rejected that, so the line was given amount=0 and the voucher was
+  dropped. ``_parse_amount`` now handles three shapes:
+  - plain decimal (existing behaviour)
+  - forex with ``=``: take the INR value after the last ``=``
+  - forex without ``=``: pick the largest-magnitude number (INR is
+    almost always larger than the foreign value)
+- **Voucher type prefix matching.** Operators routinely create
+  ``Sales - Delhi``, ``Sales - Export``, ``Sales Mumbai``, ``Purchase
+  Imports`` etc. — the old code only matched ``Sales`` / ``Purchase``
+  exactly. New ``_classify_vch_type`` matches via prefix (followed by
+  space, hyphen, slash or end-of-string), so all of those land
+  correctly. Sales Return / Purchase Return are intentionally excluded
+  (Credit Note / Debit Note class — inverse sign semantics not yet
+  modelled).
+- **Dropped the TDL FILTER.** Tally formula language varies across
+  Prime / ERP 9 builds and a wrong filter silently drops every match.
+  Now we fetch all vouchers in the date range and filter by type in
+  Python via ``_classify_vch_type``. Bandwidth cost (a few KB of
+  receipts / payments / journals per pull) is negligible.
+- **More lenient CC auto-match.** Lowered ``_MIN_SCORE`` from 80 to
+  70 (partners are a fixed set of 8 — fuzzy errors are unlikely); also
+  added partner *code* and *first / last name* singletons to the
+  lookup so Tally CC strings like ``VK``, ``Vishal``, or ``Kothari``
+  all hit the right partner without operator intervention. Manager
+  matching gained the same treatment.
+- **NAME_SEP regex** now also splits on ``/`` so ``"Vishal / Audit"``
+  patterns work.
+- Verified end-to-end with 3 synthetic Tally responses: USD invoice,
+  Sales-Delhi voucher, Sales-Mumbai voucher with first-name-only CC.
+  All commit cleanly, all splits resolve to VK partner, Review
+  reports "all vouchers resolved cleanly".
 
 ### v0.3.32 — Sanitize undeclared namespaces + bare ampersands
 Next live pull crashed with ``unbound prefix: line 356, column 6`` —

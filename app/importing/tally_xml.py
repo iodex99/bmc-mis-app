@@ -95,11 +95,40 @@ def _parse_xml(data: bytes) -> ET.Element:
 
 
 # Tally voucher-type → our ``kind``. Anything else is ignored (Payment,
-# Receipt, Journal etc. don't belong in the partner P&L).
-_KIND_MAP = {
-    "sales": config.VCH_SALES,
-    "purchase": config.VCH_EXPENSE,
-}
+# Receipt, Journal etc. don't belong in the partner P&L). Operators
+# routinely create custom variants ("Sales - Delhi", "Sales - Export",
+# "Purchase Imports", "Sales Mumbai", etc.) — all of these should map to
+# the same underlying kind, so we prefix-match instead of equality-match.
+
+_VCH_PREFIX_SALES = re.compile(r'^sales(?:[\s\-/]|$)', re.IGNORECASE)
+_VCH_PREFIX_PURCHASE = re.compile(r'^purchase(?:[\s\-/]|$)', re.IGNORECASE)
+
+
+def _classify_vch_type(raw: str) -> str | None:
+    """Return our internal kind for a Tally VoucherTypeName.
+
+    Matches exact ``Sales`` / ``Purchase`` plus operator-customised
+    variants whose name *starts with* either word followed by a space,
+    hyphen or slash. Returns ``None`` for anything else so non-revenue
+    voucher types (Receipt, Payment, Contra, Journal, Stock Journal,
+    Delivery Note, etc.) are silently dropped.
+
+    Deliberately does **not** match "Sales Return" / "Purchase Return" —
+    those are Credit Note / Debit Note class in Tally and have inverse
+    sign semantics we don't currently model.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if "return" in text.lower():
+        return None
+    if _VCH_PREFIX_SALES.match(text):
+        return config.VCH_SALES
+    if _VCH_PREFIX_PURCHASE.match(text):
+        return config.VCH_EXPENSE
+    return None
 
 
 def _norm_tag(tag: str) -> str:
@@ -148,15 +177,56 @@ def _parse_tally_date(raw: str) -> _dt.date | None:
     return None
 
 
+_AMT_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
 def _parse_amount(raw: str) -> float:
-    """Tally amounts come as plain decimals — negative means Debit."""
-    raw = (raw or "").strip().replace(",", "").replace(" ", "")
+    """Parse a Tally AMOUNT field, including foreign-currency variants.
+
+    Common shapes:
+
+    * Plain: -82600.00 or 70000.00 — negative = Debit in Tally.
+    * Forex: $ 1000.00 @ 80.00/Re = -80000.00 — the INR-converted
+      value sits after the = sign; we want that. (The voucher is
+      booked in INR for our P&L.)
+    * Forex with no =: fall back to picking the largest-magnitude
+      number, which is almost always the INR value (foreign currency
+      values are typically smaller).
+
+    Returns 0.0 for anything we genuinely cannot parse so the caller
+    skips the entry — but we work hard to avoid that, because returning
+    0 silently drops the voucher from the partner P&L (the bug behind
+    "USD invoices not picked up").
+    """
     if not raw:
         return 0.0
-    try:
-        return float(raw)
-    except ValueError:
+    text = raw.strip()
+    if not text:
         return 0.0
+    # Plain numeric fast path. Strip spaces + non-breaking spaces (�)
+    # that Tally sometimes embeds in amount strings.
+    cleaned = text.replace(",", "").replace(" ", "").replace(" ", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        pass
+    # Forex form: take the value after the last '='.
+    if "=" in text:
+        right = text.rsplit("=", 1)[1].strip()
+        right_clean = right.replace(",", "").replace(" ", "").replace(" ", "")
+        try:
+            return float(right_clean)
+        except ValueError:
+            pass
+    # Last resort: pull every signed number, pick the largest-magnitude.
+    # (Foreign currency values are typically smaller than INR.)
+    nums = _AMT_NUMBER.findall(text.replace(",", ""))
+    if nums:
+        try:
+            return max((float(n) for n in nums), key=abs)
+        except ValueError:
+            pass
+    return 0.0
 
 
 def _ledger_cost_centre(entry: ET.Element) -> str | None:
@@ -187,7 +257,7 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
     """
     vch_type_raw = (velem.get("VCHTYPE")
                     or _text(_find_first(velem, ["vouchertypename"])))
-    kind = _KIND_MAP.get(vch_type_raw.strip().lower())
+    kind = _classify_vch_type(vch_type_raw)
     if not kind:
         return None
     if (_text(_find_first(velem, ["iscancelled"])) or "").lower() == "yes":

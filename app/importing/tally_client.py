@@ -135,11 +135,13 @@ def envelope_voucher_collection(from_date: _dt.date, to_date: _dt.date,
         'AllLedgerEntries.CategoryAllocations.CostCentreAllocations.Name, '
         'AllLedgerEntries.CategoryAllocations.CostCentreAllocations.Amount'
         '</FETCH>\n'
-        '            <FILTER>BMC_SalesOrPurchase</FILTER>\n'
+        # No TDL FILTER — Tally\'s formula language varies across Prime /
+        # ERP 9 builds and a wrong FILTER can silently drop every match.
+        # We filter by VoucherTypeName in Python (tally_xml._classify_vch_type)
+        # which catches "Sales", "Sales - Delhi", "Sales Mumbai", "Purchase
+        # Imports", etc. The extra bandwidth for receipts / payments /
+        # journals is negligible at firm scale.
         '          </COLLECTION>\n'
-        '          <SYSTEM TYPE="Formulae" NAME="BMC_SalesOrPurchase">'
-        '($VoucherTypeName="Sales") OR ($VoucherTypeName="Purchase")'
-        '</SYSTEM>\n'
         '        </TDLMESSAGE>\n'
         '      </TDL>\n'
         '    </DESC>\n'
