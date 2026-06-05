@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__, config
+from ..importing import tally_client
 from ..services import updater
 
 
@@ -131,6 +132,28 @@ class SettingsPage(QWidget):
             u.addWidget(self.auto_check)
 
         root.addWidget(upd)
+
+        # --- Tally connection -----------------------------------------------
+        tally_box = QGroupBox("Tally connection")
+        tly = QVBoxLayout(tally_box)
+        tly.addWidget(QLabel(
+            "Address of the Tally HTTP gateway on this PC. Default "
+            "<code>http://localhost:9000</code> works for almost everyone; "
+            "change only if Tally is configured for a non-default port or "
+            "running on another machine on the LAN."))
+        tly_row = QHBoxLayout()
+        tly_row.addWidget(QLabel("Tally URL:"))
+        self.tally_url_edit = QLineEdit(tally_client.get_tally_url())
+        self.tally_url_edit.setPlaceholderText(tally_client.DEFAULT_TALLY_URL)
+        tly_row.addWidget(self.tally_url_edit, 1)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._save_tally_url)
+        tly_row.addWidget(save_btn)
+        tly.addLayout(tly_row)
+        self.tally_status = QLabel("")
+        self.tally_status.setWordWrap(True)
+        tly.addWidget(self.tally_status)
+        root.addWidget(tally_box)
 
         # --- danger zone ----------------------------------------------------
         danger = QGroupBox("Danger zone")
@@ -272,6 +295,21 @@ class SettingsPage(QWidget):
             "All data cleared. The app will close now — relaunch to start "
             "fresh.")
         QApplication.instance().quit()
+
+    def _save_tally_url(self) -> None:
+        url = self.tally_url_edit.text().strip()
+        tally_client.set_tally_url(url)
+        if tally_client.ping(timeout=2.0):
+            self.tally_status.setText(
+                f"<span style='color:#1B7A1B;'>"
+                f"Saved. Tally is reachable at {tally_client.get_tally_url()}."
+                f"</span>")
+        else:
+            self.tally_status.setText(
+                f"<span style='color:#B07000;'>"
+                f"Saved. (Tally isn't responding at "
+                f"{tally_client.get_tally_url()} right now — that's fine if "
+                f"Tally isn't open yet.)</span>")
 
     def _open_data_folder(self) -> None:
         import os

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.27** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.28** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.27)
+## 16. Post-launch iterations (v0.2.0 → v0.3.28)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,58 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.28 — Pull data directly from Tally (primary workflow)
+The MIS app now talks to Tally's built-in HTTP/XML gateway on the same
+machine. Operator opens a company in Tally, picks a date range in the
+MIS app, hits one button — vouchers flow in with full per-line cost
+centre attribution. No paid API, no internet, nothing leaves the PC.
+Excel upload stays as a graceful fallback.
+
+- **New `app/importing/tally_xml.py`** — parses Tally's Day Book XML
+  response into the same `ParsedVoucher` / `VoucherLine` dataclasses the
+  Excel parser produces. Commit / dedup / CC auto-match / MIS generation
+  all operate identically downstream — only the transport changed.
+- **New `app/importing/tally_client.py`** — HTTP POST to the gateway
+  with envelope builders for:
+  - `current_company()` — which company is loaded right now (used for
+    the connection probe + auto-routing to the right MIS entity)
+  - `list_companies()` — every company Tally has loaded
+  - `fetch_day_book(from, to)` — every sales + purchase voucher in the
+    range, with exploded ledger + CC sub-rows
+  All requests go to a single configurable URL (default
+  `http://localhost:9000`). Connection / timeout / HTTP-error cases each
+  raise a `TallyError` with an operator-friendly message including the
+  exact setup steps for the Tally Connectivity panel.
+- **New `app/ui/tally_pull.py`** — a `TallyPullWidget` that hosts at
+  the top of the Import Files page. URL field with a Test button, date
+  range pickers, entity-mapping dropdown ("Auto-detect from Tally" by
+  default — matches the loaded company against the entity master /
+  aliases), and a single Pull button. Background `QThread` workers so
+  the UI doesn't freeze during a fetch. Result panel shows new /
+  duplicate / amount-mismatch counts per kind.
+- **Excel upload section** moved below as "Fallback: upload an Excel
+  file". Same controls, same flow, used when Tally is closed / on a
+  different machine / for a one-off historical import. The whole page
+  scrolls so both sections fit.
+- **Settings page** gained a Tally connection section — Tally URL
+  field + Save button that pings the URL after writing and reports
+  reachability. Persisted in `app_settings(key='tally_url')`.
+- **Auto-entity-matching on pull** — when the operator chooses
+  "Auto-detect from Tally", the widget asks Tally for the currently-
+  loaded company and looks it up in the entity master via the existing
+  `entity_aliases` table (so "Bilimoria" matches "Bilimoria Mehta & Co.").
+  Falls back to the dropdown when nothing matches.
+- **Dedup behaviour unchanged** — re-pulling the same period skips
+  every voucher whose `(entity_id, kind, vch_no)` already exists, with
+  amount mismatches surfaced separately. Built-in idempotency for the
+  workflow "operator re-runs mid-month after a Tally edit".
+- **End-to-end verified** with a mock Tally HTTP server: connection
+  probe, current-company + list-companies discovery, Day Book pull
+  with 4 vouchers (2 sales — including a multi-partner-per-voucher
+  case — and 2 purchases), per-line CC attribution preserved through
+  XML, commit, auto-match, MIS workbook generation, dedup on re-pull,
+  and error paths (bad URL, reversed date range).
 
 ### v0.3.27 — Clean number format for small values
 The previous Indian-grouping format string was over-provisioned for

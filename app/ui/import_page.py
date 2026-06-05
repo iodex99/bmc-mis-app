@@ -8,11 +8,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -24,6 +26,7 @@ from ..importing import commit, excel_reader, parsers, sniffer, templates
 from ..services import resolution
 from ..util import fmt_inr
 from .column_mapping import ColumnMappingDialog
+from .tally_pull import TallyPullWidget
 
 _FILE_TYPE_LABELS = {
     config.FILE_TYPE_SALES: "Tally — Sales Register",
@@ -44,16 +47,54 @@ class ImportPage(QWidget):
         self._signature: str = ""
         self._result = None
 
+        # The page is taller than the window once both the Tally pull section
+        # and the Excel fallback are visible, so wrap the whole thing in a
+        # scroll area.
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        root.addWidget(scroll)
+        body = QWidget()
+        scroll.setWidget(body)
+
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
         heading = QLabel("Import Files")
         heading.setObjectName("pageHeading")
-        root.addWidget(heading)
-        note = QLabel("Upload a Tally register, the timesheet or the salary "
-                      "sheet. New layouts are mapped once and remembered.")
+        outer.addWidget(heading)
+        note = QLabel(
+            "Primary path: pull voucher data directly from Tally for a date "
+            "range. Fall back to an Excel upload only when Tally is not "
+            "reachable.")
         note.setObjectName("pageNote")
-        root.addWidget(note)
+        outer.addWidget(note)
+
+        # --- Tally pull (primary) ------------------------------------------
+        self.tally_pull = TallyPullWidget()
+        self.tally_pull.imported.connect(self._reload_recent)
+        outer.addWidget(self.tally_pull)
+
+        # --- Excel upload (fallback) ---------------------------------------
+        fallback_box = QGroupBox("Fallback: upload an Excel file")
+        fb = QVBoxLayout(fallback_box)
+        fb.setSpacing(8)
+        fb_note = QLabel(
+            "Use this if Tally is closed, on a different PC, or you have a "
+            "one-off file to import. Sales / purchase files are auto-detected "
+            "from their headers; new layouts only need column mapping once.")
+        fb_note.setWordWrap(True)
+        fb_note.setObjectName("pageNote")
+        fb.addWidget(fb_note)
+        # Everything that follows is the original Excel-upload UI. Layouts
+        # below build into ``fb`` instead of the page root.
+        outer.addWidget(fallback_box)
+        # Keep ``root`` referencing the inner layout so the rest of the file
+        # builds into the fallback box without further edits.
+        root = fb
 
         # --- selectors ------------------------------------------------------
         form = QFormLayout()
@@ -96,13 +137,16 @@ class ImportPage(QWidget):
         # --- parsed preview -------------------------------------------------
         self.preview = QTableWidget()
         self.preview.setEditTriggers(QTableWidget.NoEditTriggers)
-        root.addWidget(self.preview, 1)
+        self.preview.setMaximumHeight(220)
+        root.addWidget(self.preview)
 
-        root.addWidget(QLabel("Recent imports:"))
+        # Recent-imports table sits at the bottom of the page, covering both
+        # Tally pulls and Excel uploads.
+        outer.addWidget(QLabel("Recent imports:"))
         self.recent = QTableWidget()
         self.recent.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.recent.setMaximumHeight(160)
-        root.addWidget(self.recent)
+        self.recent.setMaximumHeight(180)
+        outer.addWidget(self.recent)
         self._reload_recent()
 
     # -- helpers -------------------------------------------------------------
