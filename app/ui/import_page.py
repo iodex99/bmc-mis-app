@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -38,6 +39,10 @@ _FILE_TYPE_LABELS = {
 
 class ImportPage(QWidget):
     """Drives the choose → map → preview → commit import workflow."""
+
+    # Fires after any successful Tally pull OR Excel-upload commit, so the
+    # MainWindow can ask the Review page to refresh.
+    imported = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -76,6 +81,8 @@ class ImportPage(QWidget):
         # --- Tally pull (primary) ------------------------------------------
         self.tally_pull = TallyPullWidget()
         self.tally_pull.imported.connect(self._reload_recent)
+        # Re-emit at page level so MainWindow can refresh the Review page.
+        self.tally_pull.imported.connect(self.imported)
         outer.addWidget(self.tally_pull)
 
         # --- Excel upload (fallback) ---------------------------------------
@@ -403,6 +410,7 @@ class ImportPage(QWidget):
 
         self.commit_btn.setEnabled(False)
         self._reload_recent()
+        self.imported.emit()
 
     def _reload_recent(self) -> None:
         batches = repo.fetch_all("import_batches", order_by="id DESC")[:30]

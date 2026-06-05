@@ -784,14 +784,24 @@ class ReviewPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        # Apply saved mappings + smart auto-match so badges and tables show
-        # the smallest possible "needs attention" counts to the operator.
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Apply auto-mappings + reload every tab from the DB.
+
+        Called on ``showEvent`` (operator navigates to the page) and also
+        fired by the Import page after every successful Tally pull or
+        Excel commit, so newly-imported vouchers / clients / CC strings
+        appear immediately without the operator having to re-navigate.
+        """
         resolution.apply_known_client_aliases()
         resolution.apply_known_cc_string_mappings()
         resolution.auto_match_cc_strings()
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
-            if hasattr(tab, "reload"):
+            if hasattr(tab, "_reload_filters"):
+                tab._reload_filters()
+            elif hasattr(tab, "reload"):
                 tab.reload()
         self._refresh_badges()
 

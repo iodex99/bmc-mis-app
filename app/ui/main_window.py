@@ -92,6 +92,15 @@ class MainWindow(QMainWindow):
         if hasattr(dashboard, "navigate"):
             dashboard.navigate.connect(self.nav.setCurrentRow)
 
+        # When the Import page completes a Tally pull or Excel commit, ask
+        # the Review page to reload so freshly-imported vouchers / clients
+        # / CC strings show up immediately (instead of waiting for the
+        # operator to re-navigate to Review).
+        import_page = self.stack.widget(NAV_ITEMS_INDEX["Import Files"])
+        review_page = self.stack.widget(NAV_ITEMS_INDEX["Review & Map"])
+        if hasattr(import_page, "imported") and hasattr(review_page, "refresh"):
+            import_page.imported.connect(review_page.refresh)
+
         # Silent auto-check on launch (off the UI thread, fail-quietly).
         self._auto_check_thread: QThread | None = None
         self._auto_check_worker: QObject | None = None

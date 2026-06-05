@@ -87,45 +87,69 @@ def envelope_list_companies() -> str:
     return _ENV_LIST_COMPANIES
 
 
-def envelope_day_book(from_date: _dt.date, to_date: _dt.date,
-                     company_name: str | None = None) -> str:
-    """Day-Book XML export for a date range.
+def envelope_voucher_collection(from_date: _dt.date, to_date: _dt.date,
+                                 company_name: str | None = None) -> str:
+    """Voucher-Collection XML export for a date range.
 
-    Tally returns every voucher in the period with full ledger + cost
-    centre breakdowns — exactly what :mod:`.tally_xml` needs. Setting
-    ``EXPLODEFLAG=Yes`` makes sure the indented ledger / CC lines come
-    through (otherwise some Tally builds emit a flat 1-line voucher).
+    Tally's built-in "Day Book" report has a long-standing quirk where it
+    only exports the records currently in view — so a 30-day request can
+    come back with a handful of vouchers if the operator has the Day Book
+    open at a different period in Tally's UI. A Collection-based fetch
+    sidesteps that: we explicitly ask Tally for every ``Voucher`` object
+    in the date range whose type is Sales or Purchase, regardless of
+    what's on screen.
+
+    Cost-centre allocations come through automatically because we fetch
+    the nested objects (``AllLedgerEntries.CategoryAllocations.``
+    ``CostCentreAllocations.*``) in the same request.
     """
-    parts = [
-        '<ENVELOPE>',
-        '  <HEADER>',
-        '    <VERSION>1</VERSION>',
-        '    <TALLYREQUEST>Export</TALLYREQUEST>',
-        '    <TYPE>Data</TYPE>',
-        '    <ID>Day Book</ID>',
-        '  </HEADER>',
-        '  <BODY>',
-        '    <DESC>',
-        '      <STATICVARIABLES>',
-        '        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>',
-        f'        <SVFROMDATE TYPE="Date">{_tally_date(from_date)}</SVFROMDATE>',
-        f'        <SVTODATE TYPE="Date">{_tally_date(to_date)}</SVTODATE>',
-        '        <EXPLODEFLAG>Yes</EXPLODEFLAG>',
-    ]
+    sv_company = ""
     if company_name:
-        # Tally is case-sensitive on company names and any '&' must be
-        # escaped — this is the operator-visible name from File > Select
-        # Company in Tally.
-        parts.append(
-            f'        <SVCURRENTCOMPANY>{_xml_escape(company_name)}'
-            f'</SVCURRENTCOMPANY>')
-    parts += [
-        '      </STATICVARIABLES>',
-        '    </DESC>',
-        '  </BODY>',
-        '</ENVELOPE>',
-    ]
-    return "\n".join(parts)
+        sv_company = (f'        <SVCURRENTCOMPANY>{_xml_escape(company_name)}'
+                      f'</SVCURRENTCOMPANY>\n')
+    return (
+        '<ENVELOPE>\n'
+        '  <HEADER>\n'
+        '    <VERSION>1</VERSION>\n'
+        '    <TALLYREQUEST>Export</TALLYREQUEST>\n'
+        '    <TYPE>Collection</TYPE>\n'
+        '    <ID>BMC_Vouchers</ID>\n'
+        '  </HEADER>\n'
+        '  <BODY>\n'
+        '    <DESC>\n'
+        '      <STATICVARIABLES>\n'
+        '        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>\n'
+        f'        <SVFROMDATE TYPE="Date">{_tally_date(from_date)}</SVFROMDATE>\n'
+        f'        <SVTODATE TYPE="Date">{_tally_date(to_date)}</SVTODATE>\n'
+        f'{sv_company}'
+        '      </STATICVARIABLES>\n'
+        '      <TDL>\n'
+        '        <TDLMESSAGE>\n'
+        '          <COLLECTION NAME="BMC_Vouchers" ISMODIFY="No"'
+        ' ISFIXED="No" ISINITIALIZE="Yes" ISOPTION="No" ISINTERNAL="No">\n'
+        '            <TYPE>Voucher</TYPE>\n'
+        '            <FETCH>Date, VoucherTypeName, VoucherNumber, '
+        'Reference, PartyLedgerName, Narration, IsCancelled, IsOptional, '
+        'AllLedgerEntries.LedgerName, AllLedgerEntries.IsDeemedPositive, '
+        'AllLedgerEntries.Amount, '
+        'AllLedgerEntries.CategoryAllocations.CostCentreAllocations.Name, '
+        'AllLedgerEntries.CategoryAllocations.CostCentreAllocations.Amount'
+        '</FETCH>\n'
+        '            <FILTER>BMC_SalesOrPurchase</FILTER>\n'
+        '          </COLLECTION>\n'
+        '          <SYSTEM TYPE="Formulae" NAME="BMC_SalesOrPurchase">'
+        '($VoucherTypeName="Sales") OR ($VoucherTypeName="Purchase")'
+        '</SYSTEM>\n'
+        '        </TDLMESSAGE>\n'
+        '      </TDL>\n'
+        '    </DESC>\n'
+        '  </BODY>\n'
+        '</ENVELOPE>\n'
+    )
+
+
+# Old name kept for any external caller — same behaviour as the new one.
+envelope_day_book = envelope_voucher_collection
 
 
 def _xml_escape(text: str) -> str:
@@ -274,17 +298,26 @@ def fetch_day_book(from_date: _dt.date, to_date: _dt.date,
                    url: str | None = None) -> ParseResult:
     """Pull every sales + purchase voucher in the period and parse it.
 
+    Uses a Voucher Collection (see :func:`envelope_voucher_collection`) so
+    Tally returns every voucher in the period regardless of what's on
+    screen — the built-in "Day Book" report had a quirk where it sometimes
+    exported only the records currently visible in Tally's UI.
+
     Returns a single :class:`ParseResult` mixing both kinds; callers split
     via :func:`tally_xml.split_by_kind` before commit so each batch lands
     with the right ``file_type`` label.
 
-    On a parse failure (Tally returned malformed XML we don't yet handle),
-    the raw bytes are dumped to ``<DATA_DIR>/tally_debug_YYYYMMDD-HHMMSS.xml``
-    so the operator can share it with us to reproduce the issue offline.
+    Side effect: every response is saved to
+    ``<DATA_DIR>/tally_last_response.xml`` (overwritten each call), and any
+    parse failure additionally goes to a timestamped
+    ``tally_debug_YYYYMMDD-HHMMSS.xml`` — both make field debugging easy.
     """
     if from_date > to_date:
         raise ValueError("from_date is after to_date")
-    raw = _post(envelope_day_book(from_date, to_date, company_name), url=url)
+    raw = _post(
+        envelope_voucher_collection(from_date, to_date, company_name),
+        url=url)
+    _save_last_response(raw)
     try:
         return tally_xml.parse_response(raw)
     except ET.ParseError as exc:
@@ -295,12 +328,29 @@ def fetch_day_book(from_date: _dt.date, to_date: _dt.date,
             "can teach the parser the new layout.") from exc
 
 
-def _dump_debug_response(raw: bytes) -> str:
-    """Write a problematic Tally response to the data dir for triage."""
+def _data_dir():
     from .. import config
     config.ensure_dirs()
+    return config.DATA_DIR
+
+
+def _save_last_response(raw: bytes) -> None:
+    """Always write the most-recent Tally response to a known location.
+
+    Lets the operator (or us, over their shoulder) inspect what Tally
+    actually returned without re-running anything. Overwritten on every
+    pull so disk usage stays bounded.
+    """
+    try:
+        (_data_dir() / "tally_last_response.xml").write_bytes(raw)
+    except OSError:
+        pass
+
+
+def _dump_debug_response(raw: bytes) -> str:
+    """Write a problematic Tally response to the data dir for triage."""
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = config.DATA_DIR / f"tally_debug_{stamp}.xml"
+    path = _data_dir() / f"tally_debug_{stamp}.xml"
     try:
         path.write_bytes(raw)
         return str(path)

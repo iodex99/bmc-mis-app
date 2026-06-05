@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.30** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.31** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.30)
+## 16. Post-launch iterations (v0.2.0 → v0.3.31)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,32 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.31 — Pull every voucher in range + auto-refresh Review
+Field-test feedback on the live Tally integration surfaced two issues:
+
+- **Day Book ignored our date filter.** Tally's built-in "Day Book"
+  report has a long-standing quirk where the XML export only returns the
+  records currently in view in Tally's UI — so a 30-day request came
+  back with just 3 vouchers, regardless of the date range we asked for.
+  Replaced the request with a **Voucher Collection fetch**: a TDL
+  `<COLLECTION>` of `Voucher` objects filtered by `(VoucherTypeName=Sales
+  OR Purchase)`. Tally now returns every matching voucher in the range,
+  independent of UI state. The cost-centre allocations come through
+  automatically because the FETCH spec walks down `AllLedgerEntries.`
+  `CategoryAllocations.CostCentreAllocations.Name`. Kept the old
+  `envelope_day_book` name as an alias so callers don't break.
+- **Imported vouchers didn't appear on Review until re-navigation.** The
+  Review page reloaded only on its own `showEvent`. Added an `imported`
+  signal on `ImportPage` (re-emitted from both the Tally pull and the
+  Excel commit), connected at the MainWindow level to a new
+  `ReviewPage.refresh()` method. Every successful pull / commit now
+  refreshes Clients / Employees / Cost Centres / Vouchers tabs without
+  the operator needing to switch pages.
+- **Always-on response logging.** Every Tally pull now writes the raw
+  XML response to `<data dir>/tally_last_response.xml` (overwritten on
+  each pull). Lets us diagnose anything weird in the field without
+  re-running the pipeline blind.
 
 ### v0.3.30 — Handle malformed XML from real Tally
 The first live Tally pull from BMC Corporate raised
