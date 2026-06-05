@@ -277,11 +277,35 @@ def fetch_day_book(from_date: _dt.date, to_date: _dt.date,
     Returns a single :class:`ParseResult` mixing both kinds; callers split
     via :func:`tally_xml.split_by_kind` before commit so each batch lands
     with the right ``file_type`` label.
+
+    On a parse failure (Tally returned malformed XML we don't yet handle),
+    the raw bytes are dumped to ``<DATA_DIR>/tally_debug_YYYYMMDD-HHMMSS.xml``
+    so the operator can share it with us to reproduce the issue offline.
     """
     if from_date > to_date:
         raise ValueError("from_date is after to_date")
     raw = _post(envelope_day_book(from_date, to_date, company_name), url=url)
-    return tally_xml.parse_response(raw)
+    try:
+        return tally_xml.parse_response(raw)
+    except ET.ParseError as exc:
+        debug_path = _dump_debug_response(raw)
+        raise TallyError(
+            f"Tally returned XML the parser couldn't read ({exc}). "
+            f"Raw response saved to {debug_path} — please share it so we "
+            "can teach the parser the new layout.") from exc
+
+
+def _dump_debug_response(raw: bytes) -> str:
+    """Write a problematic Tally response to the data dir for triage."""
+    from .. import config
+    config.ensure_dirs()
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = config.DATA_DIR / f"tally_debug_{stamp}.xml"
+    try:
+        path.write_bytes(raw)
+        return str(path)
+    except OSError:
+        return "<could not write debug file>"
 
 
 # ---------------------------- xml helpers -----------------------------------
@@ -292,7 +316,7 @@ def _parse_company_response(xml: bytes,
                                                    | None):
     """Tally returns ``<COMPANY>`` collection items under ``<ENVELOPE>``."""
     try:
-        root = ET.fromstring(xml)
+        root = tally_xml._parse_xml(xml)
     except ET.ParseError:
         if first_only:
             return None

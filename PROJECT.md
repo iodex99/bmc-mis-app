@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.29** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.30** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.29)
+## 16. Post-launch iterations (v0.2.0 → v0.3.30)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,31 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.30 — Handle malformed XML from real Tally
+The first live Tally pull from BMC Corporate raised
+``reference to invalid character number: line 209, column 23`` —
+Tally's XML payload contained illegal control-byte references (``&#1;``,
+``&#11;``, ``&#x1B;`` etc.) embedded in ledger / cost-centre strings.
+Python's expat parser refuses XML 1.0 control characters. We now strip
+them before parsing.
+
+- **`_sanitize_xml_bytes`** in `tally_xml.py` drops:
+  - raw control bytes ``\x00-\x08``, ``\x0B``, ``\x0C``, ``\x0E-\x1F``
+  - decimal references ``&#0;`` to ``&#8;``, ``&#11;``, ``&#12;``,
+    ``&#14;`` to ``&#31;``
+  - hex references ``&#x0;`` to ``&#x8;``, ``&#xB;``, ``&#xC;``,
+    ``&#xE;`` to ``&#x1F;``
+  - leading UTF-8 BOM
+- **CP1252 fallback** in `_parse_xml`: if UTF-8 decode fails (Tally ERP 9
+  in non-Unicode mode), retry as Windows-1252.
+- **Debug dump**: any future parse failure now writes the raw response to
+  ``<data dir>/tally_debug_<timestamp>.xml`` and surfaces the path in
+  the operator's error dialog, so we can reproduce the issue offline.
+- **Unit-tested** against 5 problematic input shapes: clean, decimal
+  refs, hex refs, raw control bytes, cp1252 payload — all parse cleanly
+  and yield the right voucher + CC data; vanilla `ET.fromstring` fails
+  on cases 2-5 without the fix.
 
 ### v0.3.29 — Fix calendar popup truncating day numbers
 On Windows + Fusion style, the QDateEdit calendar popup was rendering

@@ -20,6 +20,50 @@ from .models import ParseResult, ParsedVoucher, VoucherLine
 from .valueutils import is_tax_head, period_of
 
 
+# XML 1.0 forbids most ASCII control characters. Tally sometimes emits them
+# *both* as raw bytes (inside ledger names / descriptions) and as numeric
+# character references (``&#0;``, ``&#11;`` etc.) — Python's expat parser
+# rejects both with "reference to invalid character number". We strip them
+# before parsing. Tab (\t), LF (\n) and CR (\r) are preserved.
+_RAW_BAD_BYTES = re.compile(rb"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+_BAD_DEC_REF = re.compile(
+    rb"&#(?:0*[0-8]|0*1[12]|0*1[4-9]|0*2[0-9]|0*3[01]);")
+_BAD_HEX_REF = re.compile(
+    rb"&#x0*(?:[0-8bBcCeEfF]|1[0-9a-fA-F]);")
+
+
+def _sanitize_xml_bytes(data: bytes) -> bytes:
+    """Strip control-character bytes and references that crash ET."""
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]                              # drop UTF-8 BOM
+    data = _RAW_BAD_BYTES.sub(b"", data)
+    data = _BAD_DEC_REF.sub(b"", data)
+    data = _BAD_HEX_REF.sub(b"", data)
+    return data
+
+
+def _parse_xml(data: bytes) -> ET.Element:
+    """Parse Tally XML, recovering from encoding + control-char issues.
+
+    Order: sanitize control chars -> try UTF-8 -> fall back to cp1252
+    (the default Windows codepage Tally ERP 9 ships in non-Unicode mode).
+    Raises ``ET.ParseError`` only if everything fails.
+    """
+    cleaned = _sanitize_xml_bytes(data)
+    try:
+        return ET.fromstring(cleaned)
+    except ET.ParseError:
+        pass
+    # cp1252-encoded payload mislabelled as UTF-8 — re-decode and retry.
+    try:
+        text = cleaned.decode("cp1252", errors="replace")
+    except Exception:                                # noqa: BLE001
+        text = cleaned.decode("utf-8", errors="replace")
+    # Drop any encoding="…" declaration so ET trusts the now-Unicode text.
+    text = re.sub(r'<\?xml[^?]*\?>', "", text, count=1)
+    return ET.fromstring(text)
+
+
 # Tally voucher-type → our ``kind``. Anything else is ignored (Payment,
 # Receipt, Journal etc. don't belong in the partner P&L).
 _KIND_MAP = {
@@ -198,9 +242,7 @@ def parse_response(xml: bytes | str) -> ParseResult:
     """
     if isinstance(xml, str):
         xml = xml.encode("utf-8")
-    # Tally uses Windows-1252 in some builds; lxml handles BOM/encoding via
-    # the XML declaration header. ElementTree.fromstring works for both.
-    root = ET.fromstring(xml)
+    root = _parse_xml(xml)
 
     # Walk every <VOUCHER> element anywhere in the tree.
     vouchers: list[ParsedVoucher] = []
