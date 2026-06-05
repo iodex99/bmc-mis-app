@@ -31,23 +31,53 @@ _BAD_DEC_REF = re.compile(
 _BAD_HEX_REF = re.compile(
     rb"&#x0*(?:[0-8bBcCeEfF]|1[0-9a-fA-F]);")
 
+# Tally Prime sometimes emits namespaced tags (``<udf:UserField>``,
+# ``<urn:Foo>``) without declaring the namespace, which expat rejects as
+# "unbound prefix". We don't read any namespaced fields, so the safest
+# fix is to strip namespace declarations + prefixes before parsing.
+_NS_DECL = re.compile(rb'\s+xmlns(?::[\w.-]+)?\s*=\s*"[^"]*"')
+_NS_DECL_SQ = re.compile(rb"\s+xmlns(?::[\w.-]+)?\s*=\s*'[^']*'")
+_NS_TAG = re.compile(rb"(</?)([A-Za-z_][\w.-]*):([A-Za-z_])")
+_NS_ATTR = re.compile(rb'(\s)([A-Za-z_][\w.-]*):([A-Za-z_][\w.-]*\s*=)')
+
+# Bare ``&`` (not part of a valid entity) crashes expat too — Tally
+# occasionally writes "M&S Co" without escaping it.
+_BARE_AMP = re.compile(rb"&(?!(?:#\d+|#x[0-9a-fA-F]+|amp|lt|gt|quot|apos);)")
+
 
 def _sanitize_xml_bytes(data: bytes) -> bytes:
-    """Strip control-character bytes and references that crash ET."""
+    """Strip the patterns of malformed XML that Tally is known to emit.
+
+    Handled (each documented in the regex blocks above):
+
+    * raw ASCII control bytes
+    * numeric character references to those same chars
+    * undeclared namespace prefixes (``udf:``, ``urn:`` etc.)
+    * bare ``&`` not starting a valid entity
+    * UTF-8 BOM at the start of the payload
+    """
     if data.startswith(b"\xef\xbb\xbf"):
-        data = data[3:]                              # drop UTF-8 BOM
+        data = data[3:]
     data = _RAW_BAD_BYTES.sub(b"", data)
     data = _BAD_DEC_REF.sub(b"", data)
     data = _BAD_HEX_REF.sub(b"", data)
+    # Order matters here: drop xmlns declarations first, then drop the
+    # prefixes from tags + attributes (otherwise an unconverted prefix
+    # could re-introduce a parse error if its declaration was stripped).
+    data = _NS_DECL.sub(b"", data)
+    data = _NS_DECL_SQ.sub(b"", data)
+    data = _NS_TAG.sub(rb"\1\3", data)
+    data = _NS_ATTR.sub(rb"\1\3", data)
+    data = _BARE_AMP.sub(b"&amp;", data)
     return data
 
 
 def _parse_xml(data: bytes) -> ET.Element:
-    """Parse Tally XML, recovering from encoding + control-char issues.
+    """Parse Tally XML, recovering from encoding + malformed-payload issues.
 
-    Order: sanitize control chars -> try UTF-8 -> fall back to cp1252
-    (the default Windows codepage Tally ERP 9 ships in non-Unicode mode).
-    Raises ``ET.ParseError`` only if everything fails.
+    Order: sanitize -> try UTF-8 -> fall back to cp1252 (the default
+    Windows codepage Tally ERP 9 ships in non-Unicode mode). Raises
+    ``ET.ParseError`` only if every recovery path fails.
     """
     cleaned = _sanitize_xml_bytes(data)
     try:

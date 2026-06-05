@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.31** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.32** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.31)
+## 16. Post-launch iterations (v0.2.0 → v0.3.32)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,30 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.32 — Sanitize undeclared namespaces + bare ampersands
+Next live pull crashed with ``unbound prefix: line 356, column 6`` —
+Tally Prime emitted a namespaced tag (``<udf:UserField>`` or similar)
+without declaring the ``udf`` namespace, which expat refuses. Same
+pattern as the earlier control-character issue: Tally writes
+technically-malformed XML and the strict parser rejects it.
+
+Extended ``_sanitize_xml_bytes`` to also handle:
+
+- **Undeclared namespace prefixes**: strips ``xmlns:foo="…"``
+  declarations and rewrites ``<prefix:tag>`` / ``prefix:attr="…"``
+  back to plain ``<tag>`` / ``attr="…"``. We don't read any
+  namespaced fields, so dropping them is safe.
+- **Bare ampersands**: Tally occasionally writes ``M&S Co`` or
+  ``FEES & RECOVERIES`` without escaping the ``&``. We replace any
+  ``&`` not starting a valid XML entity (``&amp;``, ``&lt;``,
+  ``&gt;``, ``&quot;``, ``&apos;`` or a numeric ref) with
+  ``&amp;``.
+
+Verified across 4 problematic input shapes — namespaced tag, multi-
+namespace doc, bare ampersand in party / ledger names, and a
+combined-chaos case — all parse cleanly. Vanilla ``ET.fromstring``
+crashes on 3 of the 4 without the fix.
 
 ### v0.3.31 — Pull every voucher in range + auto-refresh Review
 Field-test feedback on the live Tally integration surfaced two issues:
