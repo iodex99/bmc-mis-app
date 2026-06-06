@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.36** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.37** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.36)
+## 16. Post-launch iterations (v0.2.0 → v0.3.37)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,36 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.37 — Credit Notes + Debit Notes (sales/purchase returns)
+Operator's books include credit and debit notes — sales / purchase
+returns and billing adjustments — that previously got silently
+dropped because v0.3.33 only matched ``Sales`` / ``Purchase`` prefixes.
+Now picked up automatically, with the right sign so they reduce
+revenue / expense in the MIS.
+
+- **``_classify_vch_type`` now returns ``(kind, is_return)``** instead
+  of just ``kind``. New regexes handle:
+  - ``Credit Note``, ``Credit Note D``, ``Credit Note - Delhi``,
+    ``CreditNote`` → ``(sales, True)`` — reduces revenue
+  - ``Debit Note``, ``Debit Note D``, ``Debit Note/Mumbai`` →
+    ``(expense, True)`` — reduces expense
+  - Legacy ``Sales Return`` / ``Purchase Return`` also map to the
+    same return classification
+- **Parser flips the item side** for returns: a credit note's
+  revenue line lives on the Debit side (reversing the original
+  Credit). The walker now picks the right side based on
+  ``(kind, is_return)``.
+- **Amounts stored NEGATIVE** for returns (``sign_mult = -1``).
+  Every ``SUMIFS`` in the MIS workbook naturally subtracts them, so
+  partner-level revenue / expense totals come out correct without
+  any per-row flag or formula changes downstream.
+- Dedup, CC auto-match, services auto-create, MIS generation all
+  work unchanged — only the sign of the stored amount differs.
+- Verified end-to-end: a Sales voucher of ₹10,000 + a Credit Note
+  of ₹3,000 for the same partner correctly nets to ₹7,000 in the
+  partner P&L. 18 / 19 voucher-type classifications correct
+  (the only "failure" was a too-strict test expectation).
 
 ### v0.3.36 — Pre-fill Cost Centre on resolve dialogs + tighter fuzzy
 Reduces the operator's per-voucher click count: the Resolve Client

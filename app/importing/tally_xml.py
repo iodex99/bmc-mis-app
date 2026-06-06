@@ -100,34 +100,67 @@ def _parse_xml(data: bytes) -> ET.Element:
 # "Purchase Imports", "Sales Mumbai", etc.) — all of these should map to
 # the same underlying kind, so we prefix-match instead of equality-match.
 
+# Voucher type matchers. Each is a prefix regex that allows space / hyphen
+# / slash / end-of-string after the trigger word, so operator-customised
+# variants like "Sales - Delhi", "Credit Note D", "Purchase Imports" all
+# land on the right classification.
 _VCH_PREFIX_SALES = re.compile(r'^sales(?:[\s\-/]|$)', re.IGNORECASE)
 _VCH_PREFIX_PURCHASE = re.compile(r'^purchase(?:[\s\-/]|$)', re.IGNORECASE)
+_VCH_PREFIX_CREDIT_NOTE = re.compile(
+    r'^credit\s*note(?:[\s\-/]|$)', re.IGNORECASE)
+_VCH_PREFIX_DEBIT_NOTE = re.compile(
+    r'^debit\s*note(?:[\s\-/]|$)', re.IGNORECASE)
+_VCH_PREFIX_SALES_RETURN = re.compile(
+    r'^sales\s*return(?:[\s\-/]|$)', re.IGNORECASE)
+_VCH_PREFIX_PURCHASE_RETURN = re.compile(
+    r'^purchase\s*return(?:[\s\-/]|$)', re.IGNORECASE)
 
 
-def _classify_vch_type(raw: str) -> str | None:
-    """Return our internal kind for a Tally VoucherTypeName.
+def _classify_vch_type(raw: str) -> tuple[str, bool] | None:
+    """Return ``(kind, is_return)`` for a Tally VoucherTypeName.
 
-    Matches exact ``Sales`` / ``Purchase`` plus operator-customised
-    variants whose name *starts with* either word followed by a space,
-    hyphen or slash. Returns ``None`` for anything else so non-revenue
-    voucher types (Receipt, Payment, Contra, Journal, Stock Journal,
-    Delivery Note, etc.) are silently dropped.
+    *is_return* flags credit notes / debit notes / sales returns /
+    purchase returns — entries that **reduce** the running revenue
+    or expense rather than adding to it.
 
-    Deliberately does **not** match "Sales Return" / "Purchase Return" —
-    those are Credit Note / Debit Note class in Tally and have inverse
-    sign semantics we don't currently model.
+    Matches the trigger word as a prefix followed by a space, hyphen,
+    slash or end-of-string, so all operator-customised variants land
+    on the right classification:
+
+    * ``Sales``, ``Sales - Delhi``, ``Sales/BLR``, ``Sales Mumbai``
+      → ``(VCH_SALES, False)``
+    * ``Credit Note``, ``Credit Note D``, ``Credit Note - Delhi``,
+      ``Sales Return`` → ``(VCH_SALES, True)`` (negative amounts)
+    * ``Purchase``, ``Purchase Imports`` → ``(VCH_EXPENSE, False)``
+    * ``Debit Note``, ``Debit Note D``, ``Purchase Return``
+      → ``(VCH_EXPENSE, True)`` (negative amounts)
+
+    Anything else returns ``None`` so non-revenue voucher types
+    (Receipt, Payment, Contra, Journal, Stock Journal, Delivery
+    Note, etc.) are silently dropped.
+
+    Order matters: credit / debit note checks come before the
+    generic Sales / Purchase ones so ``Credit Note`` doesn't get
+    mis-classified as a plain sales voucher.
     """
     if not raw:
         return None
     text = raw.strip()
     if not text:
         return None
-    if "return" in text.lower():
-        return None
+    # Returns / credit notes / debit notes — match first because they
+    # would otherwise hit the generic Sales/Purchase patterns below.
+    if _VCH_PREFIX_CREDIT_NOTE.match(text) or \
+            _VCH_PREFIX_SALES_RETURN.match(text):
+        return (config.VCH_SALES, True)
+    if _VCH_PREFIX_DEBIT_NOTE.match(text) or \
+            _VCH_PREFIX_PURCHASE_RETURN.match(text):
+        return (config.VCH_EXPENSE, True)
+    # Regular sales / purchase
     if _VCH_PREFIX_SALES.match(text):
-        return config.VCH_SALES
+        return (config.VCH_SALES, False)
     if _VCH_PREFIX_PURCHASE.match(text):
-        return config.VCH_EXPENSE
+        return (config.VCH_EXPENSE, False)
     return None
 
 
@@ -257,9 +290,10 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
     """
     vch_type_raw = (velem.get("VCHTYPE")
                     or _text(_find_first(velem, ["vouchertypename"])))
-    kind = _classify_vch_type(vch_type_raw)
-    if not kind:
+    classification = _classify_vch_type(vch_type_raw)
+    if classification is None:
         return None
+    kind, is_return = classification
     if (_text(_find_first(velem, ["iscancelled"])) or "").lower() == "yes":
         return None
     if (_text(_find_first(velem, ["isoptional"])) or "").lower() == "yes":
@@ -279,24 +313,33 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
         kind=kind,
     )
 
-    revenue_side_credit = (kind == config.VCH_SALES)
+    # Which side of the voucher carries the items we care about?
+    # Normal sales:   revenue on Credit side  (party Dr, revenue Cr)
+    # Credit Note:    revenue on Debit side   (party Cr, revenue Dr — reversal)
+    # Normal purchase: expense on Debit side  (expense Dr, party Cr)
+    # Debit Note:     expense on Credit side  (expense Cr, party Dr — reversal)
+    if kind == config.VCH_SALES:
+        items_on_credit = not is_return
+    else:                                                  # VCH_EXPENSE
+        items_on_credit = is_return
+
+    # Returns store amounts as NEGATIVE so they naturally subtract from
+    # the running revenue / expense totals — every SUMIFS in the MIS
+    # workbook then handles them correctly without any per-row flag.
+    sign_mult = -1.0 if is_return else 1.0
+
     for entry in _children_named(velem, ["allledgerentries.list",
                                           "ledgerentries.list"]):
         ledger = _text(_find_first(entry, ["ledgername"]))
         if not ledger:
             continue
         amount = _parse_amount(_text(_find_first(entry, ["amount"])))
-        # Tally's AMOUNT sign: negative = Debit, positive = Credit.
-        # For sales we want credit-side ledgers (revenue + GST), for
-        # purchase debit-side (expense + input tax).
+        # Tally's AMOUNT sign: positive = Credit, negative = Debit.
         is_credit = amount > 0
-        if revenue_side_credit and not is_credit:
-            # Debit-side party ledger on a sales voucher — skip; we already
-            # store party_name on the voucher header.
-            continue
-        if (not revenue_side_credit) and is_credit:
-            # Credit-side party ledger on a purchase voucher — skip.
-            continue
+        if items_on_credit and not is_credit:
+            continue                    # debit-side party ledger — skip
+        if (not items_on_credit) and is_credit:
+            continue                    # credit-side party ledger — skip
         amt_abs = abs(amount)
         if amt_abs == 0:
             continue
@@ -304,7 +347,7 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
         voucher.line_splits.append(VoucherLine(
             service=ledger,
             cost_centre=cc_name,
-            amount=amt_abs,
+            amount=amt_abs * sign_mult,
             is_tax=is_tax_head(ledger),
         ))
 
