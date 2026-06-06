@@ -331,6 +331,14 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
     # workbook then handles them correctly without any per-row flag.
     sign_mult = -1.0 if is_return else 1.0
 
+    # De-dupe ledger entries inside this voucher. Tally occasionally
+    # emits the same revenue line twice on forex vouchers (once with
+    # the formatted ``$X = INR Y`` and once with the plain INR after
+    # settlement). Walking both would double-count the revenue. Key
+    # by (ledger name, |amount|, cc name) so genuine multi-line
+    # vouchers — even those happening to share an amount across two
+    # different ledgers — still come through.
+    seen_lines: set[tuple[str, float, str | None]] = set()
     for entry in _children_named(velem, ["allledgerentries.list",
                                           "ledgerentries.list"]):
         ledger = _text(_find_first(entry, ["ledgername"]))
@@ -347,6 +355,11 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
         if amt_abs == 0:
             continue
         cc_name = _ledger_cost_centre(entry)
+        dedupe_key = (ledger.strip().lower(), round(amt_abs, 2),
+                      (cc_name or "").strip().lower() or None)
+        if dedupe_key in seen_lines:
+            continue
+        seen_lines.add(dedupe_key)
         voucher.line_splits.append(VoucherLine(
             service=ledger,
             cost_centre=cc_name,

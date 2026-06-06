@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.39** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.40** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.39)
+## 16. Post-launch iterations (v0.2.0 → v0.3.40)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,23 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.40 — Dedupe ledger entries within a voucher (forex double-count fix)
+Field-test feedback: foreign-currency vouchers were being counted twice
+in the partner P&L. Tally occasionally emits the same revenue ledger
+line twice in the XML for forex vouchers — once with the formatted
+``$ 1000 @ 80/Re = 80000`` notation and once with the plain INR after
+settlement. Our walker processed both → revenue doubled.
+
+- **`_voucher_from_xml`** now de-duplicates ledger entries inside each
+  voucher by ``(ledger name, |amount|, cost-centre name)``. A genuine
+  forex double-emission is squashed; legitimate multi-line vouchers
+  (different ledgers, different CCs, or same ledger split across
+  partners) all stay intact.
+- Verified across three scenarios — forex duplicate squashes from
+  2 splits to 1 (₹80K, not ₹160K); a normal multi-service voucher
+  with FEES + AUDIT FEES + GST keeps 3 splits; a multi-CC split of
+  the same ledger to two partners keeps 2 splits.
 
 ### v0.3.39 — Pre-fill Resolve dialog + Confirm-suggested bulk + smarter match
 User feedback: "the system is still not taking the cost centres from the
