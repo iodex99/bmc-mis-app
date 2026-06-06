@@ -451,6 +451,36 @@ class TallyPullWidget(QGroupBox):
                 parts.append(f"{unmapped_clients} client name(s)")
             tail += ", ".join(parts) + "."
             lines.append(tail)
+        # Diagnostic: for the unresolved CC strings, show our matcher's
+        # suggestion and confidence inline. If a string's suggested
+        # confidence is ≥ 65 (the auto-apply threshold) but it's still
+        # listed here, that's a sign the apply path didn't fire and we
+        # need to investigate — operator sees this in plain text.
+        if unmapped_cc:
+            diag = resolution.diagnose_unresolved_cc(limit=8)
+            if diag:
+                lines.append(
+                    "<b>Unresolved Cost Centre strings (top 8):</b>")
+                for d in diag:
+                    if d["score"] >= 65 and d["suggested_partner"]:
+                        # Should have auto-resolved — flag it.
+                        marker = (f"<span style='color:#B33A3A;'>⚠ should "
+                                  f"auto-resolve to "
+                                  f"<b>{d['suggested_partner']}</b> "
+                                  f"({d['score']}%)</span>")
+                    elif d["suggested_partner"]:
+                        marker = (f"<span style='color:#B07000;'>suggests "
+                                  f"<b>{d['suggested_partner']}</b> "
+                                  f"({d['score']}%) — click Confirm "
+                                  f"suggested in Review</span>")
+                    else:
+                        marker = ("<span style='color:#64748B;'>no "
+                                  "suggestion — operator picks "
+                                  "manually</span>")
+                    lines.append(
+                        f"&nbsp;&nbsp;• <i>{d['raw']}</i> "
+                        f"({d['count']} split{'s' if d['count'] != 1 else ''}): "
+                        f"{marker}")
         # Show any "skipped voucher type" warnings from the parser so the
         # operator can see if anything they expected was dropped.
         for w in result.warnings:

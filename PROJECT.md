@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.40** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.41** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.40)
+## 16. Post-launch iterations (v0.2.0 → v0.3.41)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,30 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.41 — Pull-result diagnostic for unresolved CC strings
+User: "the system is still not picking up the cost centres from tally
+import" but explicitly thought it wasn't a threshold issue. Rather than
+guess at the cause, surface concrete diagnostic info inline so the
+actual gap is visible.
+
+- **New `resolution.diagnose_unresolved_cc(limit)`** returns
+  ``{raw, count, suggested_partner, score}`` for the top-N unresolved
+  CC strings, computing the matcher's suggestion at threshold 50
+  (deliberately low so weak matches still appear).
+- **Pull result panel** now lists those entries inline with one of
+  three colour-coded markers:
+  - **🔴 Red** "⚠ should auto-resolve to <b>VK</b> (100%)" — score
+    ≥ 65 but still unresolved. **This is a bug** — the apply path
+    didn't fire, the user shares it and we patch.
+  - **🟡 Yellow** "suggests <b>VK</b> (62%) — click Confirm suggested
+    in Review" — borderline match, operator confirms in one click.
+  - **⚪ Gray** "no suggestion — operator picks manually" — truly
+    unknown / ambiguous (operator-specific strings, "Mehta" alone,
+    "Recovery Account" etc.). Expected behaviour.
+- Lets the operator immediately see what kind of issue they're
+  looking at, and gives us a precise list of strings to teach the
+  matcher about if the gap is in our logic.
 
 ### v0.3.40 — Dedupe ledger entries within a voucher (forex double-count fix)
 Field-test feedback: foreign-currency vouchers were being counted twice

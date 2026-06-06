@@ -810,6 +810,42 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
     return cc_id, mgr_id, best_score
 
 
+def diagnose_unresolved_cc(limit: int = 10) -> list[dict]:
+    """Return diagnostic rows for unresolved CC strings.
+
+    For each distinct unresolved string, returns ``{"raw", "count",
+    "suggested_partner", "score"}`` so the operator can see:
+
+    * which strings are NOT being auto-resolved
+    * how many splits each string blocks
+    * what the matcher *would* suggest at suggest-threshold 50 (low
+      bar to catch near-matches the auto-apply path skipped)
+
+    If a suggestion has score ≥ 65 (the auto-apply threshold) but the
+    string still appears unresolved, something is wrong on the apply
+    path — the diagnostic surfaces this gap directly so we can debug.
+    """
+    rows = unresolved_cc_strings()
+    out = []
+    with transaction() as conn:
+        partner_codes = {
+            r["id"]: r["code"] for r in conn.execute(
+                "SELECT id, code FROM cost_centres "
+                "WHERE active = 1 AND cc_type = 'partner'")}
+    for r in rows[:limit]:
+        raw = r["raw"]
+        cc_id, mgr_id, score = suggest_for_raw_cc(raw, min_score=50)
+        out.append({
+            "raw": raw,
+            "count": r["count"],
+            "suggested_partner": partner_codes.get(cc_id),
+            "suggested_partner_id": cc_id,
+            "suggested_manager_id": mgr_id,
+            "score": score,
+        })
+    return out
+
+
 def suggest_for_raw_cc(raw: str, min_score: int = 80
                         ) -> tuple[int | None, int | None, int]:
     """Suggest a (partner CC id, manager id, confidence score) for a raw
