@@ -355,14 +355,45 @@ class SplitEditorDialog(QDialog):
         amount.valueChanged.connect(self._update_total)
         self.table.setCellWidget(r, 0, amount)
 
-        self.table.setCellWidget(r, 1, _combo(
-            self._cc, data.get("cost_centre_id"), none_label="(choose)"))
-        self.table.setCellWidget(r, 2, _combo(
-            self._mgr, data.get("manager_id"), none_label="(none)"))
-        self.table.setCellWidget(r, 3, _combo(
-            self._svc, data.get("service_id"), none_label="(none)"))
+        # Pre-fill CC + manager from the raw Tally string when the split
+        # doesn't already have them resolved. This is what turns most
+        # 'needs fix' vouchers into one-click 'OK' confirmations — the
+        # operator just clicks Save instead of picking from 8 partners.
+        cc_id = data.get("cost_centre_id")
+        mgr_id = data.get("manager_id")
+        svc_id = data.get("service_id")
+        raw_cc = (data.get("raw_cost_centre") or "").strip()
+        suggested = False
+        if cc_id is None and raw_cc:
+            s_cc, s_mgr, _score = resolution.suggest_for_raw_cc(raw_cc)
+            if s_cc is not None:
+                cc_id = s_cc
+                mgr_id = mgr_id or s_mgr
+                suggested = True
 
-        note = QLineEdit(data.get("note") or "")
+        cc_combo = _combo(self._cc, cc_id, none_label="(choose)")
+        mgr_combo = _combo(self._mgr, mgr_id, none_label="(none)")
+        svc_combo = _combo(self._svc, svc_id, none_label="(none)")
+        if suggested:
+            # Italic hint so the operator sees this row's CC was auto-
+            # suggested from Tally's CC text and not yet confirmed.
+            tip = f'Suggested from Tally CC: "{raw_cc}". Confirm or change.'
+            cc_combo.setToolTip(tip)
+            mgr_combo.setToolTip(tip)
+            f = cc_combo.font()
+            f.setItalic(True)
+            cc_combo.setFont(f)
+            mgr_combo.setFont(f)
+        self.table.setCellWidget(r, 1, cc_combo)
+        self.table.setCellWidget(r, 2, mgr_combo)
+        self.table.setCellWidget(r, 3, svc_combo)
+
+        # Show the raw Tally CC in the note column when present so the
+        # operator can see what Tally said even if they overrode it.
+        note_text = data.get("note") or ""
+        if raw_cc and not note_text:
+            note_text = f"Tally CC: {raw_cc}"
+        note = QLineEdit(note_text)
         self.table.setCellWidget(r, 4, note)
         self._update_total()
 

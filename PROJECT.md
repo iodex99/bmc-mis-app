@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.35** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.36** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.35)
+## 16. Post-launch iterations (v0.2.0 → v0.3.36)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,42 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.36 — Pre-fill Cost Centre on resolve dialogs + tighter fuzzy
+Reduces the operator's per-voucher click count: the Resolve Client
+dialog already pre-fills "Cost centre" from prior splits; the new
+``suggest_for_raw_cc`` helper now also pre-fills the Split Editor's
+partner + manager dropdowns based on the raw Tally CC text on each
+split. Operator opens an unmapped voucher and clicks Save — done.
+
+- **New `resolution.suggest_for_raw_cc(raw)`** returns
+  ``(partner_cc_id, manager_id, confidence)``. Looks up saved
+  mappings first; falls back to fuzzy matching with a tightened
+  pipeline (see below). UI uses it to pre-fill the Split Editor.
+- **`suggest_cc_for_raw_client`** extended: when no split has a
+  resolved ``cost_centre_id`` yet (common on a fresh Tally pull
+  before review), falls back to the dominant ``raw_cost_centre``
+  text on those splits and runs it through
+  ``suggest_for_raw_cc``. Pre-fills the new-client dialog from
+  Tally's own CC tag.
+- **`SplitEditorDialog._add_row`** now pre-fills the CC and Manager
+  combos for any row where ``cost_centre_id`` is NULL but
+  ``raw_cost_centre`` is set. Italic + tooltip ("Suggested from
+  Tally CC ...") flags the row as a pre-fill the operator should
+  confirm. Also auto-populates the Note column with the raw Tally
+  CC so it's visible alongside the dropdowns.
+- **Fuzzy matching tightened** to keep pre-fills accurate:
+  - Suggest threshold raised to 80 (auto-match stays at 70).
+  - Singleton-name keys (length ≥ 4) only added when *unambiguous*
+    across the master — "Vishal" → VK (only Vishal), but "Mehta"
+    no longer maps to PM because it's shared across PM / AM / MS.
+  - ``_best_match`` now detects **score ties**: if multiple master
+    entries tie for the top score and map to different ids, it
+    abstains. "Mehta" → no suggestion (correct); "Mr. Prakash
+    Mehta" → PM (correct, unambiguous full name).
+- Verified across 19 inputs — clean pass: full names, codes, first
+  names, last names, partner-manager combos, ambiguous strings
+  (Mehta / Mehtaa), random-text false positives all behave correctly.
 
 ### v0.3.35 — Explicit Tally company dropdown (no more auto-detect surprises)
 v0.3.34 made the pull use Tally's "current company" — but if the

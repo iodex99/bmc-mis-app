@@ -309,14 +309,28 @@ def infer_all_masters() -> dict[str, int]:
 
 
 def suggest_cc_for_raw_client(raw: str) -> int | None:
-    """Return the dominant cost-centre id seen on sales vouchers whose party
-    matches *raw*, or ``None``. Used to pre-fill the resolve dialog."""
+    """Return the most likely cost-centre id for a raw party name.
+
+    Strategy (each step falls through to the next if it produces nothing):
+
+    1. **Resolved splits**: the dominant ``cost_centre_id`` already on
+       sales-voucher splits matching this party name. Most reliable —
+       it's the consensus of whatever auto-match has previously decided.
+    2. **Raw CC strings on splits**: take the most-common
+       ``raw_cost_centre`` text from those same vouchers' splits and
+       fuzzy-match it against the partner master (low threshold, since
+       this fills the resolve dialog where the operator will confirm).
+       Handles the case where every split is still unmapped — common on
+       a fresh Tally pull before the operator has clicked through any
+       review entries.
+
+    Used to pre-fill the resolve-client dialog so the operator doesn't
+    have to manually pick the partner that Tally already told us about.
+    """
     if not raw:
         return None
     key = norm(raw)
     with transaction() as conn:
-        # Pull all matching vouchers in Python so whitespace differences in
-        # party_name don't kill the match.
         rows = conn.execute(
             "SELECT v.id, v.party_name "
             "FROM vouchers v WHERE v.kind = 'sales' "
@@ -325,6 +339,7 @@ def suggest_cc_for_raw_client(raw: str) -> int | None:
         if not ids:
             return None
         ph = ",".join("?" * len(ids))
+        # Step 1: resolved cost_centre_id consensus.
         row = conn.execute(
             f"SELECT s.cost_centre_id, COUNT(*) AS n "
             f"FROM voucher_splits s "
@@ -332,7 +347,21 @@ def suggest_cc_for_raw_client(raw: str) -> int | None:
             f"AND s.cost_centre_id IS NOT NULL "
             f"GROUP BY s.cost_centre_id ORDER BY n DESC LIMIT 1",
             ids).fetchone()
-    return row["cost_centre_id"] if row else None
+        if row:
+            return row["cost_centre_id"]
+        # Step 2: fall back to the dominant raw_cost_centre text.
+        raw_row = conn.execute(
+            f"SELECT s.raw_cost_centre AS raw, COUNT(*) AS n "
+            f"FROM voucher_splits s "
+            f"WHERE s.voucher_id IN ({ph}) "
+            f"AND s.raw_cost_centre IS NOT NULL "
+            f"AND s.raw_cost_centre <> '' "
+            f"GROUP BY s.raw_cost_centre ORDER BY n DESC LIMIT 1",
+            ids).fetchone()
+    if raw_row:
+        cc_id, _mgr_id, _score = suggest_for_raw_cc(raw_row["raw"])
+        return cc_id
+    return None
 
 
 # --- "delete unmapped rows" helpers used by the Review page ---------------
@@ -639,19 +668,147 @@ _MIN_SCORE = 70
 def _best_match(query: str, lookup: dict[str, int]) -> tuple[int | None, int]:
     """Best (id, score) for *query* in {normalised_name: id}.
 
-    Uses both token-sort and partial-ratio, takes the higher. Token-sort
-    handles word reorderings; partial-ratio handles "Shreyans" matching
-    "Shreyans Dedhia" or "Gaurav S" matching "Gaurav Siroya".
+    Strategy:
+    1. **Exact**: if *query* is a key, return that id at score 100.
+    2. **Fuzzy with tie detection**: compute the best score per key
+       across token-sort and partial-ratio. If the top match is unique
+       (no other key maps to a *different* id at the same score),
+       return it. Otherwise return ``(None, 0)`` — ambiguous queries
+       like "Mehta" (shared across three partners) should *not* be
+       silently resolved to whichever happened to be inserted first.
     """
     if not query or not lookup:
         return None, 0
     if query in lookup:
         return lookup[query], 100
-    r1 = process.extractOne(query, lookup.keys(), scorer=fuzz.token_sort_ratio)
-    r2 = process.extractOne(query, lookup.keys(), scorer=fuzz.partial_ratio)
-    best = max([r for r in (r1, r2) if r is not None],
-               key=lambda r: r[1], default=None)
-    return (lookup[best[0]], int(best[1])) if best else (None, 0)
+    # Per-key best score across both metrics
+    best_per_key: dict[str, float] = {}
+    for scorer in (fuzz.token_sort_ratio, fuzz.partial_ratio):
+        for key, score, _ in process.extract(
+                query, lookup.keys(), scorer=scorer, limit=5):
+            if score > best_per_key.get(key, 0):
+                best_per_key[key] = score
+    if not best_per_key:
+        return None, 0
+    top_score = max(best_per_key.values())
+    top_ids = {lookup[k] for k, s in best_per_key.items()
+               if s == top_score}
+    if len(top_ids) > 1:
+        # Genuine tie across different masters — refuse to guess.
+        return None, 0
+    top_key = next(k for k, s in best_per_key.items() if s == top_score)
+    return lookup[top_key], int(top_score)
+
+
+def _build_partner_manager_lookups(conn) -> tuple[dict, dict]:
+    """Build the {normalised name → id} lookups for partners and managers.
+
+    Each lookup includes:
+
+    * the full canonical name (always)
+    * the code (always)
+    * **unambiguous** name-part singletons (length ≥ 4, appearing in
+      exactly one entry). So "Vishal", "Kothari" → VK; "Shreyans",
+      "Dedhia" → SD; but "Mehta" (shared across PM / AM / MS) is
+      deliberately excluded — we can't pick one without context.
+    """
+    return (_build_lookup(conn,
+                           "SELECT id, code, name FROM cost_centres "
+                           "WHERE active = 1 AND cc_type = 'partner'"),
+            _build_lookup(conn,
+                           "SELECT id, code, name FROM managers "
+                           "WHERE active = 1"))
+
+
+def _build_lookup(conn, sql: str) -> dict[str, int]:
+    """Helper: build the lookup dict for one master table."""
+    rows = list(conn.execute(sql))
+    lookup: dict[str, int] = {}
+    # First pass: count which name-parts belong to which ids.
+    part_owners: dict[str, set] = {}
+    for r in rows:
+        for part in norm(r["name"]).split():
+            if len(part) >= 4:
+                part_owners.setdefault(part, set()).add(r["id"])
+    # Second pass: build the lookup with full names + codes + unambiguous parts.
+    for r in rows:
+        lookup[norm(r["name"])] = r["id"]
+        lookup[norm(r["code"])] = r["id"]
+        for part in norm(r["name"]).split():
+            if len(part) >= 4 and len(part_owners.get(part, ())) == 1:
+                lookup.setdefault(part, r["id"])
+    return lookup
+
+
+def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
+                          min_score: int = _MIN_SCORE
+                          ) -> tuple[int | None, int | None, int]:
+    """Match a single CC string. Returns ``(cc_id, mgr_id, score)``.
+
+    Same logic as :func:`auto_match_cc_strings` distilled to one string.
+    *min_score* controls how confident we need to be — 70 is the auto-
+    apply threshold; 50 is what the SplitEditor uses for *suggestions*
+    where the operator will confirm before saving.
+    """
+    cleaned = norm(_HONORIFICS.sub("", (raw or "").strip()))
+    if not cleaned:
+        return None, None, 0
+    cc_id: int | None = None
+    mgr_id: int | None = None
+    best_score = 0
+
+    # "X - Y" — try both as the partner side.
+    parts = _NAME_SEP.split(cleaned, maxsplit=1)
+    if len(parts) == 2:
+        left, right = parts[0].strip(), parts[1].strip()
+        l_id, l_score = _best_match(left, partner_lookup)
+        r_id, r_score = _best_match(right, partner_lookup)
+        if r_score >= l_score and r_score >= min_score:
+            cc_id, best_score = r_id, r_score
+            m_id, m_score = _best_match(left, manager_lookup)
+            if m_score >= min_score:
+                mgr_id = m_id
+        elif l_score >= min_score:
+            cc_id, best_score = l_id, l_score
+            m_id, m_score = _best_match(right, manager_lookup)
+            if m_score >= min_score:
+                mgr_id = m_id
+    # Plain — try the whole string as a partner.
+    if cc_id is None:
+        id_w, score_w = _best_match(cleaned, partner_lookup)
+        if score_w >= min_score:
+            cc_id, best_score = id_w, score_w
+    return cc_id, mgr_id, best_score
+
+
+def suggest_for_raw_cc(raw: str, min_score: int = 80
+                        ) -> tuple[int | None, int | None, int]:
+    """Suggest a (partner CC id, manager id, confidence score) for a raw
+    Tally CC string. Designed for UI pre-filling.
+
+    Threshold defaults to 80 — higher than the auto-match's 70 — because
+    weak partial-ratio matches against short singleton keys (e.g.
+    "random" loosely overlapping "kiran") can score in the 70s and
+    pre-fill the wrong partner. 80+ keeps suggestions reliable; the
+    operator can always pick manually when no suggestion is shown.
+
+    Looks up the saved ``cc_string_mappings`` table first; if there's
+    no saved mapping it falls back to fuzzy matching with the supplied
+    threshold.
+    """
+    if not raw or not raw.strip():
+        return None, None, 0
+    with transaction() as conn:
+        # Saved mapping has priority — it's the operator's own decision.
+        row = conn.execute(
+            "SELECT cost_centre_id, manager_id FROM cc_string_mappings "
+            "WHERE lower(trim(raw_text)) = ? AND active = 1",
+            (raw.strip().lower(),)).fetchone()
+        if row:
+            return row["cost_centre_id"], row["manager_id"], 100
+        partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
+    return _match_one_cc_string(
+        raw, partner_lookup, manager_lookup, min_score)
 
 
 def auto_match_cc_strings() -> int:
@@ -670,28 +827,7 @@ def auto_match_cc_strings() -> int:
     overwritten only if the auto-match finds a better fit.
     """
     with transaction() as conn:
-        partner_lookup: dict[str, int] = {}
-        for r in conn.execute(
-                "SELECT id, code, name FROM cost_centres "
-                "WHERE active = 1 AND cc_type = 'partner'"):
-            # Match against full name AND code, so "VK", "VKothari",
-            # "Vishal", "Vishal K" all hit the right partner.
-            partner_lookup[norm(r["name"])] = r["id"]
-            partner_lookup[norm(r["code"])] = r["id"]
-            # Also seed first-name and last-name singletons so a Tally
-            # CC like "Vishal" or "Kothari" lands on the partner without
-            # needing fuzzy matching.
-            for part in norm(r["name"]).split():
-                if len(part) > 2:
-                    partner_lookup.setdefault(part, r["id"])
-        manager_lookup: dict[str, int] = {}
-        for r in conn.execute(
-                "SELECT id, code, name FROM managers WHERE active = 1"):
-            manager_lookup[norm(r["name"])] = r["id"]
-            manager_lookup[norm(r["code"])] = r["id"]
-            for part in norm(r["name"]).split():
-                if len(part) > 2:
-                    manager_lookup.setdefault(part, r["id"])
+        partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
 
     if not partner_lookup:
         return 0
@@ -699,38 +835,8 @@ def auto_match_cc_strings() -> int:
     new_mappings: list[tuple[str, int, int | None]] = []
     for item in unresolved_cc_strings():
         raw = item["raw"]
-        cleaned = norm(_HONORIFICS.sub("", raw.strip()))
-
-        cc_id: int | None = None
-        mgr_id: int | None = None
-
-        # Try a "X - Y" split — could be either "Manager - Partner" or the
-        # reverse. Try both orderings; pick the side that maps to a partner.
-        parts = _NAME_SEP.split(cleaned, maxsplit=1)
-        if len(parts) == 2:
-            left, right = parts[0].strip(), parts[1].strip()
-            l_id, l_score = _best_match(left, partner_lookup)
-            r_id, r_score = _best_match(right, partner_lookup)
-            if r_score >= l_score and r_score >= _MIN_SCORE:
-                cc_id = r_id
-                m_id, m_score = _best_match(left, manager_lookup)
-                # Only attach a manager if the match is strong enough —
-                # avoids tagging unrelated managers (e.g. 'Prashant' was
-                # matching RM at a weak score).
-                if m_score >= _MIN_SCORE:
-                    mgr_id = m_id
-            elif l_score >= _MIN_SCORE:
-                cc_id = l_id
-                m_id, m_score = _best_match(right, manager_lookup)
-                if m_score >= _MIN_SCORE:
-                    mgr_id = m_id
-
-        # Plain "Name" — try the whole string as a partner.
-        if cc_id is None:
-            id_w, score_w = _best_match(cleaned, partner_lookup)
-            if score_w >= _MIN_SCORE:
-                cc_id = id_w
-
+        cc_id, mgr_id, _score = _match_one_cc_string(
+            raw, partner_lookup, manager_lookup, _MIN_SCORE)
         if cc_id is not None:
             new_mappings.append((raw, cc_id, mgr_id))
 
