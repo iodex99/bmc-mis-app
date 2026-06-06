@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.34** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.35** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.34)
+## 16. Post-launch iterations (v0.2.0 → v0.3.35)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,33 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.35 — Explicit Tally company dropdown (no more auto-detect surprises)
+v0.3.34 made the pull use Tally's "current company" — but if the
+operator has multiple companies open (and the wrong one happens to be
+in focus, sometimes a background instance with no visible window), the
+auto-detect still picked the wrong company. The fix: stop guessing,
+let the operator pick.
+
+- **New editable dropdown** on the Pull-from-Tally section. After
+  clicking Test, it lists every company Tally knows about (current
+  + the rest of ``list_companies``). The operator picks one
+  explicitly; that exact name goes through as ``SVCURRENTCOMPANY`` on
+  the pull request so Tally is *forced* to use that company,
+  regardless of which one is in focus.
+- **Free-text override** — the dropdown is editable, so if
+  ``list_companies`` returns nothing or omits the company they want,
+  they can type the exact name (must match Tally's company name
+  character-for-character).
+- **_ProbeWorker** now bundles the ``current_company`` + 
+  ``list_companies`` queries so the dropdown gets populated in one
+  round-trip on Test.
+- **Status line** shows ``current: <name>`` plus the count of other
+  loaded companies, so the operator can spot a multi-company state
+  at a glance.
+- **_PullWorker** no longer probes Tally first — it uses the
+  dropdown's text verbatim. Pull is now 100% deterministic: what's in
+  the box is what Tally is asked for.
 
 ### v0.3.34 — Lock pulls to a specific Tally company + mismatch warning
 Field-test exposed the "multiple companies open in Tally" footgun.

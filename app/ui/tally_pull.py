@@ -79,25 +79,28 @@ from ..util import fmt_inr
 class _PullWorker(QObject):
     """Run :func:`tally_client.fetch_day_book` off the UI thread.
 
-    Also probes Tally for the currently-loaded company name *first* and
-    passes it as ``SVCURRENTCOMPANY`` on the Day Book request. This makes
-    the pull deterministic when the operator has several companies open
-    in Tally Prime — otherwise Tally returns vouchers from whichever
-    company happens to be in focus, which is a footgun.
+    The company name passed here is what the operator explicitly picked
+    in the dropdown — it goes through as ``SVCURRENTCOMPANY`` on the Day
+    Book request, so Tally is *forced* to use that company regardless of
+    which one happens to be in focus in the UI. If the operator left the
+    dropdown empty, we probe ``current_company`` as a fallback.
     """
 
-    finished = Signal(object, object, object)  # (ParseResult, company_name, error)
+    finished = Signal(object, object, object)  # (ParseResult, company, error)
 
-    def __init__(self, from_date, to_date, url):
+    def __init__(self, from_date, to_date, company_name, url):
         super().__init__()
         self._from = from_date
         self._to = to_date
+        self._company = company_name
         self._url = url
 
     def run(self):
         try:
-            cc = tally_client.current_company(url=self._url or None)
-            company_name = cc.name if cc else None
+            company_name = self._company
+            if not company_name:
+                cc = tally_client.current_company(url=self._url or None)
+                company_name = cc.name if cc else None
             result = tally_client.fetch_day_book(
                 self._from, self._to,
                 company_name=company_name,
@@ -108,9 +111,14 @@ class _PullWorker(QObject):
 
 
 class _ProbeWorker(QObject):
-    """Run :func:`tally_client.current_company` off the UI thread."""
+    """Ask Tally what company is loaded *and* what other companies are open.
 
-    finished = Signal(object, object)
+    The two queries are bundled so the UI gets the dropdown contents in
+    one round-trip after the operator clicks Test.
+    """
+
+    finished = Signal(object, object, object)
+    # (current_cc, all_companies, error)
 
     def __init__(self, url):
         super().__init__()
@@ -119,9 +127,13 @@ class _ProbeWorker(QObject):
     def run(self):
         try:
             cc = tally_client.current_company(url=self._url or None)
-            self.finished.emit(cc, None)
+            try:
+                companies = tally_client.list_companies(url=self._url or None)
+            except tally_client.TallyError:
+                companies = []
+            self.finished.emit(cc, companies, None)
         except Exception as exc:                                  # noqa: BLE001
-            self.finished.emit(None, exc)
+            self.finished.emit(None, [], exc)
 
 
 # ----------------------------- widget --------------------------------------
@@ -165,6 +177,23 @@ class TallyPullWidget(QGroupBox):
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color: #555;")
         layout.addWidget(self.status)
+
+        # --- Tally company picker -----------------------------------------
+        # Editable combo so the operator can either pick from the list
+        # we get back from Tally OR type the exact company name manually
+        # (useful when Tally's list_companies returns nothing — some Tally
+        # builds restrict that collection). Whatever's in the box is what
+        # gets sent as SVCURRENTCOMPANY on the pull request.
+        co_row = QHBoxLayout()
+        co_row.addWidget(QLabel("Tally company:"))
+        self.company_combo = QComboBox()
+        self.company_combo.setEditable(True)
+        self.company_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.company_combo.lineEdit().setPlaceholderText(
+            "Click Test to list loaded companies, or type the exact "
+            "name here")
+        co_row.addWidget(self.company_combo, 1)
+        layout.addLayout(co_row)
 
         # --- pull controls -------------------------------------------------
         grid = QGridLayout()
@@ -241,23 +270,60 @@ class TallyPullWidget(QGroupBox):
         self._probe_thread = thread
         thread.start()
 
-    def _on_probe_done(self, cc, error) -> None:
+    def _on_probe_done(self, cc, companies, error) -> None:
         self.test_btn.setEnabled(True)
         if error is not None:
             self.status.setText(f"❌ {error}")
             self.status.setStyleSheet("color: #B33A3A;")
             return
-        if cc is None:
+        if cc is None and not companies:
             self.status.setText(
                 "⚠ Connected to Tally, but no company is loaded. "
                 "Open a company in Tally and try again.")
             self.status.setStyleSheet("color: #B07000;")
             return
-        books = ""
-        if cc.books_from and cc.books_to:
-            books = (f" (books: {cc.books_from:%d %b %Y} → "
-                     f"{cc.books_to:%d %b %Y})")
-        self.status.setText(f"✓ Connected — <b>{cc.name}</b>{books}")
+
+        # Build the union of {currently-in-focus} ∪ {list_companies result}
+        # so the dropdown lists everything Tally is aware of.
+        names_in_order: list[str] = []
+        seen: set[str] = set()
+        if cc and cc.name and cc.name not in seen:
+            names_in_order.append(cc.name)
+            seen.add(cc.name)
+        for c in companies:
+            if c.name and c.name not in seen:
+                names_in_order.append(c.name)
+                seen.add(c.name)
+
+        # Preserve whatever the operator might have typed.
+        prior = self.company_combo.currentText().strip()
+        self.company_combo.blockSignals(True)
+        self.company_combo.clear()
+        self.company_combo.addItems(names_in_order)
+        if prior and prior in seen:
+            self.company_combo.setCurrentText(prior)
+        elif cc and cc.name:
+            self.company_combo.setCurrentText(cc.name)
+        elif prior:
+            self.company_combo.setCurrentText(prior)
+        self.company_combo.blockSignals(False)
+
+        # Status line with current-focus + how many we'll let the user
+        # choose between.
+        bits = []
+        if cc:
+            books = ""
+            if cc.books_from and cc.books_to:
+                books = (f" (books: {cc.books_from:%d %b %Y} → "
+                         f"{cc.books_to:%d %b %Y})")
+            bits.append(f"current: <b>{cc.name}</b>{books}")
+        extra = max(0, len(names_in_order) - (1 if cc else 0))
+        if extra:
+            bits.append(f"{extra} other compan{'ies' if extra != 1 else 'y'} "
+                        "loaded — pick from the dropdown below")
+        if not bits:
+            bits.append("connected, but no company info returned")
+        self.status.setText("✓ Connected — " + "; ".join(bits))
         self.status.setStyleSheet("color: #1B7A1B;")
 
     # -- pull ------------------------------------------------------------
@@ -272,12 +338,19 @@ class TallyPullWidget(QGroupBox):
                                 "From-date is after To-date.")
             return
 
+        company_name = self.company_combo.currentText().strip() or None
+
         self.pull_btn.setEnabled(False)
-        self.result_label.setText(
-            f"Fetching {from_d:%d %b %Y} → {to_d:%d %b %Y} from Tally…")
+        if company_name:
+            self.result_label.setText(
+                f"Fetching {from_d:%d %b %Y} → {to_d:%d %b %Y} from "
+                f"<b>{company_name}</b>…")
+        else:
+            self.result_label.setText(
+                f"Fetching {from_d:%d %b %Y} → {to_d:%d %b %Y} from Tally…")
 
         thread = QThread(self)
-        worker = _PullWorker(from_d, to_d, url)
+        worker = _PullWorker(from_d, to_d, company_name, url)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_pull_done)
