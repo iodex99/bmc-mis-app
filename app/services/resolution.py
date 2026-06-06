@@ -844,30 +844,90 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
 
 
 def export_cc_diagnostic(path: str) -> int:
-    """Write a CSV file with full info on every unresolved CC string +
-    what the matcher does with it. Returns the row count written.
+    """Write a CSV with FULL visibility into the state of every voucher
+    split's cost-centre attribution. Returns the row count written.
 
-    The file lets the operator share concrete data with us when
-    something isn't matching as expected: each row shows the raw
-    string, normalised form, what tokens we extracted, the matcher's
-    suggested partner + score, and whether it has a saved mapping.
+    Includes three kinds of rows so the operator (and we) can see the
+    full picture:
+
+    * **Summary** row at the top: total splits, how many are resolved,
+      how many have raw text but aren't resolved, how many have no
+      raw text at all (the "Tally didn't tag a CC" case).
+    * **Unresolved with raw text** rows: the standard matcher diagnosis.
+    * **Unresolved with NO raw text** rows (limited sample): voucher
+      number, party, ledger — so the operator can verify whether the
+      Tally XML actually has CC tags on those specific vouchers.
+
+    If most rows fall into the third category, the issue is XML
+    extraction (share ``tally_last_response.xml``); if most are in
+    category 2 with a "suggested partner", it's a matcher gap.
     """
     import csv
-    rows = unresolved_cc_strings()
     with transaction() as conn:
         partner_codes = {
             r["id"]: r["code"] for r in conn.execute(
                 "SELECT id, code FROM cost_centres "
                 "WHERE active = 1 AND cc_type = 'partner'")}
         partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
-        # All saved cc_string_mappings for cross-checking.
         saved = {norm(r["raw_text"]): r["cost_centre_id"]
                   for r in conn.execute(
                       "SELECT raw_text, cost_centre_id FROM "
                       "cc_string_mappings WHERE active = 1")}
+        # Get full counts up front.
+        totals = conn.execute("""
+            SELECT
+              COUNT(*) AS total_splits,
+              SUM(CASE WHEN s.cost_centre_id IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+              SUM(CASE WHEN s.cost_centre_id IS NULL
+                       AND coalesce(s.raw_cost_centre, v.raw_cost_centre, '') <> ''
+                       THEN 1 ELSE 0 END) AS unresolved_with_raw,
+              SUM(CASE WHEN s.cost_centre_id IS NULL
+                       AND coalesce(s.raw_cost_centre, v.raw_cost_centre, '') = ''
+                       THEN 1 ELSE 0 END) AS unresolved_no_raw
+            FROM voucher_splits s
+            JOIN vouchers v ON v.id = s.voucher_id
+        """).fetchone()
+        # Sample of "no raw CC at all" splits — the smoking gun for an
+        # XML-extraction problem.
+        no_raw_samples = conn.execute("""
+            SELECT v.vch_no, v.vch_type, v.party_name, v.kind,
+                   v.ledger_head, v.txn_date
+            FROM voucher_splits s
+            JOIN vouchers v ON v.id = s.voucher_id
+            WHERE s.cost_centre_id IS NULL
+              AND coalesce(s.raw_cost_centre, v.raw_cost_centre, '') = ''
+            ORDER BY v.txn_date DESC
+            LIMIT 20
+        """).fetchall()
+
+    rows = unresolved_cc_strings()
     written = 0
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
+        # Summary header.
+        w.writerow([
+            "=== SUMMARY ===", "", "", "", "", "", "", "",
+        ])
+        w.writerow([
+            "Total splits",
+            "Resolved (have cost_centre_id)",
+            "Unresolved WITH raw CC string",
+            "Unresolved WITHOUT raw CC string (XML extraction issue!)",
+            "", "", "", "",
+        ])
+        w.writerow([
+            totals["total_splits"] or 0,
+            totals["resolved"] or 0,
+            totals["unresolved_with_raw"] or 0,
+            totals["unresolved_no_raw"] or 0,
+            "", "", "", "",
+        ])
+        w.writerow([])
+        # Matcher diagnosis for unresolved-with-raw rows.
+        w.writerow([
+            "=== UNRESOLVED CC STRINGS (matcher diagnosis) ===",
+            "", "", "", "", "", "", "",
+        ])
         w.writerow([
             "raw_text", "normalised", "tokens",
             "saved_mapping_partner", "suggested_partner", "score",
@@ -882,7 +942,6 @@ def export_cc_diagnostic(path: str) -> int:
             saved_cc_id = saved.get(norm(raw))
             saved_partner = partner_codes.get(saved_cc_id)
             suggested_partner = partner_codes.get(cc_id)
-            # Diagnosis: why isn't this auto-resolved?
             if saved_partner:
                 diag = ("HAS MAPPING but split unresolved — apply path "
                         "didn't fire (BUG, share this row)")
@@ -902,6 +961,24 @@ def export_cc_diagnostic(path: str) -> int:
                 score, r["count"], diag,
             ])
             written += 1
+        w.writerow([])
+        # Sample of "no CC at all" vouchers — extraction-issue evidence.
+        w.writerow([
+            "=== UNRESOLVED VOUCHERS WITH NO RAW CC AT ALL "
+            "(XML extraction issue - sample of 20) ===",
+            "", "", "", "", "", "", "",
+        ])
+        w.writerow([
+            "vch_no", "vch_type", "party_name", "kind", "ledger_head",
+            "txn_date", "", "",
+        ])
+        for s in no_raw_samples:
+            w.writerow([
+                s["vch_no"] or "", s["vch_type"] or "",
+                s["party_name"] or "", s["kind"] or "",
+                s["ledger_head"] or "", s["txn_date"] or "",
+                "", "",
+            ])
     return written
 
 

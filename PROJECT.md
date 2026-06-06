@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.43** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.44** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.43)
+## 16. Post-launch iterations (v0.2.0 → v0.3.44)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,28 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.44 — Enhanced diagnostic CSV (full visibility)
+User's v0.3.43 diagnostic CSV came back **empty** — meaning
+``unresolved_cc_strings()`` had no rows. Combined with their earlier
+screenshot of "63/63 vouchers needs fix", this is the smoking gun:
+the CC names aren't being **extracted** from the Tally XML at all,
+so there's nothing in the database for the matcher to work with.
+
+Rebuilt the diagnostic CSV to show the full picture — three sections:
+
+1. **Summary row** at the top: total splits / resolved /
+   unresolved-with-raw / unresolved-WITHOUT-raw. That last column is
+   the smoking gun for an XML-extraction problem.
+2. **Matcher diagnosis** of unresolved-with-raw rows (existing behaviour).
+3. **Sample of vouchers with no raw CC at all** (top 20 by date) —
+   shows ``vch_no``, ``vch_type``, ``party_name``, ``ledger_head`` so
+   the operator can verify in Tally whether those specific invoices
+   actually have cost-centre tags assigned.
+
+If section 3 dominates, the issue is XML extraction → operator
+shares ``tally_last_response.xml`` from the data dir and we patch.
+If section 2 dominates, it's a matcher gap → we patch the matcher.
 
 ### v0.3.43 — Broader tokenizer + CSV diagnostic export
 User confirmed it's a matcher issue. v0.3.39 added token-level exact
