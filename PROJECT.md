@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.33** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.34** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.33)
+## 16. Post-launch iterations (v0.2.0 → v0.3.34)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,36 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.34 — Lock pulls to a specific Tally company + mismatch warning
+Field-test exposed the "multiple companies open in Tally" footgun.
+Operator had MSIPL loaded in Tally and Bilimoria selected as the
+target entity in our app — yesterday's pull happened to be Bilimoria
+(250 vouchers), today's came back with 14 (MSIPL's vouchers) because
+Tally returned data for whichever company was *in focus* rather than
+the one we wanted.
+
+Fixes:
+
+- ``_PullWorker`` now probes Tally's current company first and passes
+  the name as ``SVCURRENTCOMPANY`` on the Day Book request. Tally
+  returns data for that exact company, not whichever one happens to
+  be in focus.
+- **Result label always shows** ``"Pulled from <company> — N voucher(s)
+  in range"`` so the operator can see at a glance which Tally company
+  contributed the data.
+- **Mismatch confirmation dialog**: if the operator picks an entity
+  explicitly (e.g. Bilimoria) but Tally has a *different* company
+  loaded (MSIPL), we show a Yes/No dialog asking whether to proceed —
+  prevents wrong-company data from being committed silently under the
+  right entity_id.
+- **Entity matching is now suffix-tolerant**: Tally Prime returns
+  split-period company names like ``"Bilimoria Mehta & Co. - (From
+  1-Apr-2011) - (from 1-Apr-2016)"``; ``_entity_id_for`` now matches
+  those against the master entity ``"Bilimoria Mehta & Co."`` via a
+  contains / prefix check.
+- "No vouchers found" warning also surfaces which company was queried,
+  so the operator can spot a wrong-company state immediately.
 
 ### v0.3.33 — Forex vouchers + custom voucher types + lenient CC match
 Second batch of live-pull feedback: forex (USD/EUR) invoices were

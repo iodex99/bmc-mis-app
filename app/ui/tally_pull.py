@@ -77,26 +77,34 @@ from ..util import fmt_inr
 # ---------------- background fetch (so the UI doesn't freeze) ---------------
 
 class _PullWorker(QObject):
-    """Run :func:`tally_client.fetch_day_book` off the UI thread."""
+    """Run :func:`tally_client.fetch_day_book` off the UI thread.
 
-    finished = Signal(object, object)   # (ParseResult | None, error | None)
+    Also probes Tally for the currently-loaded company name *first* and
+    passes it as ``SVCURRENTCOMPANY`` on the Day Book request. This makes
+    the pull deterministic when the operator has several companies open
+    in Tally Prime — otherwise Tally returns vouchers from whichever
+    company happens to be in focus, which is a footgun.
+    """
 
-    def __init__(self, from_date, to_date, company, url):
+    finished = Signal(object, object, object)  # (ParseResult, company_name, error)
+
+    def __init__(self, from_date, to_date, url):
         super().__init__()
         self._from = from_date
         self._to = to_date
-        self._company = company
         self._url = url
 
     def run(self):
         try:
+            cc = tally_client.current_company(url=self._url or None)
+            company_name = cc.name if cc else None
             result = tally_client.fetch_day_book(
                 self._from, self._to,
-                company_name=self._company or None,
+                company_name=company_name,
                 url=self._url or None)
-            self.finished.emit(result, None)
+            self.finished.emit(result, company_name, None)
         except Exception as exc:                                  # noqa: BLE001
-            self.finished.emit(None, exc)
+            self.finished.emit(None, None, exc)
 
 
 class _ProbeWorker(QObject):
@@ -269,7 +277,7 @@ class TallyPullWidget(QGroupBox):
             f"Fetching {from_d:%d %b %Y} → {to_d:%d %b %Y} from Tally…")
 
         thread = QThread(self)
-        worker = _PullWorker(from_d, to_d, None, url)
+        worker = _PullWorker(from_d, to_d, url)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_pull_done)
@@ -280,7 +288,7 @@ class TallyPullWidget(QGroupBox):
         self._worker_thread = thread
         thread.start()
 
-    def _on_pull_done(self, result, error) -> None:
+    def _on_pull_done(self, result, company_name, error) -> None:
         self.pull_btn.setEnabled(True)
         if error is not None:
             self.result_label.setText(f"❌ {error}")
@@ -288,31 +296,50 @@ class TallyPullWidget(QGroupBox):
             QMessageBox.critical(self, "Tally pull failed", str(error))
             return
         if not result.vouchers:
-            msg = ("No sales or purchase vouchers in that period. Check the "
-                   "date range, and make sure Tally has the right company "
-                   "loaded.")
-            self.result_label.setText(f"⚠ {msg}")
+            company_hint = (f" Tally currently has <b>{company_name}</b> "
+                            "loaded — make sure that's the right company "
+                            "for this period." if company_name else "")
+            msg = ("No sales or purchase vouchers in that period.")
+            self.result_label.setText(f"⚠ {msg}{company_hint}")
             self.result_label.setStyleSheet("color: #B07000;")
             return
 
-        # Decide entity to commit against. If 'Auto-detect' is selected, ask
-        # Tally which company is loaded right now and look that up in our
-        # entity master (canonical name OR alias).
+        # Decide which entity to commit against.
         entity_id = self.entity_combo.currentData()
-        url = self.url_edit.text().strip() or tally_client.DEFAULT_TALLY_URL
         if entity_id is None:
-            try:
-                cc = tally_client.current_company(url=url)
-            except tally_client.TallyError:
-                cc = None
-            if cc:
-                entity_id = _entity_id_for(cc.name)
+            # Auto-detect: match Tally's loaded company against the entity
+            # master (canonical name or alias).
+            if company_name:
+                entity_id = _entity_id_for(company_name)
             if entity_id is None:
                 QMessageBox.warning(
                     self, "No entity match",
-                    "Tally's current company doesn't match any entity in "
-                    "Master Data. Pick a target entity from the dropdown.")
+                    f"Tally has '{company_name or '(unknown)'}' loaded, "
+                    "which doesn't match any entity in Master Data. Pick a "
+                    "target entity from the dropdown.")
                 return
+        else:
+            # Operator picked an entity explicitly. If Tally's loaded
+            # company doesn't match that entity, warn before committing —
+            # this is the "wrong company in Tally" footgun.
+            mapped_id = (_entity_id_for(company_name) if company_name
+                         else None)
+            if mapped_id is not None and mapped_id != entity_id:
+                target_name = _entity_name(entity_id)
+                resp = QMessageBox.question(
+                    self, "Company mismatch",
+                    f"Tally has <b>{company_name}</b> loaded, but you're "
+                    f"importing into <b>{target_name}</b>.<br><br>"
+                    f"The {len(result.vouchers)} voucher(s) Tally returned "
+                    f"belong to {company_name}. Continue and commit them "
+                    f"under {target_name}?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if resp != QMessageBox.Yes:
+                    self.result_label.setText(
+                        f"⚠ Cancelled — switch Tally to the right company "
+                        f"and try again.")
+                    self.result_label.setStyleSheet("color: #B07000;")
+                    return
 
         # Commit per kind so each batch records the right file_type
         by_kind = tally_xml.split_by_kind(result)
@@ -328,6 +355,12 @@ class TallyPullWidget(QGroupBox):
         unmapped_clients = len(resolution.unresolved_clients())
 
         lines = []
+        # Always show which Tally company the data came from — eliminates
+        # the "did I have the right one loaded?" guesswork.
+        header_bits = [f"Pulled from <b>{company_name}</b>"
+                       if company_name else "Pulled from Tally"]
+        header_bits.append(f"{len(result.vouchers)} voucher(s) in range")
+        lines.append(" — ".join(header_bits))
         for ft, r in kinds:
             seg = (f"<b>{ft.title()}</b>: {fmt_inr(r.new_vouchers)} new")
             if r.skipped_duplicates:
@@ -379,15 +412,41 @@ def _default_to() -> QDate:
 
 def _entity_id_for(tally_company_name: str) -> int | None:
     """Map a Tally company name to one of our master entities via the same
-    alias table the operator uses for ledger names."""
+    alias table the operator uses for ledger names.
+
+    Tries an exact match first, then a substring contains-match (Tally
+    sometimes returns names like ``"Bilimoria Mehta & Co. - (From 1-Apr-...)"``
+    with a split-period suffix — we want those to still hit Bilimoria).
+    """
     from ..database import transaction
     key = (tally_company_name or "").strip().lower()
     if not key:
         return None
     with transaction() as conn:
+        # Exact match first.
         row = conn.execute(
             "SELECT e.id FROM entities e "
             "LEFT JOIN entity_aliases a ON a.entity_id = e.id "
             "WHERE lower(e.name) = ? OR lower(a.alias) = ?",
             (key, key)).fetchone()
-    return row["id"] if row else None
+        if row:
+            return row["id"]
+        # Fall back to a contains-match (handles split-period suffixes).
+        rows = conn.execute(
+            "SELECT id, name FROM entities").fetchall()
+        for r in rows:
+            n = r["name"].strip().lower()
+            if n and (n in key or key.startswith(n + " ")
+                      or key.startswith(n + "-")):
+                return r["id"]
+    return None
+
+
+def _entity_name(entity_id: int) -> str:
+    """Human-readable name for an entity id (or ``'(unknown)'``)."""
+    from ..database import transaction
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT name FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+    return row["name"] if row else "(unknown)"
