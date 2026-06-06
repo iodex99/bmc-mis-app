@@ -101,19 +101,22 @@ def _parse_xml(data: bytes) -> ET.Element:
 # the same underlying kind, so we prefix-match instead of equality-match.
 
 # Voucher type matchers. Each is a prefix regex that allows space / hyphen
-# / slash / end-of-string after the trigger word, so operator-customised
-# variants like "Sales - Delhi", "Credit Note D", "Purchase Imports" all
-# land on the right classification.
-_VCH_PREFIX_SALES = re.compile(r'^sales(?:[\s\-/]|$)', re.IGNORECASE)
-_VCH_PREFIX_PURCHASE = re.compile(r'^purchase(?:[\s\-/]|$)', re.IGNORECASE)
+# / slash / dot / end-of-string after (and between) trigger words, so
+# operator-customised variants like "Sales - Delhi", "Credit Note D",
+# "Debit-Note", "Purchase Imports" all land on the right classification.
+# The "next-char" group ``(?:[\s\-/.]|$)`` keeps "Credit Notebook" or
+# "Salesperson" from accidentally matching.
+_SEP = r'[\s\-/.]'
+_VCH_PREFIX_SALES = re.compile(rf'^sales(?:{_SEP}|$)', re.IGNORECASE)
+_VCH_PREFIX_PURCHASE = re.compile(rf'^purchase(?:{_SEP}|$)', re.IGNORECASE)
 _VCH_PREFIX_CREDIT_NOTE = re.compile(
-    r'^credit\s*note(?:[\s\-/]|$)', re.IGNORECASE)
+    rf'^credit{_SEP}*note(?:{_SEP}|$)', re.IGNORECASE)
 _VCH_PREFIX_DEBIT_NOTE = re.compile(
-    r'^debit\s*note(?:[\s\-/]|$)', re.IGNORECASE)
+    rf'^debit{_SEP}*note(?:{_SEP}|$)', re.IGNORECASE)
 _VCH_PREFIX_SALES_RETURN = re.compile(
-    r'^sales\s*return(?:[\s\-/]|$)', re.IGNORECASE)
+    rf'^sales{_SEP}*return(?:{_SEP}|$)', re.IGNORECASE)
 _VCH_PREFIX_PURCHASE_RETURN = re.compile(
-    r'^purchase\s*return(?:[\s\-/]|$)', re.IGNORECASE)
+    rf'^purchase{_SEP}*return(?:{_SEP}|$)', re.IGNORECASE)
 
 
 def _classify_vch_type(raw: str) -> tuple[str, bool] | None:
@@ -379,30 +382,52 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
 def parse_response(xml: bytes | str) -> ParseResult:
     """Parse a Tally Day-Book XML response into a ``ParseResult``.
 
-    A single response can contain both sales and purchase vouchers — the
-    file_type on the result reflects the dominant kind. Caller may want to
-    split per kind before commit (we provide :func:`split_by_kind` for that).
+    A single response can contain sales, purchase, credit-note, and
+    debit-note vouchers — the ``file_type`` on the result reflects the
+    dominant kind. Caller may want to split per kind before commit (we
+    provide :func:`split_by_kind` for that).
+
+    A warning listing **skipped voucher type names + counts** is appended
+    when types are present that we don't classify (Receipt, Payment,
+    Journal, Contra, etc., plus anything our prefix regexes don't catch).
+    This is the diagnostic for "Tally has X vouchers but we picked up Y"
+    — the operator can see exactly what we dropped.
     """
     if isinstance(xml, str):
         xml = xml.encode("utf-8")
     root = _parse_xml(xml)
 
-    # Walk every <VOUCHER> element anywhere in the tree.
     vouchers: list[ParsedVoucher] = []
+    skipped: dict[str, int] = {}
     for velem in root.iter():
         if _norm_tag(velem.tag) != "voucher":
             continue
         v = _voucher_from_xml(velem)
         if v is not None:
             vouchers.append(v)
+        else:
+            vt = (velem.get("VCHTYPE")
+                  or _text(_find_first(velem, ["vouchertypename"]))
+                  or "(no type)")
+            skipped[vt] = skipped.get(vt, 0) + 1
 
     result = ParseResult(file_type=config.FILE_TYPE_SALES)
     result.vouchers = vouchers
     if not vouchers:
         result.warnings.append(
-            "No sales or purchase vouchers in the Tally response for this "
-            "period. Confirm Tally has the right company loaded and that "
-            "the date range covers at least one voucher.")
+            "No sales / purchase / credit-note / debit-note vouchers in "
+            "the Tally response for this period. Confirm Tally has the "
+            "right company loaded and that the date range covers at least "
+            "one voucher.")
+    if skipped:
+        # Sort by count desc, list top types so the operator sees the
+        # most impactful skips first.
+        top = sorted(skipped.items(), key=lambda kv: -kv[1])
+        summary = ", ".join(f"{vt}={n}" for vt, n in top[:8])
+        result.warnings.append(
+            f"Skipped {sum(skipped.values())} non-revenue voucher(s): "
+            f"{summary}. If any of these are revenue/expense types we "
+            f"should support, share the name and we'll add it.")
     return result
 
 

@@ -433,9 +433,9 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     def write_row(r, code, name, target, kind):
         _cell(ws, r, 1, code, font=_NORMAL, border=True)
         _cell(ws, r, 2, name, font=_NORMAL, border=True)
-        _cell(ws, r, 3, f"=SUMIFS({rev}!$G:$G,{rev}!$C:$C,$A{r})",
+        _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 4, f"=SUMIFS({exp}!$F:$F,{exp}!$C:$C,$A{r})",
+        _cell(ws, r, 4, f"=SUMIFS({exp}!$G:$G,{exp}!$D:$D,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 5, f"=SUMIFS({lab}!$F:$F,{lab}!$B:$B,$A{r})",
               fmt=INR, border=True)
@@ -633,12 +633,16 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
     # Returns the SUMIFS formula for a (partner, manager) cell on a given
     # data sheet's amount column.
     def sumifs(sheet_q, amount_col, cc_code, mgr_filter, extra=None):
+        # Column layout on the Revenue / Expenses data sheets:
+        #   A=Date  B=VoucherNo  C=Entity  D=CostCentre  E=Manager
+        #   F=Service  G=Client (rev only)  H=Amount (rev) / G=Amount (exp)
+        #   I=Category (rev) / H=Description (exp)
         parts = [
             f"{sheet_q}!${amount_col}:${amount_col}",
-            f"{sheet_q}!$C:$C", f'"{cc_code}"',
+            f"{sheet_q}!$D:$D", f'"{cc_code}"',
         ]
         if mgr_filter is not None:
-            parts.append(f"{sheet_q}!$D:$D")
+            parts.append(f"{sheet_q}!$E:$E")
             parts.append(f'"{mgr_filter}"')
         for col, value in (extra or []):
             parts.append(f"{sheet_q}!${col}:${col}")
@@ -743,14 +747,14 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     # office overhead doesn't break down by manager.
                     formula = 0
                 elif kind == "sales":
-                    formula = sumifs(rev, "G", cc_code, mgr_filter,
-                                     extra=[("H", "Income")])
+                    formula = sumifs(rev, "H", cc_code, mgr_filter,
+                                     extra=[("I", "Income")])
                 elif kind == "reimb":
                     # Reimbursement + OPE together — two SUMIFS summed.
-                    f1 = sumifs(rev, "G", cc_code, mgr_filter,
-                                extra=[("H", "Reimbursement")])
-                    f2 = sumifs(rev, "G", cc_code, mgr_filter,
-                                extra=[("H", "OPE")])
+                    f1 = sumifs(rev, "H", cc_code, mgr_filter,
+                                extra=[("I", "Reimbursement")])
+                    f2 = sumifs(rev, "H", cc_code, mgr_filter,
+                                extra=[("I", "OPE")])
                     formula = "=" + f1[1:] + "+" + f2[1:]
                 elif kind == "income_sum":
                     sales_r = rows_by_kind["sales"]
@@ -764,7 +768,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     else:
                         formula = 0
                 elif kind == "expense":
-                    formula = sumifs(exp, "F", cc_code, mgr_filter)
+                    formula = sumifs(exp, "G", cc_code, mgr_filter)
                 elif kind == "cost_sum":
                     sal_r = rows_by_kind["salary"]
                     exp_r = rows_by_kind["expense"]
@@ -819,15 +823,17 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
 # --- Entity & Service --------------------------------------------------------
 
 def _sheet_entity(wb: Workbook, data: MISData, lbl: dict) -> None:
+    # Entity is column C on Revenue / Expenses (was B before Date+VchNo).
     _simple_summary(wb, "Entity P&L", "Entity-wise Profitability",
                     "Entity", data.entities, "ent", lbl, key="name",
-                    sumcol_rev="B", sumcol_exp="B")
+                    sumcol_rev="C", sumcol_exp="C")
 
 
 def _sheet_service(wb: Workbook, data: MISData, lbl: dict) -> None:
+    # Service is column F on Revenue / Expenses (was E before Date+VchNo).
     _simple_summary(wb, "Service MIS", "Service-wise Revenue & Cost",
                     "Service", data.services, "svc", lbl, key="name",
-                    sumcol_rev="E", sumcol_exp="E")
+                    sumcol_rev="F", sumcol_exp="F")
 
 
 def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
@@ -847,9 +853,9 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
     first = r
     for item in rows:
         _cell(ws, r, 1, item["name"], border=True)
-        _cell(ws, r, 2, f"=SUMIFS({rev}!$G:$G,{rev}!${sumcol_rev}:${sumcol_rev},$A{r})",
+        _cell(ws, r, 2, f"=SUMIFS({rev}!$H:$H,{rev}!${sumcol_rev}:${sumcol_rev},$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 3, f"=SUMIFS({exp}!$F:$F,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
+        _cell(ws, r, 3, f"=SUMIFS({exp}!$G:$G,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 4, f"=B{r}-C{r}", fmt=INR, border=True)
         r += 1
@@ -884,7 +890,8 @@ def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     for f in data.revenue_facts:
         svc_name = lbl["svc"].get(f["service_id"], "(unspecified)")
         rows.append([
-            f["period"],
+            _fmt_date(f.get("txn_date")),
+            f.get("vch_no") or "",
             lbl["ent"].get(f["entity_id"], "(unspecified)"),
             lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
             lbl["mgr"].get(f["manager_id"], "(unassigned)"),
@@ -895,22 +902,35 @@ def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
         ])
     _write_data_sheet(
         wb, "Revenue" + suffix,
-        ["Period", "Entity", "CostCentre", "Manager", "Service",
-         "Client", "Amount", "Category"],
-        [10, 24, 12, 12, 22, 28, 14, 14], rows)
+        ["Date", "Voucher No", "Entity", "CostCentre", "Manager",
+         "Service", "Client", "Amount", "Category"],
+        [12, 16, 24, 12, 12, 22, 28, 14, 14], rows)
 
 
 def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
-    rows = [[f["period"], lbl["ent"].get(f["entity_id"], "(unspecified)"),
+    rows = [[_fmt_date(f.get("txn_date")), f.get("vch_no") or "",
+             lbl["ent"].get(f["entity_id"], "(unspecified)"),
              lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
              lbl["mgr"].get(f["manager_id"], "(unassigned)"),
              lbl["svc"].get(f["service_id"], "(unspecified)"),
              round(f["amount"], 2), f.get("description", "")]
             for f in data.expense_facts]
     _write_data_sheet(wb, "Expenses" + suffix,
-                      ["Period", "Entity", "CostCentre", "Manager", "Service",
-                       "Amount", "Description"], [10, 24, 12, 12, 20, 14, 34],
-                      rows)
+                      ["Date", "Voucher No", "Entity", "CostCentre",
+                       "Manager", "Service", "Amount", "Description"],
+                      [12, 16, 24, 12, 12, 20, 14, 34], rows)
+
+
+def _fmt_date(raw):
+    """Render a txn_date (stored as ``YYYY-MM-DD`` ISO string) as
+    ``DD-Mon-YYYY`` for readability — falls back to whatever's in the
+    field if we can't parse it."""
+    if not raw:
+        return ""
+    try:
+        return _dt.date.fromisoformat(str(raw)[:10]).strftime("%d-%b-%Y")
+    except (ValueError, TypeError):
+        return str(raw)
 
 
 def _sheet_labour(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
@@ -959,13 +979,13 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
         _cell(ws, r, 1, code, border=True)
         _cell(ws, r, 2, f"={name_cell}", border=True)
         _cell(ws, r, 3, f"={pl}!C{plrow}", fmt=INR, border=True)
-        _cell(ws, r, 4, f"=SUMIFS({rev_c}!$G:$G,{rev_c}!$C:$C,$A{r})",
+        _cell(ws, r, 4, f"=SUMIFS({rev_c}!$H:$H,{rev_c}!$D:$D,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 5, f"=C{r}-D{r}", fmt=INR, border=True)
         _cell(ws, r, 6, f"={pl}!H{plrow}", fmt=INR, border=True)
         # Comparison profit = comp revenue − comp direct − comp labour.
         _cell(ws, r, 7,
-              f"=D{r}-SUMIFS({exp_c}!$F:$F,{exp_c}!$C:$C,$A{r})"
+              f"=D{r}-SUMIFS({exp_c}!$G:$G,{exp_c}!$D:$D,$A{r})"
               f"-SUMIFS({lab_c}!$F:$F,{lab_c}!$B:$B,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 8, f"=F{r}-G{r}", fmt=INR, border=True)

@@ -451,6 +451,10 @@ class TallyPullWidget(QGroupBox):
                 parts.append(f"{unmapped_clients} client name(s)")
             tail += ", ".join(parts) + "."
             lines.append(tail)
+        # Show any "skipped voucher type" warnings from the parser so the
+        # operator can see if anything they expected was dropped.
+        for w in result.warnings:
+            lines.append(f"<span style='color:#B07000;'>⚠ {w}</span>")
 
         self.result_label.setText("<br>".join(lines))
         self.result_label.setStyleSheet("color: #1B7A1B;")

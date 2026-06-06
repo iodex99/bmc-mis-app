@@ -158,13 +158,16 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
     ph = _placeholders(options.periods)
     with transaction() as conn:
         rows = conn.execute(
-            f"SELECT v.period, v.entity_id, v.client_id, v.kind, v.description, "
+            f"SELECT v.period, v.txn_date, v.vch_no, v.entity_id, v.client_id, "
+            f"  v.kind, v.description, "
             f"  s.amount, s.cost_centre_id, s.manager_id, s.service_id "
             f"FROM voucher_splits s JOIN vouchers v ON v.id = s.voucher_id "
             f"WHERE v.period IN ({ph})", options.periods).fetchall()
     for r in rows:
         fact = {
-            "period": r["period"], "entity_id": r["entity_id"],
+            "period": r["period"],
+            "txn_date": r["txn_date"], "vch_no": r["vch_no"],
+            "entity_id": r["entity_id"],
             "cost_centre_id": r["cost_centre_id"], "manager_id": r["manager_id"],
             "service_id": r["service_id"], "client_id": r["client_id"],
             "amount": float(r["amount"] or 0.0),

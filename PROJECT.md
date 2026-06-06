@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.37** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.38** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.37)
+## 16. Post-launch iterations (v0.2.0 → v0.3.38)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,35 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.38 — Date + Voucher No on data sheets; looser voucher-type regex
+Three asks from the user, one bundle:
+
+- **Revenue + Expenses data sheets** now have ``Date`` (actual
+  transaction date, formatted ``05-Jun-2026``) replacing the old
+  ``Period`` column, and a new ``Voucher No`` column right after it.
+  Lets the operator drill into a partner's revenue line and trace
+  it back to the specific Tally invoice.
+- **Calc** loads ``v.txn_date`` and ``v.vch_no`` alongside the
+  existing fields so both data sheets can populate them.
+- **All SUMIFS references** shifted to the new column layout — Cost
+  Centre P&L, Partner-Manager P&L (with the inner ``sumifs`` helper
+  re-anchored to columns D/E), Entity P&L, Service MIS, and
+  Comparatives. Verified with a generated workbook against the
+  expected ``$H:$H`` / ``$D:$D`` / ``$E:$E`` / ``$I:$I`` columns.
+- **Debit Note regex made tolerant** of any of space / hyphen /
+  slash / dot between "debit" and "note" so user-created variants
+  like ``Debit-Note`` or ``Debit.Note`` are picked up as expense
+  returns. Same loosening applied to ``Credit Note``, ``Sales
+  Return``, and ``Purchase Return``.
+- **New diagnostic** appended to the parse result warnings: every
+  voucher type we *didn't* classify is listed with its count
+  ("Skipped 47 non-revenue voucher(s): Receipt=20, Payment=15,
+  Journal=12") and shown in the pull result panel. Lets the
+  operator see exactly which voucher types Tally returned that we
+  silently dropped — if any of them are actually revenue/expense
+  types we should support, they can share the name and we'll add
+  it to the classifier.
 
 ### v0.3.37 — Credit Notes + Debit Notes (sales/purchase returns)
 Operator's books include credit and debit notes — sales / purchase
