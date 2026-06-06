@@ -218,14 +218,24 @@ class ResolveCcStringDialog(QDialog):
         layout.addWidget(QLabel(
             f"Cost Centre string from Tally:\n<b>{raw}</b>"))
 
+        # Pre-fill the partner / manager combos with whatever our matcher
+        # would suggest for this raw string. Lower threshold (50) than the
+        # auto-apply path so weaker but still-plausible matches surface
+        # here for the operator to confirm — they always see the
+        # suggested partner highlighted and only have to click Save.
+        suggested_cc, suggested_mgr, score = resolution.suggest_for_raw_cc(
+            raw, min_score=50)
+
         form = QFormLayout()
         # Partner cost centres only (Office is for overheads, not invoices).
         partner_opts = self._partner_options()
-        self.cc_combo = _combo(partner_opts, allow_none=False)
+        self.cc_combo = _combo(partner_opts,
+                                current=suggested_cc, allow_none=False)
         form.addRow("Partner (cost centre):", self.cc_combo)
 
         mgr_row = QHBoxLayout()
         self.mgr_combo = _combo(repo.fk_options("managers"),
+                                 current=suggested_mgr,
                                  none_label="(none / partner only)")
         new_mgr_btn = QPushButton("+ New manager…")
         new_mgr_btn.clicked.connect(self._add_manager)
@@ -234,6 +244,13 @@ class ResolveCcStringDialog(QDialog):
         form.addRow("Manager:", mgr_row)
 
         layout.addLayout(form)
+        if suggested_cc is not None:
+            hint = QLabel(
+                f"<span style='color:#166534;'>✓ Pre-filled from fuzzy match "
+                f"(confidence {score}%). Change if it's the wrong partner."
+                f"</span>")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
         layout.addWidget(QLabel(
             "<span style='color:#64748B;'>This mapping is remembered; future "
             "imports auto-resolve the same Cost Centre string.</span>"))

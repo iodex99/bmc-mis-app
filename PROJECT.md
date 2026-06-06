@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.38** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.39** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.38)
+## 16. Post-launch iterations (v0.2.0 → v0.3.39)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,52 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.39 — Pre-fill Resolve dialog + Confirm-suggested bulk + smarter match
+User feedback: "the system is still not taking the cost centres from the
+tally import, it is still showing to resolve it". Real strings like
+``Vishal Audit`` weren't auto-resolving despite "vishal" being a clear
+partner singleton — the short partner code ``"al"`` was matching
+``"audit"`` at partial_ratio 100, creating a tie with ``"vishal"`` so
+the matcher abstained.
+
+**Smarter matching** (``_best_match`` rewrite):
+- **Token-level exact match** added as a second pass: each whitespace-
+  separated token of the query is checked against the lookup. Catches
+  ``VK Audit 2026`` → VK, ``Vishal Audit`` → VK, ``PM Tax`` → PM, etc.,
+  without any fuzzy scoring at all.
+- **Short keys excluded from fuzzy partial-ratio**. Codes like ``VK``,
+  ``PM``, ``AL`` stay in the lookup for exact / token-level matching
+  but are dropped from the fuzzy pool (length ≥ 4) so they can't
+  generate false positives against unrelated text (``"audit"`` contains
+  ``"al"``; ``"random"`` contains ``"ran"`` matching ``"kiran"``).
+- **Partial-ratio gated at 85+**. token_sort_ratio runs full-range
+  (it's more conservative); partial_ratio only contributes when it
+  scores 85+, so loose substring overlaps don't bleed into suggestions.
+- Auto-match threshold lowered to 65 (from 70) now that the matcher
+  is tighter — picks up more real matches without false positives.
+
+**UI**:
+- **ResolveCcStringDialog** now pre-fills the partner + manager combos
+  from ``suggest_for_raw_cc`` (threshold 50). Operator opens the
+  dialog and the suggested partner is already highlighted; they just
+  hit Save. A green hint shows the confidence percentage.
+- **CC Strings tab** got a new **"Suggested partner"** column showing
+  the matcher's guess inline (e.g. ``VK — Vishal Kothari  +  mgr SR
+  (87%)``). No more opening each Resolve dialog to see what the
+  system thinks.
+- **"✓ Confirm suggested" bulk button** at the top of the CC Strings
+  tab applies every row's suggested mapping in one click. The
+  mappings get saved to ``cc_string_mappings`` so future imports of
+  the same string auto-resolve.
+
+**Verified across 28 inputs** — full names, codes, first names, last
+names, partner-manager combos, compound words ("VKothari"),
+multi-word strings ("Vishal Audit", "VK Audit 2026"), ambiguous
+queries ("Mehta"), and false-positive baits ("Random Unknown",
+"Random Test"). 27 / 28 perfect; the only "fail" is a legitimately
+weak 50% match that surfaces as a low-confidence suggestion the
+operator can override (and won't get auto-applied).
 
 ### v0.3.38 — Date + Voucher No on data sheets; looser voucher-type regex
 Three asks from the user, one bundle:

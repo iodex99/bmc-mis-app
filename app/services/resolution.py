@@ -657,44 +657,73 @@ def unresolved_cc_strings() -> list[dict]:
 _HONORIFICS = re.compile(r'^(mr\.?|mrs\.?|ms\.?|dr\.?|shri\.?|smt\.?)\s+',
                          re.IGNORECASE)
 _NAME_SEP = re.compile(r'\s*[-–—/]\s*')   # hyphen / en-dash / em-dash / slash
-# Fuzzy threshold for the partner match. Partners are a small fixed set
-# (8 known names), so we can be more lenient than for clients/employees
-# without risking wrong matches. 70 catches first-name-only ("Vishal"
-# matches "Vishal Kothari" with partial_ratio = 100) and abbreviations
-# while still rejecting unrelated strings.
-_MIN_SCORE = 70
+# Fuzzy threshold for the auto-apply path. Partners are a fixed set of 8
+# masters so we can be more lenient than for clients/employees. 65 lands
+# in a sweet spot now that we have unambiguous-singleton lookups + tie
+# detection — most real-world CC strings ("VK Audit 2026", "Mr Vishal K",
+# "Vishal-Recovery") match a partner at 75+; the unambiguous-singleton
+# logic prevents short-string fuzzy false positives, so 65 doesn't open
+# us up to wrong matches in practice.
+_MIN_SCORE = 65
 
 
 def _best_match(query: str, lookup: dict[str, int]) -> tuple[int | None, int]:
     """Best (id, score) for *query* in {normalised_name: id}.
 
     Strategy:
-    1. **Exact**: if *query* is a key, return that id at score 100.
-    2. **Fuzzy with tie detection**: compute the best score per key
-       across token-sort and partial-ratio. If the top match is unique
-       (no other key maps to a *different* id at the same score),
-       return it. Otherwise return ``(None, 0)`` — ambiguous queries
-       like "Mehta" (shared across three partners) should *not* be
-       silently resolved to whichever happened to be inserted first.
+
+    1. **Exact full-query**: ``query in lookup`` → score 100.
+    2. **Token-level exact**: each whitespace-separated token of the
+       query is checked against the lookup. If exactly one master id
+       comes back across all matching tokens, that's the answer.
+       Catches "VK Audit 2026" → VK ("vk" token matches), "Vishal
+       Audit" → VK ("vishal" matches), "PM Tax" → PM, etc., without
+       relying on lenient partial-ratio scoring.
+    3. **Fuzzy fallback**, restricted to keys of length ≥ 4. Short
+       codes ("vk", "pm", "al", "ks", …) stay in the exact lookup
+       (passes 1 + 2) but are excluded here so they can't generate
+       partial-ratio false positives against unrelated text ("audit"
+       contains "al"; "random" contains "ran" matching "kiran"). For
+       partial_ratio we require a high bar (85+) — token_sort runs
+       full-range. Tie detection still applies: multiple keys mapping
+       to *different* ids at the top score → refuse to guess.
     """
     if not query or not lookup:
         return None, 0
+    # 1. Exact whole-query match
     if query in lookup:
         return lookup[query], 100
-    # Per-key best score across both metrics
+    # 2. Token-level exact match (each space-separated token vs lookup)
+    tokens = set(query.split())
+    if tokens:
+        token_ids = {lookup[t] for t in tokens if t in lookup}
+        if len(token_ids) == 1:
+            return next(iter(token_ids)), 100
+        if len(token_ids) > 1:
+            # Ambiguous tokens (e.g. multiple partner singletons in one
+            # query) — better to leave it for the operator to choose.
+            return None, 0
+    # 3. Fuzzy fallback on long-enough keys
+    fuzzy_keys = {k for k in lookup if len(k) >= 4}
+    if not fuzzy_keys:
+        return None, 0
     best_per_key: dict[str, float] = {}
-    for scorer in (fuzz.token_sort_ratio, fuzz.partial_ratio):
-        for key, score, _ in process.extract(
-                query, lookup.keys(), scorer=scorer, limit=5):
-            if score > best_per_key.get(key, 0):
-                best_per_key[key] = score
+    for key, score, _ in process.extract(
+            query, fuzzy_keys, scorer=fuzz.token_sort_ratio, limit=5):
+        if score > best_per_key.get(key, 0):
+            best_per_key[key] = score
+    for key, score, _ in process.extract(
+            query, fuzzy_keys, scorer=fuzz.partial_ratio, limit=5):
+        # Partial-ratio is overly forgiving on short queries against
+        # short substrings — require a much higher bar.
+        if score >= 85 and score > best_per_key.get(key, 0):
+            best_per_key[key] = score
     if not best_per_key:
         return None, 0
     top_score = max(best_per_key.values())
     top_ids = {lookup[k] for k, s in best_per_key.items()
                if s == top_score}
     if len(top_ids) > 1:
-        # Genuine tie across different masters — refuse to guess.
         return None, 0
     top_key = next(k for k, s in best_per_key.items() if s == top_score)
     return lookup[top_key], int(top_score)

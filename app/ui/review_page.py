@@ -418,11 +418,18 @@ class CcStringTab(QWidget):
         self.bulk_delete_btn = QPushButton("🗑 Delete selected")
         self.bulk_delete_btn.setObjectName("danger")
         self.bulk_delete_btn.clicked.connect(self._bulk_delete)
+        self.confirm_suggested_btn = QPushButton("✓ Confirm suggested")
+        self.confirm_suggested_btn.setObjectName("primary")
+        self.confirm_suggested_btn.setToolTip(
+            "Apply every row's suggested partner / manager in one click. "
+            "Each saved mapping is remembered, so future imports of the "
+            "same Cost Centre string auto-resolve.")
+        self.confirm_suggested_btn.clicked.connect(self._confirm_suggested)
         auto_btn = QPushButton("⚡ Auto-match all")
-        auto_btn.setObjectName("primary")
         auto_btn.clicked.connect(self._auto)
         bar.addWidget(self.bulk_delete_btn)
         bar.addWidget(auto_btn)
+        bar.addWidget(self.confirm_suggested_btn)
         layout.addLayout(bar)
 
         search_bar = QHBoxLayout()
@@ -454,6 +461,35 @@ class CcStringTab(QWidget):
     def reload(self) -> None:
         resolution.apply_known_cc_string_mappings()
         all_rows = resolution.unresolved_cc_strings()
+        # Run our matcher over every unresolved string so the operator
+        # sees the suggested partner inline. Cache (cc_id, mgr_id, score,
+        # display label) on each row so both the table and the bulk-
+        # confirm button can use it without re-querying.
+        with transaction() as conn:
+            partner_names = {
+                r["id"]: f"{r['code']} — {r['name']}"
+                for r in conn.execute(
+                    "SELECT id, code, name FROM cost_centres "
+                    "WHERE active = 1 AND cc_type = 'partner'")}
+            manager_names = {
+                r["id"]: r["code"]
+                for r in conn.execute(
+                    "SELECT id, code FROM managers WHERE active = 1")}
+        for r in all_rows:
+            cc_id, mgr_id, score = resolution.suggest_for_raw_cc(
+                r["raw"], min_score=50)
+            r["suggested_cc_id"] = cc_id
+            r["suggested_mgr_id"] = mgr_id
+            r["suggested_score"] = score
+            if cc_id is not None:
+                label = partner_names.get(cc_id, "?")
+                if mgr_id is not None:
+                    label += f"  +  mgr {manager_names.get(mgr_id, '?')}"
+                label += f"   ({score}%)"
+                r["suggested_label"] = label
+            else:
+                r["suggested_label"] = ""
+
         q = self.search.text().strip().lower()
         if q:
             self._rows = [r for r in all_rows if q in r["raw"].lower()]
@@ -461,20 +497,35 @@ class CcStringTab(QWidget):
             self._rows = all_rows
         n = len(self._rows)
         total = len(all_rows)
+        n_suggested = sum(1 for r in self._rows
+                          if r["suggested_cc_id"] is not None)
         if total == 0:
             self.info.setText("All Cost Centre strings mapped")
         elif n == total:
+            tail = (f"; {n_suggested} have a suggested partner — click "
+                    "<b>Confirm suggested</b> to apply them all"
+                    if n_suggested else "")
             self.info.setText(
-                f"{n} Cost Centre string{'s' if n != 1 else ''} need mapping")
+                f"{n} Cost Centre string{'s' if n != 1 else ''} need mapping"
+                + tail)
         else:
             self.info.setText(
                 f"{n} of {total} match{'es' if n != 1 else ''} your search")
+        # Enable/disable bulk-confirm based on what's suggestable.
+        if hasattr(self, "confirm_suggested_btn"):
+            self.confirm_suggested_btn.setEnabled(n_suggested > 0)
+            self.confirm_suggested_btn.setText(
+                f"✓ Confirm suggested ({n_suggested})" if n_suggested
+                else "✓ Confirm suggested")
         self.empty.setVisible(total == 0)
         self.table.setVisible(n > 0 or total > 0)
         if n:
-            rows = [[r["raw"], r["count"]] for r in self._rows]
+            rows = [[r["raw"], r["count"], r["suggested_label"]]
+                    for r in self._rows]
             fill_table_with_actions(
-                self.table, ["Cost Centre string", "Invoices"], rows,
+                self.table,
+                ["Cost Centre string", "Invoices", "Suggested partner"],
+                rows,
                 action_label="Resolve →",
                 action_callback=self._resolve_row,
                 secondary_label="Delete",
@@ -485,8 +536,9 @@ class CcStringTab(QWidget):
             )
         else:
             fill_table_with_actions(
-                self.table, ["Cost Centre string", "Invoices"], [],
-                stretch_col=0)
+                self.table,
+                ["Cost Centre string", "Invoices", "Suggested partner"],
+                [], stretch_col=0)
         self._update_bulk_button()
 
     def _update_bulk_button(self) -> None:
@@ -511,6 +563,38 @@ class CcStringTab(QWidget):
             msg.append("Nothing new to auto-match. Resolve remaining rows "
                        "manually.")
         QMessageBox.information(self, "Auto-match", "\n".join(msg))
+        self.reload()
+
+    def _confirm_suggested(self) -> None:
+        """Save every row's suggested (partner, manager) mapping in one
+        batch. The operator inspects the suggestions in the table and
+        clicks this when they look right — bulk-resolution in one click.
+        """
+        to_apply = [r for r in self._rows
+                    if r.get("suggested_cc_id") is not None]
+        if not to_apply:
+            QMessageBox.information(
+                self, "Nothing to confirm",
+                "No row has a suggested partner. Open Resolve on each "
+                "row to pick manually.")
+            return
+        if QMessageBox.question(
+                self, "Confirm suggested mappings",
+                f"Save the suggested partner / manager mapping for "
+                f"<b>{len(to_apply)}</b> Cost Centre string(s)?<br><br>"
+                f"Each mapping is remembered, so any future Tally import "
+                f"of the same string auto-resolves to the same partner.",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        total_rows_updated = 0
+        for r in to_apply:
+            total_rows_updated += resolution.map_cc_string(
+                r["raw"], r["suggested_cc_id"], r["suggested_mgr_id"])
+        QMessageBox.information(
+            self, "Confirmed",
+            f"Saved {len(to_apply)} mapping(s); "
+            f"{total_rows_updated} voucher split(s) updated.")
         self.reload()
 
     def _resolve_row(self, idx: int) -> None:
