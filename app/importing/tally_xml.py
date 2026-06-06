@@ -265,22 +265,52 @@ def _parse_amount(raw: str) -> float:
     return 0.0
 
 
+# All the structural variants Tally Prime / ERP 9 use for the cost-centre
+# wrapper, in lower-case (we already case-fold tags before comparing).
+_CC_WRAPPER_TAGS = {
+    "costcentreallocations.list", "costcentreallocations",
+    "costcentre.list", "costcentres",
+    "categoryallocations.list", "categoryallocations",
+}
+# Tag names that hold the actual cost-centre name string.
+_CC_NAME_TAGS = ["name", "costcentrename", "costcentre"]
+
+
 def _ledger_cost_centre(entry: ET.Element) -> str | None:
-    """Walk into ``<CATEGORYALLOCATIONS.LIST><COSTCENTREALLOCATIONS.LIST>``
-    and return the *first* cost-centre name found. We allocate the line's
-    entire amount to that CC — Tally users typically attribute one ledger
-    line to one partner. Multi-CC ledger entries fall through to the first.
+    """Find the cost-centre name on this ledger entry.
+
+    Tally's XML structure for cost-centre allocations varies across
+    Prime / ERP 9 / different export presets — sometimes wrapped in
+    ``<CATEGORYALLOCATIONS.LIST>``, sometimes flat, sometimes with the
+    ``.LIST`` suffix dropped, sometimes the name lives in a ``NAME``
+    attribute instead of a child element. We try every known variant
+    *and* fall back to a deep descendant search so a layout we haven't
+    seen still has a fighting chance.
     """
-    for cat in _children_named(entry, ["categoryallocations.list"]):
-        for cc in _children_named(cat, ["costcentreallocations.list"]):
-            name = _text(_find_first(cc, ["name"]))
-            if name:
-                return name
-    # Some Tally exports skip the category wrapper.
-    for cc in _children_named(entry, ["costcentreallocations.list"]):
-        name = _text(_find_first(cc, ["name"]))
+    # 1. Walk every descendant looking for a cost-centre wrapper tag.
+    # This catches both the nested CATEGORYALLOCATIONS.LIST > CCA.LIST
+    # form and the flat form, plus any deeper nesting we don't expect.
+    for desc in entry.iter():
+        tag = _norm_tag(desc.tag)
+        if tag not in _CC_WRAPPER_TAGS:
+            continue
+        name = _extract_cc_name(desc)
         if name:
             return name
+    return None
+
+
+def _extract_cc_name(elem: ET.Element) -> str | None:
+    """Try every known way Tally exposes a cost-centre name."""
+    # Child element: <NAME> or <COSTCENTRENAME>
+    name = _text(_find_first(elem, _CC_NAME_TAGS))
+    if name:
+        return name
+    # Attribute: NAME="..." on the wrapper itself
+    for attr in ("NAME", "Name", "name"):
+        val = elem.get(attr)
+        if val and val.strip():
+            return val.strip()
     return None
 
 
@@ -400,11 +430,16 @@ def parse_response(xml: bytes | str) -> ParseResult:
     dominant kind. Caller may want to split per kind before commit (we
     provide :func:`split_by_kind` for that).
 
-    A warning listing **skipped voucher type names + counts** is appended
-    when types are present that we don't classify (Receipt, Payment,
-    Journal, Contra, etc., plus anything our prefix regexes don't catch).
-    This is the diagnostic for "Tally has X vouchers but we picked up Y"
-    — the operator can see exactly what we dropped.
+    Two diagnostic warnings are appended:
+
+    * **Skipped voucher types** — names + counts of voucher types we
+      didn't classify (Receipt, Payment, Journal, etc., plus anything
+      our prefix regexes don't catch). Tells the operator exactly what
+      Tally returned that we dropped.
+    * **Cost-centre extraction rate** — if a substantial fraction of
+      ledger lines have no cost-centre tag in Tally's XML, surface it
+      so the operator knows the cause of "every voucher shows needs
+      fix": the data doesn't *have* CC tags, the matcher can't help.
     """
     if isinstance(xml, str):
         xml = xml.encode("utf-8")
@@ -433,14 +468,30 @@ def parse_response(xml: bytes | str) -> ParseResult:
             "right company loaded and that the date range covers at least "
             "one voucher.")
     if skipped:
-        # Sort by count desc, list top types so the operator sees the
-        # most impactful skips first.
         top = sorted(skipped.items(), key=lambda kv: -kv[1])
         summary = ", ".join(f"{vt}={n}" for vt, n in top[:8])
         result.warnings.append(
             f"Skipped {sum(skipped.values())} non-revenue voucher(s): "
             f"{summary}. If any of these are revenue/expense types we "
             f"should support, share the name and we'll add it.")
+
+    # Cost-centre extraction diagnostic.
+    total_non_tax = sum(1 for v in vouchers for l in v.line_splits
+                        if not l.is_tax)
+    with_cc = sum(1 for v in vouchers for l in v.line_splits
+                  if not l.is_tax and l.cost_centre)
+    if total_non_tax > 0:
+        missing = total_non_tax - with_cc
+        if missing > 0:
+            pct_with = (with_cc * 100) // total_non_tax
+            result.warnings.append(
+                f"Cost-centre tags on {with_cc}/{total_non_tax} revenue "
+                f"lines ({pct_with}%) — {missing} line(s) have NO cost "
+                f"centre in Tally. Those vouchers will show 'needs fix' "
+                f"in Review (the matcher can't help when Tally hasn't "
+                f"tagged the partner). Confirm cost centres are enabled "
+                f"in Tally and the operator selected one when entering "
+                f"the voucher.")
     return result
 
 

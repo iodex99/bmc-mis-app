@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.41** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.42** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.41)
+## 16. Post-launch iterations (v0.2.0 → v0.3.42)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,36 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.42 — Defensive CC extraction + clear "Tally has no CC tags" warning
+User screenshots showed 63/63 vouchers with "needs fix" status and 45
+unmapped clients — far too many for a matcher issue. Inspection
+revealed the more likely cause: **the cost-centre data wasn't being
+extracted from Tally's XML at all** for this operator's data. If the
+raw text is empty, no amount of matcher tuning helps.
+
+- **More defensive ``_ledger_cost_centre``**: tries every Tally XML
+  variant we've seen in the wild — ``<CATEGORYALLOCATIONS.LIST>`` +
+  ``<COSTCENTREALLOCATIONS.LIST>`` (Tally Prime standard); the flat
+  form; the no-``.LIST`` form (``<COSTCENTREALLOCATIONS>``); the
+  ``<COSTCENTRES>`` form. CC name can be in a ``<NAME>`` child, a
+  ``<COSTCENTRENAME>`` child, **or** a ``NAME="…"`` attribute. Final
+  fallback walks every descendant looking for any of those wrappers
+  in case the structure is unexpectedly nested.
+- **New diagnostic warning** appended to the parse result whenever
+  fewer than 100% of revenue lines have a cost-centre tag:
+  > "Cost-centre tags on 8/63 revenue lines (12%) — 55 line(s)
+  > have NO cost centre in Tally. Those vouchers will show
+  > 'needs fix' in Review (the matcher can't help when Tally
+  > hasn't tagged the partner). Confirm cost centres are enabled
+  > in Tally and the operator selected one when entering the
+  > voucher."
+
+  Surfaces in the pull result panel, making the difference between
+  "we can't extract" and "Tally doesn't have it" visible at a glance.
+- Verified across 5 structural variants — 4 known layouts all
+  extract correctly; the "no CC at all" case correctly triggers the
+  diagnostic warning.
 
 ### v0.3.41 — Pull-result diagnostic for unresolved CC strings
 User: "the system is still not picking up the cost centres from tally
