@@ -427,9 +427,17 @@ class CcStringTab(QWidget):
         self.confirm_suggested_btn.clicked.connect(self._confirm_suggested)
         auto_btn = QPushButton("⚡ Auto-match all")
         auto_btn.clicked.connect(self._auto)
+        export_btn = QPushButton("📋 Export diagnostic")
+        export_btn.setToolTip(
+            "Export a CSV of every unresolved Cost Centre string with "
+            "the matcher's analysis — what it tokenised the string into, "
+            "what partner it would suggest, why it didn't auto-resolve. "
+            "Share the CSV with the developer to debug stubborn cases.")
+        export_btn.clicked.connect(self._export_diagnostic)
         bar.addWidget(self.bulk_delete_btn)
         bar.addWidget(auto_btn)
         bar.addWidget(self.confirm_suggested_btn)
+        bar.addWidget(export_btn)
         layout.addLayout(bar)
 
         search_bar = QHBoxLayout()
@@ -564,6 +572,32 @@ class CcStringTab(QWidget):
                        "manually.")
         QMessageBox.information(self, "Auto-match", "\n".join(msg))
         self.reload()
+
+    def _export_diagnostic(self) -> None:
+        """Write a CSV with full matcher analysis of every unresolved
+        CC string so the user can share it with the developer."""
+        from PySide6.QtWidgets import QFileDialog
+        from pathlib import Path
+        import datetime as _dt
+        default = (Path.home() / "Desktop" /
+                   f"cc_diagnostic_{_dt.datetime.now():%Y%m%d_%H%M}.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save CC diagnostic CSV",
+            str(default), "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            n = resolution.export_cc_diagnostic(path)
+        except Exception as exc:                                  # noqa: BLE001
+            QMessageBox.critical(self, "Couldn't write", str(exc))
+            return
+        QMessageBox.information(
+            self, "Exported",
+            f"Wrote {n} row(s) to <code>{path}</code>.<br><br>"
+            "Open it in Excel to see each unresolved string, its "
+            "tokenisation, the matcher's suggestion, and a "
+            "diagnosis. Share the file with the developer to debug "
+            "any stubborn cases.")
 
     def _confirm_suggested(self) -> None:
         """Save every row's suggested (partner, manager) mapping in one

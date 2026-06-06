@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.42** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.43** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.42)
+## 16. Post-launch iterations (v0.2.0 → v0.3.43)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,32 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.43 — Broader tokenizer + CSV diagnostic export
+User confirmed it's a matcher issue. v0.3.39 added token-level exact
+matching but only split on whitespace, missing the bulk of real-world
+operator-customised CC strings that use punctuation as separators.
+
+- **`_tokenize` helper** (used by ``_best_match``) now splits on
+  whitespace **plus** every common separator: ``_``, ``.``, ``,``,
+  ``;``, ``:``, ``|``, ``()``, ``[]``, ``/``, ``-`` (all dash variants),
+  ``&``. Also splits at alpha/digit transitions so ``VK2026`` → ``vk``
+  + ``2026``. The partner code or singleton name buried in the
+  string surfaces as an exact token match.
+- **Honorific regex** loosened to handle missing space after the dot
+  (``Mr.Vishal Kothari`` works now, not just ``Mr. Vishal Kothari``).
+- **New "📋 Export diagnostic" button** on the CC Strings tab writes
+  a CSV with: every unresolved string + its normalised form + the
+  tokens we extracted + saved-mapping partner + suggested partner +
+  confidence score + a one-line diagnosis ("HAS MAPPING but split
+  unresolved — BUG", "matcher would resolve at X%", "low confidence",
+  "no plausible partner"). Lets the operator share concrete data
+  with the developer for any stubborn cases.
+
+Verified across 23 patterns — all 13 previously-failing variants
+(underscores, dots, commas, parens, brackets, pipes, semicolons,
+colons, ampersands, alpha-digit boundaries) now resolve to the right
+partner; ambiguous and unrelated strings still correctly abstain.
 
 ### v0.3.42 — Defensive CC extraction + clear "Tally has no CC tags" warning
 User screenshots showed 63/63 vouchers with "needs fix" status and 45

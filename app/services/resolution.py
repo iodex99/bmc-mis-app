@@ -654,9 +654,38 @@ def unresolved_cc_strings() -> list[dict]:
 
 # --- Smart auto-match for Cost-Centre strings -------------------------------
 
-_HONORIFICS = re.compile(r'^(mr\.?|mrs\.?|ms\.?|dr\.?|shri\.?|smt\.?)\s+',
-                         re.IGNORECASE)
-_NAME_SEP = re.compile(r'\s*[-–—/]\s*')   # hyphen / en-dash / em-dash / slash
+_HONORIFICS = re.compile(
+    r'^(mr|mrs|ms|dr|shri|smt|sri)\.?\s*', re.IGNORECASE)
+_NAME_SEP = re.compile(r'\s*[-–—/,&]\s*')
+
+# Token boundaries for query splitting in _best_match. Far broader than
+# whitespace — real Tally CC strings often use underscores, dots, parens
+# etc as separators ("VK_Audit", "VK.2026", "VK(Audit)"). We also split
+# at alpha/digit boundaries so "VK2026" → "vk" + "2026".
+_TOKEN_SEP = re.compile(r'[\s\-–—/,;:|.()\[\]_&]+')
+_ALPHANUM_BOUNDARY = re.compile(r'(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])')
+
+
+def _tokenize(query: str) -> set[str]:
+    """Aggressively tokenize a query for token-level exact match.
+
+    Splits on whitespace + every common separator character (``_``,
+    ``.``, ``,``, ``;``, ``:``, ``|``, ``()``, ``[]``, ``&`` etc.) and
+    then breaks alpha/digit transitions so ``VK2026`` becomes
+    ``{vk, 2026}``. Used by ``_best_match`` to recover partner names
+    that are embedded in operator-customised CC strings.
+    """
+    parts = _TOKEN_SEP.split(query)
+    out: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        # Split alpha-to-digit boundaries: "VK2026" -> ["vk", "2026"]
+        sub = _ALPHANUM_BOUNDARY.split(part)
+        for s in sub:
+            if s:
+                out.add(s)
+    return out
 # Fuzzy threshold for the auto-apply path. Partners are a fixed set of 8
 # masters so we can be more lenient than for clients/employees. 65 lands
 # in a sweet spot now that we have unambiguous-singleton lookups + tie
@@ -693,8 +722,12 @@ def _best_match(query: str, lookup: dict[str, int]) -> tuple[int | None, int]:
     # 1. Exact whole-query match
     if query in lookup:
         return lookup[query], 100
-    # 2. Token-level exact match (each space-separated token vs lookup)
-    tokens = set(query.split())
+    # 2. Token-level exact match. Uses a broad tokenizer (splits on
+    # whitespace + underscores + dots + parens + slashes + commas, plus
+    # alpha/digit boundaries) so partner identifiers buried inside
+    # operator-customised strings still surface: "VK_Audit",
+    # "VK.2026", "VK(Audit)", "VK2026Q1" all yield the "vk" token.
+    tokens = _tokenize(query)
     if tokens:
         token_ids = {lookup[t] for t in tokens if t in lookup}
         if len(token_ids) == 1:
@@ -808,6 +841,68 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
         if score_w >= min_score:
             cc_id, best_score = id_w, score_w
     return cc_id, mgr_id, best_score
+
+
+def export_cc_diagnostic(path: str) -> int:
+    """Write a CSV file with full info on every unresolved CC string +
+    what the matcher does with it. Returns the row count written.
+
+    The file lets the operator share concrete data with us when
+    something isn't matching as expected: each row shows the raw
+    string, normalised form, what tokens we extracted, the matcher's
+    suggested partner + score, and whether it has a saved mapping.
+    """
+    import csv
+    rows = unresolved_cc_strings()
+    with transaction() as conn:
+        partner_codes = {
+            r["id"]: r["code"] for r in conn.execute(
+                "SELECT id, code FROM cost_centres "
+                "WHERE active = 1 AND cc_type = 'partner'")}
+        partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
+        # All saved cc_string_mappings for cross-checking.
+        saved = {norm(r["raw_text"]): r["cost_centre_id"]
+                  for r in conn.execute(
+                      "SELECT raw_text, cost_centre_id FROM "
+                      "cc_string_mappings WHERE active = 1")}
+    written = 0
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "raw_text", "normalised", "tokens",
+            "saved_mapping_partner", "suggested_partner", "score",
+            "splits_affected", "diagnosis",
+        ])
+        for r in rows:
+            raw = r["raw"]
+            cleaned = norm(_HONORIFICS.sub("", (raw or "").strip()))
+            tokens = sorted(_tokenize(cleaned))
+            cc_id, mgr_id, score = _match_one_cc_string(
+                raw, partner_lookup, manager_lookup, min_score=50)
+            saved_cc_id = saved.get(norm(raw))
+            saved_partner = partner_codes.get(saved_cc_id)
+            suggested_partner = partner_codes.get(cc_id)
+            # Diagnosis: why isn't this auto-resolved?
+            if saved_partner:
+                diag = ("HAS MAPPING but split unresolved — apply path "
+                        "didn't fire (BUG, share this row)")
+            elif suggested_partner and score >= _MIN_SCORE:
+                diag = ("matcher would resolve at %d%% — auto-match "
+                        "should fire on next pull (try Auto-match all)"
+                        % score)
+            elif suggested_partner:
+                diag = ("low confidence %d%% — use Confirm suggested or "
+                        "resolve manually" % score)
+            else:
+                diag = ("no plausible partner — operator must pick "
+                        "manually OR this isn't a partner CC")
+            w.writerow([
+                raw, cleaned, "|".join(tokens),
+                saved_partner or "", suggested_partner or "",
+                score, r["count"], diag,
+            ])
+            written += 1
+    return written
 
 
 def diagnose_unresolved_cc(limit: int = 10) -> list[dict]:
