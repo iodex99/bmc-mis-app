@@ -45,12 +45,19 @@ def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
     sometimes writes multiple spaces in client names, which used to leave
     rows unmapped even after the operator confirmed them. Matching in Python
     via :func:`norm` (which collapses any run of whitespace) fixes that.
+
+    Applies to ALL voucher kinds (sales + expenses). Most expense vouchers
+    have a vendor as their party and won't match anything in the client
+    master — those just stay unmapped. But when an expense voucher's party
+    *does* happen to be in the client master (e.g. a journal/credit-note
+    raised against a client, a reimbursement-from-client recorded as a
+    receipt-type voucher), the link gets populated so the Client column
+    on the Expenses sheet shows the real name.
     """
     linked = 0
     rows = conn.execute(
         "SELECT id, party_name FROM vouchers "
-        "WHERE kind='sales' AND client_id IS NULL "
-        "AND party_name <> ''").fetchall()
+        "WHERE client_id IS NULL AND party_name <> ''").fetchall()
     for r in rows:
         cid = name_to_cid.get(norm(r["party_name"]))
         if cid is not None:

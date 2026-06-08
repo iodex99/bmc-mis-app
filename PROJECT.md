@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.45** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.46** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,24 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.46 — Expense vouchers also resolve against client master
+The new Client column on the Expenses sheet (v0.3.45) was always showing
+"(unmapped)" because the client-resolution code was gated on
+``kind='sales'`` everywhere — meaning expense vouchers' party names were
+captured but never matched against the client master / aliases.
+
+Dropped the ``kind='sales'`` filter from ``_apply_client_norm_mapping``
+so existing client masters & aliases now apply to expense vouchers too.
+Most expense parties are vendors (banks, landlords, consultants) and
+won't match anything — they stay unmapped, which is correct. But when
+an expense voucher's party *is* a known client (journals or credit
+notes raised against a client, reimbursements recorded as receipts),
+the Client column on the generated MIS now shows the real name.
+
+Did NOT extend the filter on ``unresolved_clients()`` — keeping that
+sales-only avoids flooding the operator's review list with every
+vendor name in Tally.
 
 ### v0.3.45 — Client column on Expenses sheet
 Operator requested a ``Client`` column on the generated MIS's Expenses
