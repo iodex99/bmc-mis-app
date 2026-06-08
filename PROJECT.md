@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.48** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.49** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,43 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.49 — Smart manager-partner matching + full manager seed
+Operator asked for two things:
+
+1. Commit the firm's full 10-manager master to the seed (was 4 starter
+   rows). Now seeds all 10 with compound codes (RM - PM, SR - AM,
+   UV - AM, GS - KS, BS - SD, GS - AM, BS - JV, KS - SD, HD - JV,
+   RR - VK) and each row wired to its partner via cost_centre_id.
+   Note: this only takes effect on fresh installs; the operator's
+   existing DB already holds the same records from manual entry.
+
+2. CC strings of the form "X - Y" should resolve correctly regardless
+   of order — "Shreyans - Bhavya" / "Bhavya - Shreyans" both → BS - SD;
+   "Aakash - Sahil" / "Sahil - Aakash" both → SR - AM — and ambiguous
+   manager names should be disambiguated by the partner context, not
+   silently guessed.
+
+The matcher's "X - Y" logic already tried both orderings and worked
+for the 14 non-ambiguous test cases. The one real bug: when the same
+manager name appears under multiple partners (Gaurav Siroya is under
+both Aakash Mehta and Kiran Suvarna), the global manager_lookup
+silently picked one based on dict-insertion order — so "Kiran - Gaurav"
+returned GS-AM instead of GS-KS.
+
+Fix: ``_build_partner_manager_lookups`` now also returns a
+``managers_by_partner`` dict — one lookup per partner cost-centre,
+holding only that partner's team. When the partner side of an
+"X - Y" string is resolved first, the manager search uses the
+partner-scoped lookup before the global one. Inside a single
+partner's team, "Gaurav" is unambiguous, so the right role
+(GS - KS or GS - AM) gets picked. Ambiguity that remains after
+the partner constraint still bubbles up to the operator's review
+queue — no silent guesses.
+
+Verified: 17 / 17 test cases pass (including both orderings of every
+name pair); the 4 real-world CC strings in the operator's actual
+sales register continue to resolve at score=100.
 
 ### v0.3.48 — Reframe Import page: Excel is the primary path
 Operator asked for an "overhaul" so the Sales Register Excel from Tally

@@ -348,13 +348,33 @@ def _seed(conn: sqlite3.Connection) -> None:
         "INSERT INTO cost_centres(code, name, cc_type) "
         "VALUES ('Office', 'Office / Firm Overheads', 'office')")
 
+    # Manager seed. Each manager is bound to the partner cost-centre they
+    # report under; the compound "MM - PP" code style mirrors how the firm
+    # labels them in the master so the CC-string matcher can resolve names
+    # like "Gaurav - Aakash" or "Sahil - Aakash" without ambiguity. A
+    # manager can appear under multiple partners (Gaurav Siroya is under
+    # both Aakash Mehta and Kiran Suvarna in the operator's setup) — each
+    # role is a separate row keyed by the compound code.
     managers = [
-        ("RM", "Rajesh Malhotra"), ("SR", "Sahil Rathod"),
-        ("UV", "Umesh Vishwakarma"), ("GS", "Gaurav Siroya"),
+        ("RM - PM", "Rajesh Malhotra",    "PM"),
+        ("SR - AM", "Sahil Rathod",       "AM"),
+        ("UV - AM", "Umesh Vishwakarma",  "AM"),
+        ("GS - KS", "Gaurav Siroya",      "KS"),
+        ("BS - SD", "Bhavya Shah",        "SD"),
+        ("GS - AM", "Gaurav Siroya",      "AM"),
+        ("BS - JV", "Bhavik Shah",        "JV"),
+        ("KS - SD", "Kiwa Shah",          "SD"),
+        ("HD - JV", "Hitesh Doshi",       "JV"),
+        ("RR - VK", "Rutwick Ruparelia",  "VK"),
     ]
-    for code, name in managers:
-        conn.execute("INSERT INTO managers(code, name) VALUES (?, ?)",
-                     (code, name))
+    for code, name, partner_code in managers:
+        partner_row = conn.execute(
+            "SELECT id FROM cost_centres WHERE code = ?",
+            (partner_code,)).fetchone()
+        cc_id = partner_row["id"] if partner_row else None
+        conn.execute(
+            "INSERT INTO managers(code, name, cost_centre_id) VALUES (?, ?, ?)",
+            (code, name, cc_id))
 
 
 if __name__ == "__main__":

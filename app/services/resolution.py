@@ -823,9 +823,11 @@ def _best_match(query: str, lookup: dict[str, int]) -> tuple[int | None, int]:
     return lookup[top_key], int(top_score)
 
 
-def _build_partner_manager_lookups(conn) -> tuple[dict, dict]:
+def _build_partner_manager_lookups(
+        conn) -> tuple[dict, dict, dict[int, dict]]:
     """Build the {normalised name → id} lookups for partners and managers.
 
+    Returns ``(partner_lookup, manager_lookup, managers_by_partner)``.
     Each lookup includes:
 
     * the full canonical name (always)
@@ -834,18 +836,40 @@ def _build_partner_manager_lookups(conn) -> tuple[dict, dict]:
       exactly one entry). So "Vishal", "Kothari" → VK; "Shreyans",
       "Dedhia" → SD; but "Mehta" (shared across PM / AM / MS) is
       deliberately excluded — we can't pick one without context.
+
+    ``managers_by_partner`` is ``{cost_centre_id: partner-scoped lookup}``.
+    A manager who reports under multiple partners (e.g. Gaurav Siroya
+    sits under both Aakash Mehta and Kiran Suvarna) is ambiguous in the
+    global manager_lookup — "gaurav" alone can't pick a row. Inside a
+    single partner's team, though, that name IS unambiguous: in
+    Kiran's team there's only one Gaurav. The matcher uses the
+    partner-scoped lookup whenever it already knows the partner side
+    of an "X - Y" string, so "Kiran - Gaurav" cleanly resolves to
+    GS - KS without an operator prompt.
     """
-    return (_build_lookup(conn,
-                           "SELECT id, code, name FROM cost_centres "
-                           "WHERE active = 1 AND cc_type = 'partner'"),
-            _build_lookup(conn,
-                           "SELECT id, code, name FROM managers "
-                           "WHERE active = 1"))
+    partner_lookup = _build_lookup(
+        conn,
+        "SELECT id, code, name FROM cost_centres "
+        "WHERE active = 1 AND cc_type = 'partner'")
+    manager_lookup = _build_lookup(
+        conn,
+        "SELECT id, code, name FROM managers WHERE active = 1")
+    partner_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM cost_centres "
+        "WHERE active = 1 AND cc_type = 'partner'")]
+    managers_by_partner: dict[int, dict] = {}
+    for cc_id in partner_ids:
+        managers_by_partner[cc_id] = _build_lookup(
+            conn,
+            "SELECT id, code, name FROM managers "
+            "WHERE active = 1 AND cost_centre_id = ?",
+            (cc_id,))
+    return partner_lookup, manager_lookup, managers_by_partner
 
 
-def _build_lookup(conn, sql: str) -> dict[str, int]:
+def _build_lookup(conn, sql: str, params: tuple = ()) -> dict[str, int]:
     """Helper: build the lookup dict for one master table."""
-    rows = list(conn.execute(sql))
+    rows = list(conn.execute(sql, params))
     lookup: dict[str, int] = {}
     # First pass: count which name-parts belong to which ids.
     part_owners: dict[str, set] = {}
@@ -864,6 +888,7 @@ def _build_lookup(conn, sql: str) -> dict[str, int]:
 
 
 def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
+                          managers_by_partner: dict[int, dict] | None = None,
                           min_score: int = _MIN_SCORE
                           ) -> tuple[int | None, int | None, int]:
     """Match a single CC string. Returns ``(cc_id, mgr_id, score)``.
@@ -872,6 +897,13 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
     *min_score* controls how confident we need to be — 70 is the auto-
     apply threshold; 50 is what the SplitEditor uses for *suggestions*
     where the operator will confirm before saving.
+
+    When ``managers_by_partner`` is given and the partner side has been
+    resolved, the manager side is matched against the partner-scoped
+    lookup FIRST. This disambiguates names like "Gaurav" that appear
+    in multiple partners' teams: "Kiran - Gaurav" → GS-KS (the only
+    Gaurav under Kiran), not GS-AM. If the partner-scoped match
+    misses, the global manager_lookup is the fallback.
     """
     cleaned = norm(_HONORIFICS.sub("", (raw or "").strip()))
     if not cleaned:
@@ -879,6 +911,21 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
     cc_id: int | None = None
     mgr_id: int | None = None
     best_score = 0
+
+    def _match_mgr(text: str, partner_cc_id: int | None) -> int | None:
+        """Find a manager id for *text*, preferring the partner-scoped
+        lookup when we already know the partner."""
+        if (managers_by_partner is not None
+                and partner_cc_id is not None
+                and partner_cc_id in managers_by_partner):
+            m_id, m_score = _best_match(
+                text, managers_by_partner[partner_cc_id])
+            if m_score >= min_score:
+                return m_id
+        m_id, m_score = _best_match(text, manager_lookup)
+        if m_score >= min_score:
+            return m_id
+        return None
 
     # "X - Y" — try both as the partner side.
     parts = _NAME_SEP.split(cleaned, maxsplit=1)
@@ -888,14 +935,10 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
         r_id, r_score = _best_match(right, partner_lookup)
         if r_score >= l_score and r_score >= min_score:
             cc_id, best_score = r_id, r_score
-            m_id, m_score = _best_match(left, manager_lookup)
-            if m_score >= min_score:
-                mgr_id = m_id
+            mgr_id = _match_mgr(left, cc_id)
         elif l_score >= min_score:
             cc_id, best_score = l_id, l_score
-            m_id, m_score = _best_match(right, manager_lookup)
-            if m_score >= min_score:
-                mgr_id = m_id
+            mgr_id = _match_mgr(right, cc_id)
     # Plain — try the whole string as a partner.
     if cc_id is None:
         id_w, score_w = _best_match(cleaned, partner_lookup)
@@ -929,7 +972,8 @@ def export_cc_diagnostic(path: str) -> int:
             r["id"]: r["code"] for r in conn.execute(
                 "SELECT id, code FROM cost_centres "
                 "WHERE active = 1 AND cc_type = 'partner'")}
-        partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
+        partner_lookup, manager_lookup, managers_by_partner = \
+            _build_partner_manager_lookups(conn)
         saved = {norm(r["raw_text"]): r["cost_centre_id"]
                   for r in conn.execute(
                       "SELECT raw_text, cost_centre_id FROM "
@@ -999,7 +1043,8 @@ def export_cc_diagnostic(path: str) -> int:
             cleaned = norm(_HONORIFICS.sub("", (raw or "").strip()))
             tokens = sorted(_tokenize(cleaned))
             cc_id, mgr_id, score = _match_one_cc_string(
-                raw, partner_lookup, manager_lookup, min_score=50)
+                raw, partner_lookup, manager_lookup,
+                managers_by_partner=managers_by_partner, min_score=50)
             saved_cc_id = saved.get(norm(raw))
             saved_partner = partner_codes.get(saved_cc_id)
             suggested_partner = partner_codes.get(cc_id)
@@ -1104,9 +1149,11 @@ def suggest_for_raw_cc(raw: str, min_score: int = 80
             (raw.strip().lower(),)).fetchone()
         if row:
             return row["cost_centre_id"], row["manager_id"], 100
-        partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
+        partner_lookup, manager_lookup, managers_by_partner = \
+            _build_partner_manager_lookups(conn)
     return _match_one_cc_string(
-        raw, partner_lookup, manager_lookup, min_score)
+        raw, partner_lookup, manager_lookup,
+        managers_by_partner=managers_by_partner, min_score=min_score)
 
 
 def auto_match_cc_strings() -> int:
@@ -1125,7 +1172,8 @@ def auto_match_cc_strings() -> int:
     overwritten only if the auto-match finds a better fit.
     """
     with transaction() as conn:
-        partner_lookup, manager_lookup = _build_partner_manager_lookups(conn)
+        partner_lookup, manager_lookup, managers_by_partner = \
+            _build_partner_manager_lookups(conn)
 
     if not partner_lookup:
         return 0
@@ -1134,7 +1182,8 @@ def auto_match_cc_strings() -> int:
     for item in unresolved_cc_strings():
         raw = item["raw"]
         cc_id, mgr_id, _score = _match_one_cc_string(
-            raw, partner_lookup, manager_lookup, _MIN_SCORE)
+            raw, partner_lookup, manager_lookup,
+            managers_by_partner=managers_by_partner, min_score=_MIN_SCORE)
         if cc_id is not None:
             new_mappings.append((raw, cc_id, mgr_id))
 
