@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.49** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.50** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,38 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.50 — Bulk client master import + fuzzy auto-link
+Three asks in one release:
+
+**1. Bulk-import the firm's client → cost-centre master from Excel.**
+New button on Master Data → Clients: "📁 Import from Excel…" picks an
+Excel with ``Client | Cost Centre`` columns (case-insensitive header
+detection), looks each CC up by code in the cost_centres master, and
+upserts. Existing clients with a NULL cost_centre get filled in;
+existing clients whose cost_centre already matches are left alone;
+rows with unknown CC codes are reported. Verified on the operator's
+real 986-row dump: 986 created, 0 unknowns. The corresponding service
+``resolution.bulk_import_clients`` is callable from code too.
+
+**2. Walk back the client.manager_id field added in v0.3.47.** The
+Sales/Purchase Register Excel now carries the manager-partner string
+per voucher line (v0.3.49 matcher resolves both orderings), so a
+default manager on the client master is redundant. The DB column
+remains (migrations only add) but the field is no longer shown in
+the Master Data → Clients tab, no longer surfaced in the
+ResolveClientDialog, and ``apply_client_master_to_splits`` only
+propagates cost_centre_id now — not manager_id.
+
+**3. Fuzzy auto-link new party names against the client master.**
+``apply_known_client_aliases`` now runs an exact-match pass followed
+by a fuzzy pass at ≥70% with a 5-point gap requirement vs. the
+runner-up. So ``PROCAM INTERNATIONAL PVT LTD`` → ``PROCAM
+INTERNATIONAL PVT. LTD`` (95%) auto-links; ``Kensho Coffee LLP.`` →
+``Kensho Coffee LLP`` (92%) auto-links; ``Procam International Pvt
+Bangalore`` — ambiguous against 3+ Procam entries — stays unlinked
+for the operator's review queue. Each fuzzy auto-link writes a row
+to ``client_aliases`` so re-imports hit the cheap exact path.
 
 ### v0.3.49 — Smart manager-partner matching + full manager seed
 Operator asked for two things:

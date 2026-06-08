@@ -76,8 +76,20 @@ def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
     return linked
 
 
-def apply_known_client_aliases() -> int:
+def apply_known_client_aliases(*, fuzzy_threshold: int = 70) -> int:
     """Auto-link unresolved rows whose raw name matches a known client/alias.
+
+    Two passes:
+
+    1. **Exact**: normalised raw name == normalised canonical / alias.
+    2. **Fuzzy** (at ``fuzzy_threshold`` and above, default 70): catches
+       harmless variants like ``PROCAM INTERNATIONAL PVT. LTD`` →
+       ``Procam International Private Limited`` that ``norm()``'s
+       whitespace+case folding misses. Only auto-applies when the top
+       fuzzy candidate is clearly ahead of the runner-up (≥5pt gap);
+       otherwise the row is left for the operator's review queue.
+       Successful fuzzy links are saved as aliases so re-imports hit
+       the cheap exact path.
 
     Also infers client → cost-centre links from the freshly-linked vouchers.
     """
@@ -89,7 +101,71 @@ def apply_known_client_aliases() -> int:
                 "SELECT client_id, alias_text FROM client_aliases"):
             pairs[norm(r["alias_text"])] = r["client_id"]
         linked = _apply_client_norm_mapping(conn, pairs)
+    linked += _fuzzy_link_clients(threshold=fuzzy_threshold)
     infer_all_masters()
+    return linked
+
+
+def _fuzzy_link_clients(*, threshold: int = 70, gap: int = 5) -> int:
+    """Fuzzy-match each still-unresolved party / client_raw to a client.
+
+    For each unmatched raw name, ranks active clients by token_sort_ratio.
+    Auto-link when:
+
+    * top score is at or above ``threshold`` (default 70), AND
+    * top score is at least ``gap`` points ahead of the runner-up.
+
+    The gap requirement prevents tie-misfires when several similar clients
+    exist (e.g. ``Procam International Pvt Ltd Delhi`` vs ``Procam Kolkata``).
+
+    Each linked raw name is saved as an alias on the client so subsequent
+    imports of the same wording hit the exact-match fast path.
+    """
+    linked = 0
+    with transaction() as conn:
+        clients = [
+            (r["id"], r["canonical_name"]) for r in conn.execute(
+                "SELECT id, canonical_name FROM clients WHERE active = 1")]
+        if not clients:
+            return 0
+        norms = {cid: norm_loose(name) for cid, name in clients}
+
+        # Gather every still-unresolved raw name (vouchers + timesheet).
+        raws: set[str] = set()
+        for r in conn.execute(
+                "SELECT DISTINCT party_name FROM vouchers "
+                "WHERE client_id IS NULL AND party_name <> ''"):
+            raws.add(r["party_name"])
+        for r in conn.execute(
+                "SELECT DISTINCT client_raw FROM timesheet_entries "
+                "WHERE client_id IS NULL AND client_raw <> ''"):
+            raws.add(r["client_raw"])
+        if not raws:
+            return 0
+
+        # Score each raw name; auto-link the clear-winner cases.
+        confident: dict[str, int] = {}
+        for raw in raws:
+            target = norm_loose(raw)
+            if not target:
+                continue
+            ranked = process.extract(
+                target, norms, scorer=fuzz.token_sort_ratio, limit=3)
+            if not ranked:
+                continue
+            top_score = int(ranked[0][1])
+            top_id = ranked[0][2]
+            runner = int(ranked[1][1]) if len(ranked) > 1 else 0
+            if top_score >= threshold and (top_score - runner) >= gap:
+                confident[norm(raw)] = top_id
+                # Remember the raw text as an alias so re-imports skip
+                # the fuzzy pass entirely.
+                conn.execute(
+                    "INSERT OR IGNORE INTO client_aliases "
+                    "(client_id, alias_text, source) VALUES (?, ?, 'fuzzy')",
+                    (top_id, raw))
+        if confident:
+            linked = _apply_client_norm_mapping(conn, confident)
     return linked
 
 
@@ -140,16 +216,22 @@ def link_client(raw: str, client_id: int) -> int:
 def create_client(raw: str, canonical_name: str,
                    cost_centre_id: int | None,
                    manager_id: int | None = None) -> int:
-    """Create a new client from a raw name and link all matching rows."""
-    # If the operator didn't pick a cost centre, use the one we can infer from
-    # the underlying sales vouchers.
+    """Create a new client from a raw name and link all matching rows.
+
+    ``manager_id`` is accepted for back-compat with v0.3.47 callers but
+    is no longer wired to the client master — the Sales Register Excel
+    now carries manager+partner per voucher line, so a default manager
+    on the client master became redundant. New clients are created
+    without a manager assignment; the DB column stays (NULL) for any
+    legacy data already present.
+    """
     if cost_centre_id is None:
         cost_centre_id = suggest_cc_for_raw_client(raw)
     with transaction() as conn:
         cid = conn.execute(
-            "INSERT INTO clients (canonical_name, cost_centre_id, manager_id) "
-            "VALUES (?, ?, ?)",
-            (canonical_name, cost_centre_id, manager_id)).lastrowid
+            "INSERT INTO clients (canonical_name, cost_centre_id) "
+            "VALUES (?, ?)",
+            (canonical_name, cost_centre_id)).lastrowid
         if norm(raw) != norm(canonical_name):
             conn.execute(
                 "INSERT OR IGNORE INTO client_aliases (client_id, alias_text, source) "
@@ -161,6 +243,93 @@ def create_client(raw: str, canonical_name: str,
 def _link_client_rows(conn, raw: str, client_id: int) -> int:
     """Set client_id on all rows whose raw name normalises to *raw*."""
     return _apply_client_norm_mapping(conn, {norm(raw): client_id})
+
+
+def bulk_import_clients(
+        pairs: list[tuple[str, str]],
+        *,
+        overwrite_existing_cc: bool = False
+) -> dict:
+    """Upsert clients from a list of ``(client_name, cc_code)`` pairs.
+
+    For each row:
+
+    * Look up the cost-centre by code (case-insensitive). Unknown codes
+      go into the report's ``unknown_cc`` list and the client is skipped.
+    * If a client with the same normalised canonical_name already exists:
+      - leave cost_centre_id alone when it already points somewhere
+        (unless ``overwrite_existing_cc=True``),
+      - fill it in when it's NULL.
+    * Otherwise insert a new client with that name + cost_centre_id.
+
+    After the upsert, re-applies known aliases and infers downstream
+    masters so any pre-existing vouchers linked to these clients pick up
+    the new cost-centre via the v0.3.47 splits-fallback.
+
+    Returns a dict with counts:
+      ``created`` — new client rows inserted
+      ``cc_set`` — existing clients whose NULL cost_centre_id was filled
+      ``cc_overwritten`` — existing clients whose cost_centre_id changed
+      ``unchanged`` — existing clients whose cost_centre already matched
+      ``unknown_cc`` — list of (client, code) where the code wasn't a master
+      ``rows_total`` — total rows processed
+    """
+    created = cc_set = cc_overwritten = unchanged = 0
+    unknown_cc: list[tuple[str, str]] = []
+    with transaction() as conn:
+        cc_by_code = {
+            r["code"].strip().lower(): r["id"] for r in conn.execute(
+                "SELECT id, code FROM cost_centres WHERE active = 1")}
+        # Build a normalised-name → id index of existing clients once.
+        existing: dict[str, tuple[int, int | None]] = {}
+        for r in conn.execute(
+                "SELECT id, canonical_name, cost_centre_id FROM clients"):
+            existing[norm(r["canonical_name"])] = (r["id"], r["cost_centre_id"])
+        for raw_name, raw_code in pairs:
+            name = (raw_name or "").strip()
+            code = (raw_code or "").strip()
+            if not name:
+                continue
+            cc_id = cc_by_code.get(code.lower())
+            if cc_id is None:
+                unknown_cc.append((name, code))
+                continue
+            key = norm(name)
+            hit = existing.get(key)
+            if hit is None:
+                # Insert new client.
+                cid = conn.execute(
+                    "INSERT INTO clients (canonical_name, cost_centre_id) "
+                    "VALUES (?, ?)", (name, cc_id)).lastrowid
+                existing[key] = (cid, cc_id)
+                created += 1
+            else:
+                client_id, current_cc = hit
+                if current_cc == cc_id:
+                    unchanged += 1
+                elif current_cc is None:
+                    conn.execute(
+                        "UPDATE clients SET cost_centre_id = ? WHERE id = ?",
+                        (cc_id, client_id))
+                    existing[key] = (client_id, cc_id)
+                    cc_set += 1
+                elif overwrite_existing_cc:
+                    conn.execute(
+                        "UPDATE clients SET cost_centre_id = ? WHERE id = ?",
+                        (cc_id, client_id))
+                    existing[key] = (client_id, cc_id)
+                    cc_overwritten += 1
+                else:
+                    unchanged += 1
+    apply_known_client_aliases()
+    return {
+        "created": created,
+        "cc_set": cc_set,
+        "cc_overwritten": cc_overwritten,
+        "unchanged": unchanged,
+        "unknown_cc": unknown_cc,
+        "rows_total": len(pairs),
+    }
 
 
 def infer_client_cost_centres() -> int:
@@ -303,25 +472,24 @@ def infer_manager_cost_centres() -> int:
 
 
 def apply_client_master_to_splits() -> int:
-    """Fill missing voucher-split cost_centre_id / manager_id from the client
-    master of the parent voucher.
+    """Fill missing voucher-split cost_centre_id from the client master.
 
-    For firms whose Tally doesn't tag cost centres on voucher lines, the
-    cc-string mapping has nothing to bite on — every split stays unassigned.
-    The client master is the fallback: once the operator sets a partner
-    (and now also a manager) on a client, every voucher already linked to
-    that client gets its splits populated.
+    When a voucher's split has no cost-centre yet but its parent voucher
+    is linked to a client whose master row has a cost_centre_id, push
+    the client's cost_centre down to the split. Important when Tally
+    doesn't tag cost centres at the voucher level — the cc-string
+    mapping has nothing to bite on, and the client master is the only
+    way to populate the Partner P&L.
 
-    Only fills NULL fields — explicit cc-string mappings always win.
-    Returns the number of split fields updated.
+    Only fills NULL — explicit cc-string mappings always win.
+
+    (v0.3.47 also propagated manager_id from the client master, but
+    that field was retired in v0.3.50 once the Sales/Purchase Register
+    Excel began carrying manager+partner per line. The DB column on
+    clients remains for legacy data; no new rows write to it.)
     """
     updated = 0
     with transaction() as conn:
-        # Splits where the parent voucher IS linked to a client, AND the
-        # split has no cost_centre / manager yet, AND the client master HAS
-        # a value to give. Update each field independently — a client with
-        # only cost_centre_id set should still fill that, even if manager
-        # is NULL on both sides.
         cur = conn.execute(
             "UPDATE voucher_splits "
             "SET cost_centre_id = ("
@@ -334,19 +502,6 @@ def apply_client_master_to_splits() -> int:
             "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
             "    WHERE c.id = v.client_id "
             "      AND c.cost_centre_id IS NOT NULL)")
-        updated += cur.rowcount
-        cur = conn.execute(
-            "UPDATE voucher_splits "
-            "SET manager_id = ("
-            "    SELECT c.manager_id FROM clients c "
-            "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
-            "    WHERE c.id = v.client_id) "
-            "WHERE manager_id IS NULL "
-            "  AND EXISTS ("
-            "    SELECT 1 FROM clients c "
-            "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
-            "    WHERE c.id = v.client_id "
-            "      AND c.manager_id IS NOT NULL)")
         updated += cur.rowcount
     return updated
 

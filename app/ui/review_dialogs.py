@@ -82,13 +82,8 @@ class ResolveClientDialog(QDialog):
             repo.fk_options("cost_centres"),
             current=suggested_cc,
             none_label="(unassigned)")
-        self.mgr_combo = _combo(
-            repo.fk_options("managers"),
-            current=None,
-            none_label="(unassigned)")
         form.addRow("Client name:", self.name_edit)
         form.addRow("Cost centre:", self.cc_combo)
-        form.addRow("Manager:", self.mgr_combo)
         if suggested_cc is not None:
             note = QLabel(
                 "<span style='color:#166534;'>✓ Cost centre inferred from the "
@@ -97,7 +92,7 @@ class ResolveClientDialog(QDialog):
             form.addRow("", note)
         else:
             form.addRow("", QLabel(
-                "New clients without a cost centre / manager can be set later."))
+                "New clients without a cost centre can be set later."))
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -119,8 +114,7 @@ class ResolveClientDialog(QDialog):
                 QMessageBox.warning(self, "Name required",
                                     "Enter a name for the new client.")
                 return
-            self._result = ("create", name, self.cc_combo.currentData(),
-                            self.mgr_combo.currentData())
+            self._result = ("create", name, self.cc_combo.currentData())
         self.accept()
 
     def apply(self) -> int:
@@ -129,8 +123,7 @@ class ResolveClientDialog(QDialog):
             return 0
         if self._result[0] == "link":
             return resolution.link_client(self.raw, self._result[1])
-        resolution.create_client(self.raw, self._result[1], self._result[2],
-                                 self._result[3])
+        resolution.create_client(self.raw, self._result[1], self._result[2])
         return 1
 
 

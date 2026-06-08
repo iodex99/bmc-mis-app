@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -33,6 +34,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import repository as repo
+from ..importing import excel_reader
+from ..services import resolution
 from ..util import fmt_inr
 from .widgets import debounced, fill_table_with_actions, setup_data_table
 
@@ -84,11 +87,13 @@ SPECS: list[TableSpec] = [
         Field("default_cost_centre_id", "Default cost centre", "fk",
               fk_table="cost_centres", optional=True),
     ]),
+    # Manager was on the client master in v0.3.47 but became redundant
+    # once the Sales/Purchase Register Excel began carrying the
+    # manager-partner string per voucher line (v0.3.49). The DB column
+    # remains for now (migrations only add) — just no longer surfaced.
     TableSpec("clients", "Clients", [
         Field("canonical_name", "Client name"),
         Field("cost_centre_id", "Cost centre", "fk", fk_table="cost_centres",
-              optional=True),
-        Field("manager_id", "Manager", "fk", fk_table="managers",
               optional=True),
     ], order_by="canonical_name"),
     TableSpec("services", "Services", [
@@ -213,6 +218,13 @@ class RecordTab(QWidget):
             toolbar.addWidget(self.show_inactive)
         else:
             self.show_inactive = None
+        if spec.table == "clients":
+            self.import_btn = QPushButton("📁 Import from Excel…")
+            self.import_btn.setToolTip(
+                "Bulk-import a list of clients with their cost-centre codes "
+                "from an Excel file. Expected columns: Client | Cost Centre.")
+            self.import_btn.clicked.connect(self._import_clients_from_excel)
+            toolbar.addWidget(self.import_btn)
         self.add_btn = QPushButton(f"＋ Add {spec.title.rstrip('s').lower()}")
         self.add_btn.setObjectName("primary")
         self.add_btn.clicked.connect(self._add)
@@ -343,6 +355,89 @@ class RecordTab(QWidget):
             except Exception as exc:  # e.g. UNIQUE violation
                 QMessageBox.critical(self, "Could not add", str(exc))
             self.reload()
+
+    def _import_clients_from_excel(self) -> None:
+        """Bulk-import client → cost-centre rows from an Excel file.
+
+        Expected layout: a header row containing 'Client' and 'Cost Centre'
+        (case-insensitive); data rows below. Cost-centre values must match
+        a code (e.g. SD, AM, JV) in the cost_centres master.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Clients from Excel", "",
+            "Excel files (*.xlsx *.xls)")
+        if not path:
+            return
+        try:
+            grid = excel_reader.read_grid(path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Couldn't read file", f"Could not read {path}:\n\n{exc}")
+            return
+        pairs = self._extract_client_cc_pairs(grid)
+        if not pairs:
+            QMessageBox.warning(
+                self, "No data found",
+                "Couldn't find a 'Client' + 'Cost Centre' header row in this "
+                "file. Make sure the first two columns are named Client and "
+                "Cost Centre (case-insensitive).")
+            return
+        # Confirm before applying — make the operator aware of the scope.
+        msg = (f"Found {len(pairs)} client → cost-centre rows in this file.\n\n"
+               "Existing clients keep any cost-centre already assigned; "
+               "clients whose cost-centre is unset will be filled in. New "
+               "clients are created.\n\nContinue?")
+        if QMessageBox.question(self, "Import clients?", msg) != \
+                QMessageBox.Yes:
+            return
+        report = resolution.bulk_import_clients(
+            pairs, overwrite_existing_cc=False)
+        lines = [
+            f"Total rows processed: {report['rows_total']}",
+            f"New clients created: {report['created']}",
+            f"Existing clients whose cost-centre got filled in: {report['cc_set']}",
+            f"Existing clients unchanged (already had the same CC): "
+            f"{report['unchanged']}",
+        ]
+        if report["unknown_cc"]:
+            lines.append(
+                f"\nSkipped {len(report['unknown_cc'])} row(s) with unknown "
+                "cost-centre codes (not in master). First few:")
+            for name, code in report["unknown_cc"][:10]:
+                lines.append(f"  • {name} → {code!r}")
+        QMessageBox.information(self, "Import complete", "\n".join(lines))
+        self.reload()
+
+    @staticmethod
+    def _extract_client_cc_pairs(grid: list[list]) -> list[tuple[str, str]]:
+        """Find the header row + return (client_name, cc_code) tuples below it."""
+        header_row = -1
+        client_col = cc_col = -1
+        for r_idx, row in enumerate(grid[:20]):
+            cells = [(str(c).strip().lower() if c is not None else "")
+                     for c in row]
+            for i, txt in enumerate(cells):
+                if txt == "client":
+                    client_col = i
+                elif txt in ("cost centre", "cost center", "cc"):
+                    cc_col = i
+            if client_col >= 0 and cc_col >= 0:
+                header_row = r_idx
+                break
+            client_col = cc_col = -1
+        if header_row < 0:
+            return []
+        out: list[tuple[str, str]] = []
+        for row in grid[header_row + 1:]:
+            if not row:
+                continue
+            name = row[client_col] if client_col < len(row) else None
+            code = row[cc_col] if cc_col < len(row) else None
+            name_s = (str(name).strip() if name is not None else "")
+            code_s = (str(code).strip() if code is not None else "")
+            if name_s and code_s:
+                out.append((name_s, code_s))
+        return out
 
     def _edit_row(self, idx: int) -> None:
         if not (0 <= idx < len(self._rows)):
