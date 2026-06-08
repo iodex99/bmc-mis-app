@@ -72,27 +72,26 @@ class ImportPage(QWidget):
         heading.setObjectName("pageHeading")
         outer.addWidget(heading)
         note = QLabel(
-            "Primary path: pull voucher data directly from Tally for a date "
-            "range. Fall back to an Excel upload only when Tally is not "
-            "reachable.")
+            "Recommended: export the Sales / Purchase Register from Tally as "
+            "an Excel file and upload it below. Each ledger line keeps its "
+            "own cost-centre tag, so partner + manager are picked up directly "
+            "from the file. The Tally HTTP pull is a convenience for setups "
+            "whose Tally configuration exposes per-line cost centres over the "
+            "gateway — many installations don't, in which case stick with the "
+            "Excel upload.")
         note.setObjectName("pageNote")
+        note.setWordWrap(True)
         outer.addWidget(note)
 
-        # --- Tally pull (primary) ------------------------------------------
-        self.tally_pull = TallyPullWidget()
-        self.tally_pull.imported.connect(self._reload_recent)
-        # Re-emit at page level so MainWindow can refresh the Review page.
-        self.tally_pull.imported.connect(self.imported)
-        outer.addWidget(self.tally_pull)
-
-        # --- Excel upload (fallback) ---------------------------------------
-        fallback_box = QGroupBox("Fallback: upload an Excel file")
+        # --- Excel upload (recommended) ------------------------------------
+        fallback_box = QGroupBox("Upload an Excel file (recommended)")
         fb = QVBoxLayout(fallback_box)
         fb.setSpacing(8)
         fb_note = QLabel(
-            "Use this if Tally is closed, on a different PC, or you have a "
-            "one-off file to import. Sales / purchase files are auto-detected "
-            "from their headers; new layouts only need column mapping once.")
+            "Sales / Purchase Registers exported from Tally are auto-detected "
+            "from their headers; new layouts only need column mapping once. "
+            "Multi-service vouchers and per-line cost-centre tags carry "
+            "through to the MIS without manual splitting.")
         fb_note.setWordWrap(True)
         fb_note.setObjectName("pageNote")
         fb.addWidget(fb_note)
@@ -146,6 +145,15 @@ class ImportPage(QWidget):
         self.preview.setEditTriggers(QTableWidget.NoEditTriggers)
         self.preview.setMaximumHeight(220)
         root.addWidget(self.preview)
+
+        # --- Tally HTTP pull (secondary) -----------------------------------
+        # Kept available for installs whose Tally exposes per-line cost
+        # centres over the gateway. For setups that don't (most do not),
+        # the Excel-upload path above is the right primary flow.
+        self.tally_pull = TallyPullWidget()
+        self.tally_pull.imported.connect(self._reload_recent)
+        self.tally_pull.imported.connect(self.imported)
+        outer.addWidget(self.tally_pull)
 
         # Recent-imports table sits at the bottom of the page, covering both
         # Tally pulls and Excel uploads.

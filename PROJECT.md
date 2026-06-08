@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.47** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.48** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,32 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.48 — Reframe Import page: Excel is the primary path
+Operator asked for an "overhaul" so the Sales Register Excel from Tally
+gets parsed end-to-end with per-line cost-centre / manager attribution
+(multi-service vouchers each split with their own CC). Investigation
+showed the parser ``parsers.parse_tally`` already produces exactly that
+shape — verified on the operator's actual BMCA Excel: 19 vouchers,
+correct per-line splits, multi-service vouchers (Velox CERTIFICATION
++ AUDIT) split into separate lines with the same CC each, tax lines
+flagged ``is_tax=True`` and rolled into voucher tax_amount.
+
+The actual problem was UX framing. The Import page presented the
+Tally HTTP pull as "Primary path" and the Excel upload as "Fallback",
+which sent the operator down the HTTP path. On their Tally install
+the HTTP gateway returns empty ``CATEGORYALLOCATIONS.LIST`` elements
+(verified via the diagnostic XML) — so the HTTP path can never
+populate cost centres for this operator's setup, while the Excel
+export from the same Tally UI does.
+
+Change: swapped the framing — Excel upload moved to the top of the
+page and labelled "Upload an Excel file (recommended)"; Tally HTTP
+pull moved below as a secondary option for installs whose gateway
+exposes per-line cost centres. Note text updated to explain the
+trade-off.
+
+No parser changes. No schema changes.
 
 ### v0.3.47 — Manager field on client master (+ fallback to splits)
 Operator request: bind each client to a default Manager too, not just
