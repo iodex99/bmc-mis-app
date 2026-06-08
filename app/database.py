@@ -246,6 +246,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX IF NOT EXISTS idx_vouchers_dedup
             ON vouchers(entity_id, kind, vch_no);
     """),
+    (6, """
+        -- Add manager to client master. Clients already had a cost-centre
+        -- (partner) link; the operator can now also bind a default manager
+        -- so the client's voucher splits inherit BOTH cost-centre and
+        -- manager — same shape as cc_string_mappings. Critical when a
+        -- firm's Tally has no cost-centre tagging at the voucher level
+        -- (everything flows through the client master instead).
+        ALTER TABLE clients ADD COLUMN manager_id INTEGER REFERENCES managers(id);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

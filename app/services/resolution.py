@@ -138,7 +138,8 @@ def link_client(raw: str, client_id: int) -> int:
 
 
 def create_client(raw: str, canonical_name: str,
-                   cost_centre_id: int | None) -> int:
+                   cost_centre_id: int | None,
+                   manager_id: int | None = None) -> int:
     """Create a new client from a raw name and link all matching rows."""
     # If the operator didn't pick a cost centre, use the one we can infer from
     # the underlying sales vouchers.
@@ -146,8 +147,9 @@ def create_client(raw: str, canonical_name: str,
         cost_centre_id = suggest_cc_for_raw_client(raw)
     with transaction() as conn:
         cid = conn.execute(
-            "INSERT INTO clients (canonical_name, cost_centre_id) VALUES (?, ?)",
-            (canonical_name, cost_centre_id)).lastrowid
+            "INSERT INTO clients (canonical_name, cost_centre_id, manager_id) "
+            "VALUES (?, ?, ?)",
+            (canonical_name, cost_centre_id, manager_id)).lastrowid
         if norm(raw) != norm(canonical_name):
             conn.execute(
                 "INSERT OR IGNORE INTO client_aliases (client_id, alias_text, source) "
@@ -300,18 +302,70 @@ def infer_manager_cost_centres() -> int:
     return updated
 
 
+def apply_client_master_to_splits() -> int:
+    """Fill missing voucher-split cost_centre_id / manager_id from the client
+    master of the parent voucher.
+
+    For firms whose Tally doesn't tag cost centres on voucher lines, the
+    cc-string mapping has nothing to bite on — every split stays unassigned.
+    The client master is the fallback: once the operator sets a partner
+    (and now also a manager) on a client, every voucher already linked to
+    that client gets its splits populated.
+
+    Only fills NULL fields — explicit cc-string mappings always win.
+    Returns the number of split fields updated.
+    """
+    updated = 0
+    with transaction() as conn:
+        # Splits where the parent voucher IS linked to a client, AND the
+        # split has no cost_centre / manager yet, AND the client master HAS
+        # a value to give. Update each field independently — a client with
+        # only cost_centre_id set should still fill that, even if manager
+        # is NULL on both sides.
+        cur = conn.execute(
+            "UPDATE voucher_splits "
+            "SET cost_centre_id = ("
+            "    SELECT c.cost_centre_id FROM clients c "
+            "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
+            "    WHERE c.id = v.client_id) "
+            "WHERE cost_centre_id IS NULL "
+            "  AND EXISTS ("
+            "    SELECT 1 FROM clients c "
+            "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
+            "    WHERE c.id = v.client_id "
+            "      AND c.cost_centre_id IS NOT NULL)")
+        updated += cur.rowcount
+        cur = conn.execute(
+            "UPDATE voucher_splits "
+            "SET manager_id = ("
+            "    SELECT c.manager_id FROM clients c "
+            "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
+            "    WHERE c.id = v.client_id) "
+            "WHERE manager_id IS NULL "
+            "  AND EXISTS ("
+            "    SELECT 1 FROM clients c "
+            "    JOIN vouchers v ON v.id = voucher_splits.voucher_id "
+            "    WHERE c.id = v.client_id "
+            "      AND c.manager_id IS NOT NULL)")
+        updated += cur.rowcount
+    return updated
+
+
 def infer_all_masters() -> dict[str, int]:
     """Run every auto-inference pass over the masters. Idempotent, cheap, and
     safe to call after any operator action or import.
 
     Order matters: employee cost-centres come from salary; employee managers
-    come from timesheet; manager cost-centres come from their employees; and
-    client cost-centres come from sales voucher splits."""
+    come from timesheet; manager cost-centres come from their employees;
+    client cost-centres come from sales voucher splits; finally the client
+    master is pushed back down to any voucher splits that are still
+    unassigned (the fallback when Tally has no per-line cost centres)."""
     return {
         "employees_cc": infer_employee_cost_centres(),
         "employees_mgr": infer_employee_managers(),
         "managers_cc": infer_manager_cost_centres(),
         "clients_cc": infer_client_cost_centres(),
+        "splits_from_client": apply_client_master_to_splits(),
     }
 
 

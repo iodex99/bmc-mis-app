@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.46** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.47** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,26 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.47 — Manager field on client master (+ fallback to splits)
+Operator request: bind each client to a default Manager too, not just
+a Cost Centre (partner) — same shape as ``cc_string_mappings``. Critical
+when a firm's Tally doesn't tag cost centres on voucher lines: every
+split is unassigned, the cc-string mapping has nothing to bite on, and
+the client master becomes the only path to populate the Partner-Manager
+P&L.
+
+Changes:
+- DB migration v6: ``ALTER TABLE clients ADD COLUMN manager_id``.
+- Master Data → Clients tab: new ``Manager`` column / form field.
+- Resolve-Client dialog (new-client flow): Manager dropdown alongside
+  Cost Centre.
+- ``resolution.create_client`` accepts ``manager_id``.
+- New ``apply_client_master_to_splits()`` — pushes each client's
+  cost_centre_id and manager_id down to its vouchers' splits when
+  those splits are NULL. Cc-string mappings still win when present.
+  Wired into ``infer_all_masters()`` so it runs after every operator
+  action and every import.
 
 ### v0.3.46 — Expense vouchers also resolve against client master
 The new Client column on the Expenses sheet (v0.3.45) was always showing

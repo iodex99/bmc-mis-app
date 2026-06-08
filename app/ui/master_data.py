@@ -88,6 +88,8 @@ SPECS: list[TableSpec] = [
         Field("canonical_name", "Client name"),
         Field("cost_centre_id", "Cost centre", "fk", fk_table="cost_centres",
               optional=True),
+        Field("manager_id", "Manager", "fk", fk_table="managers",
+              optional=True),
     ], order_by="canonical_name"),
     TableSpec("services", "Services", [
         Field("name", "Service name"),
