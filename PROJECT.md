@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.44** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.45** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,17 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.45 — Client column on Expenses sheet
+Operator requested a ``Client`` column on the generated MIS's Expenses
+data sheet (mirrors the existing Client column on Revenue). Added after
+Service, before Amount. The expense fact dict already carried
+``client_id`` from ``vouchers.client_id`` — only the sheet writer needed
+to render it. Shifted Amount G→H and Description H→I, and updated every
+downstream SUMIFS that referenced the old expense Amount column:
+Cost Centre P&L direct-expense cell, Partner-Manager P&L expense row,
+Entity / Service summaries, and the Comparatives sheet's prior-period
+expense lookup.
 
 ### v0.3.44 — Enhanced diagnostic CSV (full visibility)
 User's v0.3.43 diagnostic CSV came back **empty** — meaning

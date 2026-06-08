@@ -435,7 +435,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         _cell(ws, r, 2, name, font=_NORMAL, border=True)
         _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 4, f"=SUMIFS({exp}!$G:$G,{exp}!$D:$D,$A{r})",
+        _cell(ws, r, 4, f"=SUMIFS({exp}!$H:$H,{exp}!$D:$D,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 5, f"=SUMIFS({lab}!$F:$F,{lab}!$B:$B,$A{r})",
               fmt=INR, border=True)
@@ -635,8 +635,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
     def sumifs(sheet_q, amount_col, cc_code, mgr_filter, extra=None):
         # Column layout on the Revenue / Expenses data sheets:
         #   A=Date  B=VoucherNo  C=Entity  D=CostCentre  E=Manager
-        #   F=Service  G=Client (rev only)  H=Amount (rev) / G=Amount (exp)
-        #   I=Category (rev) / H=Description (exp)
+        #   F=Service  G=Client  H=Amount  I=Category (rev) / I=Description (exp)
         parts = [
             f"{sheet_q}!${amount_col}:${amount_col}",
             f"{sheet_q}!$D:$D", f'"{cc_code}"',
@@ -768,7 +767,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     else:
                         formula = 0
                 elif kind == "expense":
-                    formula = sumifs(exp, "G", cc_code, mgr_filter)
+                    formula = sumifs(exp, "H", cc_code, mgr_filter)
                 elif kind == "cost_sum":
                     sal_r = rows_by_kind["salary"]
                     exp_r = rows_by_kind["expense"]
@@ -823,14 +822,14 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
 # --- Entity & Service --------------------------------------------------------
 
 def _sheet_entity(wb: Workbook, data: MISData, lbl: dict) -> None:
-    # Entity is column C on Revenue / Expenses (was B before Date+VchNo).
+    # Entity is column C on Revenue / Expenses.
     _simple_summary(wb, "Entity P&L", "Entity-wise Profitability",
                     "Entity", data.entities, "ent", lbl, key="name",
                     sumcol_rev="C", sumcol_exp="C")
 
 
 def _sheet_service(wb: Workbook, data: MISData, lbl: dict) -> None:
-    # Service is column F on Revenue / Expenses (was E before Date+VchNo).
+    # Service is column F on Revenue / Expenses.
     _simple_summary(wb, "Service MIS", "Service-wise Revenue & Cost",
                     "Service", data.services, "svc", lbl, key="name",
                     sumcol_rev="F", sumcol_exp="F")
@@ -855,7 +854,7 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
         _cell(ws, r, 1, item["name"], border=True)
         _cell(ws, r, 2, f"=SUMIFS({rev}!$H:$H,{rev}!${sumcol_rev}:${sumcol_rev},$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 3, f"=SUMIFS({exp}!$G:$G,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
+        _cell(ws, r, 3, f"=SUMIFS({exp}!$H:$H,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 4, f"=B{r}-C{r}", fmt=INR, border=True)
         r += 1
@@ -913,12 +912,13 @@ def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
              lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
              lbl["mgr"].get(f["manager_id"], "(unassigned)"),
              lbl["svc"].get(f["service_id"], "(unspecified)"),
+             lbl["cli"].get(f.get("client_id"), "(unmapped)"),
              round(f["amount"], 2), f.get("description", "")]
             for f in data.expense_facts]
     _write_data_sheet(wb, "Expenses" + suffix,
                       ["Date", "Voucher No", "Entity", "CostCentre",
-                       "Manager", "Service", "Amount", "Description"],
-                      [12, 16, 24, 12, 12, 20, 14, 34], rows)
+                       "Manager", "Service", "Client", "Amount", "Description"],
+                      [12, 16, 24, 12, 12, 20, 28, 14, 34], rows)
 
 
 def _fmt_date(raw):
@@ -985,7 +985,7 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
         _cell(ws, r, 6, f"={pl}!H{plrow}", fmt=INR, border=True)
         # Comparison profit = comp revenue − comp direct − comp labour.
         _cell(ws, r, 7,
-              f"=D{r}-SUMIFS({exp_c}!$G:$G,{exp_c}!$D:$D,$A{r})"
+              f"=D{r}-SUMIFS({exp_c}!$H:$H,{exp_c}!$D:$D,$A{r})"
               f"-SUMIFS({lab_c}!$F:$F,{lab_c}!$B:$B,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 8, f"=F{r}-G{r}", fmt=INR, border=True)
