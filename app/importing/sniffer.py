@@ -10,6 +10,7 @@ hints. The header text varies a little across Tally versions and entities
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # Synonym sets for each canonical column. Compared after _norm() (lower-cased,
@@ -27,12 +28,22 @@ _CREDIT_SYNS = {"credit", "credit amount", "cr", "cr amount"}
 # ledger-line + cost-centre structure as Sales/Purchase Registers; they
 # just hold the return-side vouchers. For our schema both still book to
 # the same side (returns are signed amounts on the parent kind):
-#   "Sales Register"        → sales
-#   "Credit Note Register"  → sales  (sales returns)
-#   "Purchase Register"     → purchase
-#   "Debit Note Register"   → purchase  (purchase returns)
-_BANNER_SALES = ("sales register", "credit note register")
-_BANNER_PURCHASE = ("purchase register", "debit note register")
+#   "Sales Register"           → sales
+#   "Sales-D Register"         → sales  (Delhi branch's sales voucher type)
+#   "Sales-BR Register"        → sales  (Bangalore / branch sales)
+#   "Credit Note Register"     → sales  (sales returns)
+#   "Credit Note-D Register"   → sales  (Delhi sales returns)
+#   "Purchase Register"        → purchase
+#   "Purchase-D Register"      → purchase
+#   "Debit Note Register"      → purchase  (purchase returns)
+#   "Debit Note-D Register"    → purchase
+# Regex form so we tolerate any "-<branch>" suffix on the voucher type.
+_BANNER_SALES_RE = re.compile(
+    r'\b(?:sales|credit\s*note)(?:[\s-][\w-]*)?\s+register\b',
+    re.IGNORECASE)
+_BANNER_PURCHASE_RE = re.compile(
+    r'\b(?:purchase|debit\s*note)(?:[\s-][\w-]*)?\s+register\b',
+    re.IGNORECASE)
 
 
 def _norm(value: Any) -> str:
@@ -53,13 +64,17 @@ def _find_col(norms: list[str], synonyms: set[str]) -> int | None:
 def detect_kind(grid: list[list[Any]]) -> str | None:
     """Banner-row check for register type. Returns ``'sales'``,
     ``'purchase'``, or ``None`` if no Tally register banner is found.
+    Matches any "<vch type> Register" line, including branch-suffixed
+    variants like "Sales-D Register" or "Credit Note-D Register".
     """
     for row in grid[:10]:
         for cell in row:
-            t = _norm(cell)
-            if any(b in t for b in _BANNER_SALES):
+            if cell is None:
+                continue
+            text = str(cell)
+            if _BANNER_SALES_RE.search(text):
                 return "sales"
-            if any(b in t for b in _BANNER_PURCHASE):
+            if _BANNER_PURCHASE_RE.search(text):
                 return "purchase"
     return None
 
@@ -81,8 +96,8 @@ def detect_entity_name(grid: list[list[Any]]) -> str | None:
             text = str(cell).strip()
             if not text:
                 continue
-            low = text.lower()
-            if any(b in low for b in (*_BANNER_SALES, *_BANNER_PURCHASE)):
+            if (_BANNER_SALES_RE.search(text)
+                    or _BANNER_PURCHASE_RE.search(text)):
                 return None
             if text[0].isdigit():
                 continue
@@ -107,9 +122,9 @@ def detect_letterhead_text(grid: list[list[Any]]) -> str:
             text = str(cell).strip()
             if not text:
                 continue
-            low = text.lower()
             # Banner row marks end of letterhead.
-            if any(b in low for b in (*_BANNER_SALES, *_BANNER_PURCHASE)):
+            if (_BANNER_SALES_RE.search(text)
+                    or _BANNER_PURCHASE_RE.search(text)):
                 return " \n ".join(parts)
             parts.append(text)
     return " \n ".join(parts)

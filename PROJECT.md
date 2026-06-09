@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.53** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.54** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,59 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.54 — Credit/Debit Note registers + branch-suffixed banners
+Operator reported two files broken:
+
+* **BMCA delhi.xlsx** (banner ``Sales-D Register``) wasn't being read
+  at all — sniffer returned ``kind=None``.
+* **BMCA credit.xlsx** (banner ``Credit Note Register``) imported,
+  but every credit-note ledger line came through as ``amount=0`` in
+  the MIS — revenue silently dropped.
+
+Two distinct bugs.
+
+**1. Banner regex too literal.** v0.3.51's sniffer matched only the
+fixed strings ``"sales register"`` / ``"credit note register"`` as
+substrings. Tally's "-D" / "-BR" branch suffixes (Sales-D, Credit
+Note-D, Purchase-D, Debit Note-D) broke the substring scan. Fix:
+swapped both ``_BANNER_*`` constants for regexes that accept
+``(?:[\\s-][\\w-]*)?`` between the type and "register". Now matches
+"Sales-D Register", "Sales-BR Register", "Credit Note-D Register",
+and so on. 11/11 banner test cases pass.
+
+**2. Credit/Debit Notes have inverted sides in Tally.** A regular
+Sales voucher books revenue on the Credit column with "Cr" CC tags;
+a Credit Note (sales return) inverts this — ledger lines move to the
+Debit column with "Dr" CC tags. Same flip for Debit Notes inside
+a Purchase Register. The parser previously hard-coded
+``revenue_col = cr_i`` for the whole sales file, so every credit-note
+ledger line read as ``0`` from the Credit column and was silently
+skipped. Verified: BMCA credit.xls's 46 credit notes had 0 lines
+captured before this fix.
+
+Fix:
+
+* New helper ``_vch_side_and_sign(vch_type, file_kind)`` returns
+  ``(side, sign)`` per voucher. Credit Note → ``('dr', -1)``;
+  Debit Note → ``('cr', -1)``; ordinary Sales/Purchase keep the
+  file-level defaults.
+* ``parse_tally`` now picks side + sign **per voucher** off the
+  ``Vch Type`` cell of each voucher header, not once for the whole
+  file. Subsequent ledger lines + CC tags use the per-voucher side;
+  amounts are multiplied by the sign so returns book negative.
+* Net result: a ₹7,500 Credit Note for Vishal Kothari stores
+  ``amount = -7500`` on the voucher split; the partner P&L's SUMIFS
+  naturally nets it against gross sales. 11/11 side+sign unit tests
+  pass.
+
+Verified end-to-end on the two reported files:
+
+    BMCA delhi.xlsx   sales  Bilimoria Mehta & Co.    3 vchs   net = +269,400.00
+    BMCA credit.xlsx  sales  Bilimoria Mehta & Co.   46 vchs   net = -2,937,790.92
+
+Credit-note line amounts now flow through to the MIS with the right
+sign — partner totals will net correctly.
 
 ### v0.3.53 — End-to-end correctness on all 10 entity exports
 Operator handed over 10 Tally exports covering every entity in the

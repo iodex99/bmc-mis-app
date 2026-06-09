@@ -65,6 +65,37 @@ def _marker_side(row: list[Any]) -> str | None:
     return None
 
 
+def _vch_side_and_sign(vch_type: str, file_kind: str) -> tuple[str, int]:
+    """Return ``(side, sign)`` for the current voucher.
+
+    * ``side`` — which column the ledger lines AND their CC tags live in
+      (``'cr'`` = Credit column, ``'dr'`` = Debit column).
+    * ``sign`` — multiplier applied to the parsed amount before storage.
+      ``-1`` for credit/debit notes so they reduce the partner's
+      revenue/expense; ``+1`` for ordinary sales/purchases.
+
+    In a Sales Register, ordinary Sales vouchers have ledger lines on the
+    Credit side (revenue is credited). A Credit Note voucher is a sales
+    return — Tally inverts the sides: ledger lines move to Debit, CC tags
+    say "Dr", and the customer is credited the refund amount. The parser
+    has to flip side + apply sign=-1 for these vouchers, otherwise their
+    ledger lines read as amount=0 and disappear from the MIS.
+
+    Symmetric story for Debit Notes inside a Purchase Register.
+    """
+    t = (vch_type or "").strip().lower()
+    # Credit Note (sales return) — lines on Debit, sign -1.
+    if t.startswith("credit note"):
+        return "dr", -1
+    # Debit Note (purchase return) — lines on Credit, sign -1.
+    if t.startswith("debit note"):
+        return "cr", -1
+    # Defaults follow the file kind.
+    if file_kind == config.VCH_SALES:
+        return "cr", +1
+    return "dr", +1
+
+
 def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
                 kind: str) -> ParseResult:
     """Parse a Tally voucher-dump register into vouchers with per-line splits.
@@ -76,9 +107,12 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
     attributed to. Tax / GST / round-off lines are detected by keyword and
     aggregated into the voucher's ``tax_amount`` rather than becoming splits.
 
-    The same parser handles both **sales** (revenue lines on the Credit side,
-    Cr cost-centre tags) and **purchase** (expense lines on the Debit side,
-    Dr cost-centre tags) by flipping the "revenue side" based on *kind*.
+    The same parser handles every register variant — Sales, Sales-D
+    (Delhi suffix), Credit Note, Credit Note-D, Purchase, Debit Note —
+    by picking the right side + sign **per voucher** (not per file).
+    A Sales Register can legitimately include Credit Note vouchers, and
+    those need the side flipped (lines on Debit instead of Credit) with
+    sign=-1 (returns reduce the partner's net revenue).
     """
     result = ParseResult(file_type=kind)
     d_i = colmap.get("date")
@@ -88,11 +122,10 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
     dr_i = colmap.get("debit")
     cr_i = colmap.get("credit")
 
-    # For sales the items we care about (revenue, GST collected) live on the
-    # Credit side and their Dr/Cr tags say "Cr". For purchase it's the
-    # opposite — expense lines on Debit, with "Dr" tags.
-    revenue_side = "cr" if kind == config.VCH_SALES else "dr"
-    revenue_col = cr_i if kind == config.VCH_SALES else dr_i
+    # File-level default (used until the first voucher header arrives).
+    cur_side = "cr" if kind == config.VCH_SALES else "dr"
+    cur_col = cr_i if kind == config.VCH_SALES else dr_i
+    cur_sign = 1
 
     current: ParsedVoucher | None = None
     pending_line: VoucherLine | None = None
@@ -113,13 +146,20 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
             flush_pending()
             credit = to_number(_cell(row, cr_i)) or 0.0
             debit = to_number(_cell(row, dr_i)) or 0.0
-            gross = debit if kind == config.VCH_SALES else credit
+            # For sales/purchase the customer/vendor is debited/credited
+            # respectively — that's the "gross". For credit/debit notes the
+            # opposite side carries it.
+            vch_type = clean(_cell(row, vt_i))
+            cur_side, cur_sign = _vch_side_and_sign(vch_type, kind)
+            cur_col = cr_i if cur_side == "cr" else dr_i
+            party_col = dr_i if cur_side == "cr" else cr_i
+            gross = to_number(_cell(row, party_col)) or 0.0
             if gross == 0:
                 gross = max(credit, debit)
             current = ParsedVoucher(
                 date=date,
                 period=period_of(date),
-                vch_type=clean(_cell(row, vt_i)),
+                vch_type=vch_type,
                 vch_no=clean(_cell(row, vn_i)),
                 party_name=clean(_cell(row, p_i)),
                 kind=kind,
@@ -133,34 +173,28 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
 
         side = _marker_side(row)
         if side is not None:
-            # An indented Dr/Cr cost-centre tag. We only attribute the
-            # revenue-side tag to the current line — the other side is the
-            # contra (receivable for sales, payable for purchase) and not
-            # relevant to partner-level revenue.
-            if side == revenue_side and pending_line is not None:
+            # Indented Dr/Cr cost-centre tag. Attribute only when the
+            # marker matches the current voucher's ledger-line side.
+            if side == cur_side and pending_line is not None:
                 pending_line.cost_centre = clean(_cell(row, p_i)) or None
-                # An amount cross-check — first numeric cell on the row.
                 tag_amt = _first_number(row)
                 if tag_amt is not None and pending_line.amount == 0:
-                    pending_line.amount = float(tag_amt)
+                    pending_line.amount = float(tag_amt) * cur_sign
                 flush_pending()
             continue
 
-        # Plain ledger line (no Dr/Cr marker). Its amount is on the
-        # revenue side (Credit for sales, Debit for purchase).
+        # Plain ledger line (no Dr/Cr marker).
         head = clean(_cell(row, p_i))
         if not head:
             continue
-        amt = to_number(_cell(row, revenue_col))
+        amt = to_number(_cell(row, cur_col))
         if amt is None or amt == 0:
-            # Some Tally exports put the amount on the other side for
-            # contra-entries — ignore those, they're not revenue.
             continue
 
         flush_pending()
         pending_line = VoucherLine(
             service=head,
-            amount=float(amt),
+            amount=float(amt) * cur_sign,
             is_tax=is_tax_head(head),
         )
 
