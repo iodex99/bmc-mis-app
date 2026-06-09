@@ -29,9 +29,10 @@ from ..util import fmt_inr
 from .column_mapping import ColumnMappingDialog
 from .tally_pull import TallyPullWidget
 
+# Manual-pick file types. Sales / Purchase / Credit Note / Debit Note
+# registers from Tally are auto-detected from the file's letterhead +
+# header rows — they don't appear in this dropdown.
 _FILE_TYPE_LABELS = {
-    config.FILE_TYPE_SALES: "Tally — Sales Register",
-    config.FILE_TYPE_PURCHASE: "Tally — Purchase Register",
     config.FILE_TYPE_TIMESHEET: "Timesheet",
     config.FILE_TYPE_SALARY: "Salary & Reimbursements",
 }
@@ -51,6 +52,11 @@ class ImportPage(QWidget):
         self._mapping: dict | None = None
         self._signature: str = ""
         self._result = None
+        # When the sniffer recognises a Tally register, these are set and
+        # override the file-type dropdown (which now only carries the
+        # two non-auto-detectable kinds: Timesheet and Salary).
+        self._detected_kind: str | None = None
+        self._detected_entity_id: int | None = None
 
         # The page is taller than the window once both the Tally pull section
         # and the Excel fallback are visible, so wrap the whole thing in a
@@ -72,13 +78,15 @@ class ImportPage(QWidget):
         heading.setObjectName("pageHeading")
         outer.addWidget(heading)
         note = QLabel(
-            "Recommended: export the Sales / Purchase Register from Tally as "
-            "an Excel file and upload it below. Each ledger line keeps its "
-            "own cost-centre tag, so partner + manager are picked up directly "
-            "from the file. The Tally HTTP pull is a convenience for setups "
-            "whose Tally configuration exposes per-line cost centres over the "
-            "gateway — many installations don't, in which case stick with the "
-            "Excel upload.")
+            "Recommended: export Sales / Purchase / Credit Note / Debit Note "
+            "registers from Tally as Excel files and upload them below. "
+            "File type and entity are auto-detected from the export's "
+            "letterhead — the dropdown only matters for Timesheet and "
+            "Salary files, which don't carry a Tally banner. Each ledger "
+            "line keeps its own cost-centre tag, so partner + manager are "
+            "picked up directly from the file. The Tally HTTP pull below "
+            "is a convenience for setups whose Tally gateway exposes "
+            "per-line cost centres (many installations don't).")
         note.setObjectName("pageNote")
         note.setWordWrap(True)
         outer.addWidget(note)
@@ -88,10 +96,12 @@ class ImportPage(QWidget):
         fb = QVBoxLayout(fallback_box)
         fb.setSpacing(8)
         fb_note = QLabel(
-            "Sales / Purchase Registers exported from Tally are auto-detected "
-            "from their headers; new layouts only need column mapping once. "
-            "Multi-service vouchers and per-line cost-centre tags carry "
-            "through to the MIS without manual splitting.")
+            "Tally registers (Sales / Purchase / Credit Note / Debit Note) "
+            "are auto-detected from the file's letterhead — pick the file "
+            "and the type + entity fill themselves in. Use the dropdown "
+            "only when uploading a Timesheet or Salary file (those don't "
+            "carry a Tally banner). New non-Tally layouts only need column "
+            "mapping once.")
         fb_note.setWordWrap(True)
         fb_note.setObjectName("pageNote")
         fb.addWidget(fb_note)
@@ -183,6 +193,14 @@ class ImportPage(QWidget):
 
     @property
     def file_type(self) -> str:
+        """Sniffer-detected kind wins over the dropdown when present.
+
+        Tally voucher-dump exports (sales / purchase / credit-note /
+        debit-note registers) auto-detect to ``sales`` or ``purchase``.
+        For Timesheet / Salary files the dropdown is authoritative.
+        """
+        if self._detected_kind:
+            return self._detected_kind
         return self.type_combo.currentData()
 
     # -- workflow ------------------------------------------------------------
@@ -216,38 +234,52 @@ class ImportPage(QWidget):
         self.map_btn.setEnabled(True)
         self.commit_btn.setEnabled(False)
         self._result = None
+        self._detected_kind = None
+        self._detected_entity_id = None
         guess = excel_reader.guess_header_row(self._grid)
         self._signature = templates.layout_signature(self._grid, guess)
 
-        # 1. Voucher-dump sniffer — handles the "actual" Tally export format
-        #    automatically. If the file's headers fingerprint as a Tally
-        #    voucher-dump (Date + Particulars + Vch No + Debit + Credit),
-        #    we bypass the column-mapping dialog entirely and parse straight
-        #    away. Column positions can differ between entities and Tally
-        #    versions; the sniffer reads them from the header text.
-        ft = self.file_type
-        if ft in (config.FILE_TYPE_SALES, config.FILE_TYPE_PURCHASE):
-            sniffed = sniffer.sniff(self._grid)
-            if sniffed:
-                # If the banner says "Sales/Purchase Register" and disagrees
-                # with the file-type dropdown, prefer the banner — the
-                # operator may have picked the wrong type by mistake.
-                if sniffed["kind"] and sniffed["kind"] != ft:
-                    pos = self.type_combo.findData(sniffed["kind"])
+        # 1. Voucher-dump sniffer — Tally Sales / Purchase / Credit Note /
+        #    Debit Note registers carry a recognisable banner + header
+        #    structure. When sniffed, we auto-set the file kind AND
+        #    pre-populate the entity dropdown from the letterhead.
+        sniffed = sniffer.sniff(self._grid)
+        if sniffed and sniffed.get("kind"):
+            self._detected_kind = sniffed["kind"]
+            detected_msgs = [
+                "Sales register" if sniffed["kind"] == config.FILE_TYPE_SALES
+                else "Purchase register"]
+            # Auto-bind entity if the letterhead name matches a master row.
+            entity_name = sniffed.get("entity_name")
+            if entity_name:
+                eid = resolution.match_entity(entity_name)
+                if eid is not None:
+                    self._detected_entity_id = eid
+                    pos = self.entity_combo.findData(eid)
                     if pos >= 0:
-                        self.type_combo.setCurrentIndex(pos)
-                self._mapping = {
-                    "header_row": sniffed["header_row"],
-                    "columns": sniffed["colmap"],
-                }
-                self.status.setText(
-                    f"{self._path.name} — auto-detected voucher-dump layout "
-                    f"(header on row {sniffed['header_row'] + 1}).")
-                self._parse_and_preview()
-                return
+                        self.entity_combo.setCurrentIndex(pos)
+                    label = self.entity_combo.itemText(pos) if pos >= 0 \
+                        else entity_name
+                    detected_msgs.append(f"entity: {label}")
+                else:
+                    detected_msgs.append(
+                        f"entity \"{entity_name}\" — not in master, "
+                        "pick one below")
+            self._mapping = {
+                "header_row": sniffed["header_row"],
+                "columns": sniffed["colmap"],
+            }
+            self.status.setText(
+                f"{self._path.name}  ·  Detected: "
+                f"{'  ·  '.join(detected_msgs)}  "
+                f"(header on row {sniffed['header_row'] + 1})")
+            self._parse_and_preview()
+            return
 
         # 2. Template cache — used by the wide-flat sales format and the
-        #    timesheet / salary sheets.
+        #    timesheet / salary sheets. ``file_type`` falls back to the
+        #    dropdown here because the sniffer didn't recognise a Tally
+        #    register.
         saved = templates.find_template(self.file_type, self._signature)
         if saved:
             self._mapping = saved

@@ -255,6 +255,34 @@ MIGRATIONS: list[tuple[int, str]] = [
         -- (everything flows through the client master instead).
         ALTER TABLE clients ADD COLUMN manager_id INTEGER REFERENCES managers(id);
     """),
+    (7, """
+        -- Backfill the firm's 10-manager master into any existing database.
+        -- The v0.3.49 _first_run_seed got this right for fresh installs,
+        -- but databases initialised before that version still hold the
+        -- 4-row starter set. This migration adds the missing rows
+        -- idempotently (INSERT OR IGNORE on the compound code column,
+        -- which is UNIQUE) and binds each to its partner cost-centre.
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'RM - PM', 'Rajesh Malhotra',   id FROM cost_centres WHERE code='PM';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'SR - AM', 'Sahil Rathod',      id FROM cost_centres WHERE code='AM';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'UV - AM', 'Umesh Vishwakarma', id FROM cost_centres WHERE code='AM';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'GS - KS', 'Gaurav Siroya',     id FROM cost_centres WHERE code='KS';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'BS - SD', 'Bhavya Shah',       id FROM cost_centres WHERE code='SD';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'GS - AM', 'Gaurav Siroya',     id FROM cost_centres WHERE code='AM';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'BS - JV', 'Bhavik Shah',       id FROM cost_centres WHERE code='JV';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'KS - SD', 'Kiwa Shah',         id FROM cost_centres WHERE code='SD';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'HD - JV', 'Hitesh Doshi',      id FROM cost_centres WHERE code='JV';
+        INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
+            SELECT 'RR - VK', 'Rutwick Ruparelia', id FROM cost_centres WHERE code='VK';
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

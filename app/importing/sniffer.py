@@ -23,8 +23,16 @@ _VCH_TYPE_SYNS = {"vch type", "voucher type"}
 _DEBIT_SYNS = {"debit", "debit amount", "dr", "dr amount"}
 _CREDIT_SYNS = {"credit", "credit amount", "cr", "cr amount"}
 
-_BANNER_SALES = ("sales register",)
-_BANNER_PURCHASE = ("purchase register",)
+# Tally register banners. Credit/Debit Note Registers carry the same
+# ledger-line + cost-centre structure as Sales/Purchase Registers; they
+# just hold the return-side vouchers. For our schema both still book to
+# the same side (returns are signed amounts on the parent kind):
+#   "Sales Register"        → sales
+#   "Credit Note Register"  → sales  (sales returns)
+#   "Purchase Register"     → purchase
+#   "Debit Note Register"   → purchase  (purchase returns)
+_BANNER_SALES = ("sales register", "credit note register")
+_BANNER_PURCHASE = ("purchase register", "debit note register")
 
 
 def _norm(value: Any) -> str:
@@ -43,8 +51,8 @@ def _find_col(norms: list[str], synonyms: set[str]) -> int | None:
 
 
 def detect_kind(grid: list[list[Any]]) -> str | None:
-    """Look at the banner rows for a 'Sales Register' / 'Purchase Register'
-    marker. Returns ``'sales'``, ``'purchase'``, or ``None`` if neither.
+    """Banner-row check for register type. Returns ``'sales'``,
+    ``'purchase'``, or ``None`` if no Tally register banner is found.
     """
     for row in grid[:10]:
         for cell in row:
@@ -56,17 +64,52 @@ def detect_kind(grid: list[list[Any]]) -> str | None:
     return None
 
 
+def detect_entity_name(grid: list[list[Any]]) -> str | None:
+    """Pull the entity name from a Tally export's letterhead rows.
+
+    Tally exports start with 4-6 banner rows giving the company name,
+    address, then "<Type> Register" + a date range. The entity name is
+    almost always the very first non-blank cell of row 0. This returns
+    the raw string (un-normalised) so the caller can run their own
+    fuzzy match against the entities master.
+
+    Stops scanning at the first row whose text looks like a register
+    banner — past that we're into the table proper, not letterhead.
+    """
+    for row in grid[:8]:
+        for cell in row:
+            if cell is None:
+                continue
+            text = str(cell).strip()
+            if not text:
+                continue
+            low = text.lower()
+            # We've reached the register banner — past the letterhead.
+            if any(b in low for b in (*_BANNER_SALES, *_BANNER_PURCHASE)):
+                return None
+            # Heuristic: skip rows that look like an address line (number-
+            # heavy, contains comma) or a date range, prefer rows that
+            # look like a company name (Title-case-ish, no leading digit).
+            if text[0].isdigit():
+                continue
+            # Address lines almost always contain a comma; company names
+            # rarely do (except for "& Co.").
+            return text
+    return None
+
+
 def sniff(grid: list[list[Any]]) -> dict | None:
     """Sniff a Tally voucher-dump layout.
 
-    Returns ``{header_row, colmap, kind}`` or ``None`` if the file does not
-    look like a voucher-dump format. *colmap* uses canonical field names
-    (``date``, ``particulars``, ``vch_no``, ``vch_type``, ``debit``,
-    ``credit``). *kind* is ``'sales'`` / ``'purchase'`` / ``None``.
+    Returns ``{header_row, colmap, kind, entity_name}`` or ``None`` if
+    the file is not in a recognised voucher-dump format. ``kind`` is
+    ``'sales'`` / ``'purchase'`` / ``None``; ``entity_name`` is the
+    raw company name from the letterhead (or ``None``).
     """
     if not grid:
         return None
     kind = detect_kind(grid)
+    entity_name = detect_entity_name(grid)
 
     for r_idx, row in enumerate(grid[:30]):
         norms = [_norm(c) for c in row]
@@ -82,6 +125,7 @@ def sniff(grid: list[list[Any]]) -> dict | None:
         return {
             "header_row": r_idx,
             "kind": kind,
+            "entity_name": entity_name,
             "colmap": {
                 "date": d_col,
                 "particulars": p_col,

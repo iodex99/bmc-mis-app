@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.50** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.51** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,48 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.51 — Auto-detect file type + entity from Tally exports
+Two operator asks bundled.
+
+**1. Backfill the 10-manager master into existing databases.**
+v0.3.49 added the full manager list to ``_first_run_seed`` — that only
+fires on a fresh install. Migration **v7** does the same idempotent
+insert (INSERT OR IGNORE on the compound ``code``) on every existing
+DB on next launch. Verified that re-running ``init_db`` after a fresh
+init leaves the count at 10 (idempotent).
+
+**2. Auto-detect file type + entity from Tally registers; reduce
+the file-type dropdown to just Timesheet and Salary.**
+
+Tally exports always carry a recognisable letterhead:
+
+    Bilimoria Mehta & Co.
+    <address lines>
+    Sales Register     ← banner row
+    1-Jun-26 to 30-Jun-26
+
+So:
+
+- ``sniffer.detect_kind`` now recognises Credit Note Register +
+  Debit Note Register banners (mapped to sales / purchase
+  respectively — returns ride on the same kind as the parent).
+- New ``sniffer.detect_entity_name`` walks the top 8 rows for the
+  company name, skipping numeric/address lines.
+- New ``resolution.match_entity`` resolves a raw entity name to an
+  entity id (exact → alias → fuzzy ≥70% with 5-pt gap). Conservative
+  fallback to ``None`` when uncertain.
+- ImportPage's file-type dropdown now lists only ``Timesheet`` and
+  ``Salary & Reimbursements`` — the auto-detectable kinds aren't
+  user-pickable. After picking a file, if the sniffer recognises a
+  Tally banner, the page sets the internal kind from the banner AND
+  auto-selects the entity dropdown from the letterhead. Status line
+  shows what was detected, e.g.
+  ``Detected: Sales register · entity: Bilimoria Mehta & Co.``
+
+Verified on the operator's real BMCA file: kind='sales', entity
+'Bilimoria Mehta & Co.' both detected, header row 6 found,
+ImportPage constructs with the 2-option dropdown.
 
 ### v0.3.50 — Bulk client master import + fuzzy auto-link
 Three asks in one release:

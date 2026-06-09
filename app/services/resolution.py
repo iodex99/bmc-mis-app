@@ -76,6 +76,60 @@ def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
     return linked
 
 
+def match_entity(raw_name: str, *, fuzzy_threshold: int = 70
+                 ) -> int | None:
+    """Resolve a raw entity name to an entity id.
+
+    Checks (in order):
+
+    1. Exact normalised match against ``entities.name``.
+    2. Exact match against ``entity_aliases.alias``.
+    3. Fuzzy match (``token_sort_ratio``) against active entity names,
+       requiring at least ``fuzzy_threshold`` AND a 5-point gap to the
+       runner-up. Below that bar we return ``None`` — the operator
+       picks the entity manually.
+
+    Used by the Import page to auto-populate the entity dropdown from
+    the letterhead of a Tally export.
+    """
+    if not raw_name:
+        return None
+    key = norm(raw_name)
+    if not key:
+        return None
+    with transaction() as conn:
+        # Exact: canonical name.
+        row = conn.execute(
+            "SELECT id FROM entities WHERE lower(trim(name)) = ?",
+            (key,)).fetchone()
+        if row:
+            return row["id"]
+        # Exact: alias.
+        row = conn.execute(
+            "SELECT entity_id FROM entity_aliases "
+            "WHERE lower(trim(alias)) = ?",
+            (key,)).fetchone()
+        if row:
+            return row["entity_id"]
+        # Fuzzy across active entities.
+        entities = [(r["id"], r["name"]) for r in conn.execute(
+            "SELECT id, name FROM entities WHERE active = 1")]
+    if not entities:
+        return None
+    target = norm_loose(raw_name)
+    norms = {eid: norm_loose(name) for eid, name in entities}
+    ranked = process.extract(
+        target, norms, scorer=fuzz.token_sort_ratio, limit=3)
+    if not ranked:
+        return None
+    top_score = int(ranked[0][1])
+    top_id = ranked[0][2]
+    runner = int(ranked[1][1]) if len(ranked) > 1 else 0
+    if top_score >= fuzzy_threshold and (top_score - runner) >= 5:
+        return top_id
+    return None
+
+
 def apply_known_client_aliases(*, fuzzy_threshold: int = 70) -> int:
     """Auto-link unresolved rows whose raw name matches a known client/alias.
 
