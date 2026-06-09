@@ -76,15 +76,24 @@ def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
     return linked
 
 
-def match_entity(raw_name: str, *, fuzzy_threshold: int = 70
-                 ) -> int | None:
-    """Resolve a raw entity name to an entity id.
+def match_entity(raw_name: str, *,
+                  letterhead_text: str | None = None,
+                  fuzzy_threshold: int = 70
+                  ) -> int | None:
+    """Resolve a raw entity name (+ optional letterhead) to an entity id.
 
     Checks (in order):
 
-    1. Exact normalised match against ``entities.name``.
-    2. Exact match against ``entity_aliases.alias``.
-    3. Fuzzy match (``token_sort_ratio``) against active entity names,
+    1. **Letterhead alias scan** (when ``letterhead_text`` is given).
+       Walks every active entity's name + aliases looking for matches
+       inside the full letterhead text (lowercased substring). Picks
+       the entity with the longest distinctive match. This is what
+       lets us tell Bilimoria Mumbai (no "Bengaluru" in letterhead)
+       from Bilimoria Bangalore (has "Bengaluru" in letterhead) when
+       both share the company name "Bilimoria Mehta & Co.".
+    2. Exact normalised match against ``entities.name``.
+    3. Exact match against ``entity_aliases.alias``.
+    4. Fuzzy match (``token_sort_ratio``) against active entity names,
        requiring at least ``fuzzy_threshold`` AND a 5-point gap to the
        runner-up. Below that bar we return ``None`` — the operator
        picks the entity manually.
@@ -92,26 +101,87 @@ def match_entity(raw_name: str, *, fuzzy_threshold: int = 70
     Used by the Import page to auto-populate the entity dropdown from
     the letterhead of a Tally export.
     """
-    if not raw_name:
+    if not raw_name and not letterhead_text:
         return None
-    key = norm(raw_name)
-    if not key:
-        return None
+
     with transaction() as conn:
-        # Exact: canonical name.
+        # Step 1: letterhead alias scan.
+        #
+        # Aliases are the disambiguating signal — they're seeded
+        # explicitly to tell sibling entities apart (e.g. "Bengaluru"
+        # only belongs to the Bangalore branch). When two entities share
+        # a company name (Bilimoria Mumbai and Bangalore both call
+        # themselves "Bilimoria Mehta & Co."), a NAME match is ambiguous;
+        # an ALIAS match is decisive.
+        #
+        # Scoring per entity = (alias_hit_count, longest_alias_hit_length).
+        # Most alias hits wins; ties broken by longest individual alias.
+        # Name matches are tried only after the alias pass, and only
+        # when no aliases hit anywhere.
+        if letterhead_text:
+            low_letter = letterhead_text.lower()
+            alias_scored: dict[int, list[int]] = {}  # eid -> list of hit lengths
+            for r in conn.execute(
+                    "SELECT a.entity_id, a.alias FROM entity_aliases a "
+                    "JOIN entities e ON e.id = a.entity_id "
+                    "WHERE e.active = 1"):
+                low_alias = r["alias"].lower()
+                if low_alias in low_letter:
+                    alias_scored.setdefault(
+                        r["entity_id"], []).append(len(low_alias))
+            if alias_scored:
+                ranked = sorted(
+                    alias_scored.items(),
+                    key=lambda kv: (len(kv[1]), max(kv[1])),
+                    reverse=True)
+                top_eid, top_hits = ranked[0]
+                if len(ranked) == 1:
+                    return top_eid
+                _, runner_hits = ranked[1]
+                top_key = (len(top_hits), max(top_hits))
+                runner_key = (len(runner_hits), max(runner_hits))
+                if top_key > runner_key:
+                    return top_eid
+                # Otherwise fall through — tie among alias-matching
+                # entities, let the next steps disambiguate.
+
+            # Fallback: longest entity NAME found in the letterhead.
+            # Skipped when aliases tied so we don't override with the
+            # ambiguous-name signal we already rejected.
+            if not alias_scored:
+                name_scored: dict[int, int] = {}
+                for r in conn.execute(
+                        "SELECT id, name FROM entities WHERE active = 1"):
+                    low_name = r["name"].lower()
+                    if low_name in low_letter:
+                        prev = name_scored.get(r["id"], 0)
+                        if len(low_name) > prev:
+                            name_scored[r["id"]] = len(low_name)
+                if name_scored:
+                    ranked = sorted(name_scored.items(),
+                                     key=lambda kv: kv[1], reverse=True)
+                    if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+                        return ranked[0][0]
+
+        if not raw_name:
+            return None
+        key = norm(raw_name)
+        if not key:
+            return None
+        # Step 2: exact name.
         row = conn.execute(
             "SELECT id FROM entities WHERE lower(trim(name)) = ?",
             (key,)).fetchone()
         if row:
             return row["id"]
-        # Exact: alias.
+        # Step 3: exact alias.
         row = conn.execute(
             "SELECT entity_id FROM entity_aliases "
             "WHERE lower(trim(alias)) = ?",
             (key,)).fetchone()
         if row:
             return row["entity_id"]
-        # Fuzzy across active entities.
+        # Step 4: fuzzy on names.
         entities = [(r["id"], r["name"]) for r in conn.execute(
             "SELECT id, name FROM entities WHERE active = 1")]
     if not entities:

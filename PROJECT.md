@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.52** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.53** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,70 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.53 — End-to-end correctness on all 10 entity exports
+Operator handed over 10 Tally exports covering every entity in the
+firm (Bilimoria Mumbai, Bilimoria Bangalore, Corporate, MASD,
+MASD Advisors, Qualzen) — both Sales and Purchase Registers — and
+asked: does the system catch entity + voucher type correctly, and
+do the totals come out right? Sweep uncovered three real bugs that
+together would have caused silent revenue loss + entity misallocation.
+
+**Bug 1 — Revenue silently classified as tax.** The ``is_tax_head``
+heuristic used a substring scan with ``"gst "`` in its keyword list,
+which flags any ledger whose name contains "GST" — including service
+ledgers like ``GST Returns Filing Fees`` and ``GST Audit Fees``. In
+the operator's Bilimoria Jan'26 file alone, this misclassified
+₹1.17M of revenue (68/242 vouchers) as tax, silently zeroing them
+out of the P&L. Fix: switched to a word-boundary regex matching
+specific tax tokens (``\bcgst\b``, ``\btds\b``, ``\bround[-\s]?off\b``,
+``output gst`` / ``input gst``). 19-case unit test covers the
+revenue-vs-tax boundary.
+
+**Bug 2 — Bangalore branch always mapped to Mumbai HQ.** Bilimoria's
+Mumbai and Bangalore entities share the same legal name
+(``Bilimoria Mehta & Co.``) — only the address line distinguishes
+them. v0.3.51's entity matcher only read row 0 (the name), so BRL
+files matched Mumbai every time. Fix:
+
+* ``sniffer.detect_letterhead_text`` now returns the full
+  letterhead block (name + address + contact), not just row 0.
+* ``match_entity`` scans the letterhead for entity-alias hits and
+  scores by (alias_hit_count, longest_alias_length). Aliases are
+  the distinguishing signal — they're seeded explicitly for the
+  ambiguous cases. Name matches are only a fallback when no
+  aliases hit anywhere.
+* Seed adds disambiguating aliases:
+  - Bangalore: ``Bengaluru``, ``Bangalore``, ``Jayanagar``
+  - Corporate: ``BMC Corporate Solutions Pvt Ltd``, ``BMC Corporate``
+  - MASD: ``MASD ADVISORS PRIVATE LIMITED``, ``MASD & CO LLP``
+  BRL letterhead now scores: entity 6 with 2 alias hits
+  (``Bengaluru``, ``Jayanagar``) > entity 1 with 1 hit
+  (``Bilimoria``) → Bangalore wins correctly.
+
+**Bug 3 — Migration v8 ran before its data existed.** Initial fix
+put the new aliases in migration v8, but the migration runs BEFORE
+``_seed`` populates the entities table — every ``INSERT INTO
+entity_aliases SELECT id FROM entities WHERE name=…`` returned
+zero rows. Moved the seed of these aliases into ``_seed`` (where
+entities are already in place) alongside the original ``Bilimoria``
+/ ``Corporate`` / ``Advisors`` short forms.
+
+End-to-end verification on the operator's 10 real exports:
+
+    OK Advisor Purchase Jan 26.xls         MASD Advisors          1,818,000 / 1,818,000
+    OK Advisor Sale Jan 26.xls             MASD Advisors            646,282 /   646,282
+    OK BRL Purchase Jan 26.xls             Bilimoria … (Bangalore)   92,536 /    92,536
+    OK BRL Sale Jan 26.xls                 Bilimoria … (Bangalore)   55,400 /    55,400
+    OK Bilimoria Sale 2026.xls             Bilimoria Mehta & Co. 17,859,438 / 17,859,438
+    OK Bilomoria Purchase Jan 26.xls       Bilimoria Mehta & Co.  3,190,899 /  3,190,899
+    OK Corporate Purchase Jan 26.xls       BM Corporate             377,800 /   377,800
+    OK Corporate Sale Jan 26.xls           BM Corporate             697,823 /   697,823
+    OK MASD Purchase Jan 26.xls            MASD & CO              1,450,430 /  1,450,430
+    OK Qualzen Sale Jan 26.xls             Qualzen                   50,000 /    50,000
+
+All 10: correct kind, correct entity, parsed gross == Tally
+bottom-row total to the paise.
 
 ### v0.3.52 — Bulk employee master import + fuzzy-link unresolved
 Operator dropped an EmployeeData Excel (125 rows of name + cost-centre

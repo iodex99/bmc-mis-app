@@ -249,10 +249,15 @@ class ImportPage(QWidget):
             detected_msgs = [
                 "Sales register" if sniffed["kind"] == config.FILE_TYPE_SALES
                 else "Purchase register"]
-            # Auto-bind entity if the letterhead name matches a master row.
+            # Auto-bind entity. The matcher uses the full letterhead text
+            # (not just the company name) so siblings sharing the same
+            # name but different addresses — e.g. Bilimoria Mumbai vs
+            # Bangalore — are picked apart via location aliases.
             entity_name = sniffed.get("entity_name")
-            if entity_name:
-                eid = resolution.match_entity(entity_name)
+            letterhead = sniffed.get("letterhead_text")
+            if entity_name or letterhead:
+                eid = resolution.match_entity(
+                    entity_name or "", letterhead_text=letterhead)
                 if eid is not None:
                     self._detected_entity_id = eid
                     pos = self.entity_combo.findData(eid)

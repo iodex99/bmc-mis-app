@@ -69,9 +69,7 @@ def detect_entity_name(grid: list[list[Any]]) -> str | None:
 
     Tally exports start with 4-6 banner rows giving the company name,
     address, then "<Type> Register" + a date range. The entity name is
-    almost always the very first non-blank cell of row 0. This returns
-    the raw string (un-normalised) so the caller can run their own
-    fuzzy match against the entities master.
+    almost always the very first non-blank cell of row 0.
 
     Stops scanning at the first row whose text looks like a register
     banner — past that we're into the table proper, not letterhead.
@@ -84,18 +82,37 @@ def detect_entity_name(grid: list[list[Any]]) -> str | None:
             if not text:
                 continue
             low = text.lower()
-            # We've reached the register banner — past the letterhead.
             if any(b in low for b in (*_BANNER_SALES, *_BANNER_PURCHASE)):
                 return None
-            # Heuristic: skip rows that look like an address line (number-
-            # heavy, contains comma) or a date range, prefer rows that
-            # look like a company name (Title-case-ish, no leading digit).
             if text[0].isdigit():
                 continue
-            # Address lines almost always contain a comma; company names
-            # rarely do (except for "& Co.").
             return text
     return None
+
+
+def detect_letterhead_text(grid: list[list[Any]]) -> str:
+    """Join the company-name + address + contact rows into a single
+    blob the entity matcher can search through.
+
+    Important when two entities share the same company name but live at
+    different addresses (e.g. Bilimoria Mumbai vs Bangalore). The
+    matcher scans this text for distinguishing tokens like "Bengaluru"
+    or "BMC Corporate" to disambiguate.
+    """
+    parts: list[str] = []
+    for row in grid[:8]:
+        for cell in row:
+            if cell is None:
+                continue
+            text = str(cell).strip()
+            if not text:
+                continue
+            low = text.lower()
+            # Banner row marks end of letterhead.
+            if any(b in low for b in (*_BANNER_SALES, *_BANNER_PURCHASE)):
+                return " \n ".join(parts)
+            parts.append(text)
+    return " \n ".join(parts)
 
 
 def sniff(grid: list[list[Any]]) -> dict | None:
@@ -110,6 +127,7 @@ def sniff(grid: list[list[Any]]) -> dict | None:
         return None
     kind = detect_kind(grid)
     entity_name = detect_entity_name(grid)
+    letterhead = detect_letterhead_text(grid)
 
     for r_idx, row in enumerate(grid[:30]):
         norms = [_norm(c) for c in row]
@@ -126,6 +144,7 @@ def sniff(grid: list[list[Any]]) -> dict | None:
             "header_row": r_idx,
             "kind": kind,
             "entity_name": entity_name,
+            "letterhead_text": letterhead,
             "colmap": {
                 "date": d_col,
                 "particulars": p_col,

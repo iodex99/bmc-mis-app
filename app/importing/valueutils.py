@@ -8,9 +8,17 @@ from typing import Any
 
 from dateutil import parser as _dtparser
 
-_TAX_KEYWORDS = (
-    "cgst", "sgst", "igst", "gst ", "tcs", "tds", "round off", "roundoff",
-)
+# Substring matching ("gst " in "GST Returns Filing Fees") wrongly flagged
+# real-revenue ledgers as tax — a 68/242 silent revenue loss in the
+# Bilimoria Jan'26 file. Switched to word-boundary regex so only true
+# tax-ledger names (CGST/SGST/IGST/TDS/TCS standalone tokens, or
+# "Output GST"/"Input GST" patterns, or Round-Off) are caught. Pure
+# revenue ledgers that happen to contain the word "GST" (e.g.
+# "GST Returns Filing Fees", "GST Audit Fees") no longer trigger.
+_TAX_REGEX = re.compile(
+    r'\b(?:cgst|sgst|igst|tds|tcs|round[\s-]?off|roundoff'
+    r'|(?:output|input)\s+gst)\b',
+    re.IGNORECASE)
 
 
 def clean(value: Any) -> str:
@@ -86,9 +94,14 @@ def mis_period_for_timesheet_date(value: Any) -> str | None:
 
 
 def is_tax_head(particulars: str) -> bool:
-    """True if a ledger head looks like a tax / round-off line, not a real expense."""
-    low = particulars.lower()
-    return any(k in low for k in _TAX_KEYWORDS)
+    """True if a ledger head looks like a tax / round-off line, not a real
+    revenue / expense ledger.
+
+    Word-boundary match — see ``_TAX_REGEX`` for the rationale.
+    """
+    if not particulars:
+        return False
+    return bool(_TAX_REGEX.search(particulars))
 
 
 def hours_from_duration(duration: Any, day_fraction: Any = None) -> float:

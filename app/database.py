@@ -283,6 +283,47 @@ MIGRATIONS: list[tuple[int, str]] = [
         INSERT OR IGNORE INTO managers(code, name, cost_centre_id)
             SELECT 'RR - VK', 'Rutwick Ruparelia', id FROM cost_centres WHERE code='VK';
     """),
+    (8, """
+        -- Entity letterhead aliases. Tally exports identify the entity
+        -- via the letterhead (company name + address); auto-detection
+        -- has to handle two awkward cases that v0.3.51 couldn't:
+        --
+        --  1. The Bangalore branch ('Bilimoria Mehta & Co. (Bangalore)')
+        --     uses the SAME company name as the Mumbai HQ — only the
+        --     address line distinguishes them. Adding 'Bengaluru' /
+        --     'Bangalore' / 'Jayanagar' as aliases for the Bangalore
+        --     entity lets the letterhead-scan matcher pick the right
+        --     one off the address.
+        --
+        --  2. The Corporate entity is in the master as
+        --     'Bilimoria Mehta Corporate' but in Tally it's named
+        --     'BMC Corporate Solutions Pvt Ltd' — too different for
+        --     fuzzy match. Adding explicit aliases for the legal name
+        --     and the 'BMC Corporate' short form bridges that gap.
+        --
+        --  3. MASD entities export with their full legal names
+        --     ('MASD ADVISORS PRIVATE LIMITED', 'MASD & CO LLP') —
+        --     fuzzy already catches these but explicit aliases are
+        --     faster, cheaper, and unambiguous.
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'Bengaluru' FROM entities WHERE name='Bilimoria Mehta & Co. (Bangalore)';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'Bangalore' FROM entities WHERE name='Bilimoria Mehta & Co. (Bangalore)';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'Jayanagar' FROM entities WHERE name='Bilimoria Mehta & Co. (Bangalore)';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'BMC Corporate Solutions Pvt Ltd' FROM entities WHERE name='Bilimoria Mehta Corporate';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'BMC Corporate Solutions' FROM entities WHERE name='Bilimoria Mehta Corporate';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'BMC Corporate' FROM entities WHERE name='Bilimoria Mehta Corporate';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'MASD ADVISORS PRIVATE LIMITED' FROM entities WHERE name='MASD Advisors';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'MASD Advisors Private Limited' FROM entities WHERE name='MASD Advisors';
+        INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
+            SELECT id, 'MASD & CO LLP' FROM entities WHERE name='MASD & CO';
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
@@ -350,10 +391,28 @@ def _seed(conn: sqlite3.Connection) -> None:
     for name in entities:
         conn.execute("INSERT INTO entities(name) VALUES (?)", (name,))
 
+    # Entity aliases — short forms + alternate names + location-only
+    # tokens that appear in Tally letterheads. The matcher scans the
+    # letterhead for any of these to pick the right entity when company
+    # names collide (e.g. Bilimoria Mumbai and Bangalore share the
+    # legal name; "Bengaluru" disambiguates).
     for alias, ent in [
+        # Short forms.
         ("Bilimoria", "Bilimoria Mehta & Co."),
         ("Corporate", "Bilimoria Mehta Corporate"),
         ("Advisors", "MASD Advisors"),
+        # Bangalore branch — distinguished from Mumbai by address tokens.
+        ("Bengaluru", "Bilimoria Mehta & Co. (Bangalore)"),
+        ("Bangalore", "Bilimoria Mehta & Co. (Bangalore)"),
+        ("Jayanagar", "Bilimoria Mehta & Co. (Bangalore)"),
+        # Tally's legal-name spellings for Corporate / MASD entities.
+        ("BMC Corporate Solutions Pvt Ltd",
+         "Bilimoria Mehta Corporate"),
+        ("BMC Corporate Solutions", "Bilimoria Mehta Corporate"),
+        ("BMC Corporate", "Bilimoria Mehta Corporate"),
+        ("MASD ADVISORS PRIVATE LIMITED", "MASD Advisors"),
+        ("MASD Advisors Private Limited", "MASD Advisors"),
+        ("MASD & CO LLP", "MASD & CO"),
     ]:
         row = conn.execute("SELECT id FROM entities WHERE name = ?",
                            (ent,)).fetchone()
