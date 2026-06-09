@@ -24,25 +24,35 @@ _VCH_TYPE_SYNS = {"vch type", "voucher type"}
 _DEBIT_SYNS = {"debit", "debit amount", "dr", "dr amount"}
 _CREDIT_SYNS = {"credit", "credit amount", "cr", "cr amount"}
 
-# Tally register banners. Credit/Debit Note Registers carry the same
-# ledger-line + cost-centre structure as Sales/Purchase Registers; they
-# just hold the return-side vouchers. For our schema both still book to
-# the same side (returns are signed amounts on the parent kind):
-#   "Sales Register"           → sales
-#   "Sales-D Register"         → sales  (Delhi branch's sales voucher type)
-#   "Sales-BR Register"        → sales  (Bangalore / branch sales)
-#   "Credit Note Register"     → sales  (sales returns)
-#   "Credit Note-D Register"   → sales  (Delhi sales returns)
-#   "Purchase Register"        → purchase
+# Tally register banners. Each register carries the same ledger-line +
+# cost-centre structure; what changes is the SIDE the revenue/expense
+# sits on and whether the voucher adds to or subtracts from its kind.
+#
+# In this firm's workflow:
+#   "Sales Register"           → sales       (revenue, +ve)
+#   "Sales-D Register"         → sales       (Delhi branch sales)
+#   "Sales-BR Register"        → sales       (Bangalore branch sales)
+#   "Credit Note Register"     → sales       (sales returns, -ve)
+#   "Credit Note-D Register"   → sales       (Delhi sales returns)
+#   "Debit Note Register"      → sales       (SUPPLEMENTARY sales, +ve)
+#   "Debit Note-D Register"    → sales       (Delhi supplementary sales)
+#   "Purchase Register"        → purchase    (expense, +ve)
 #   "Purchase-D Register"      → purchase
-#   "Debit Note Register"      → purchase  (purchase returns)
-#   "Debit Note-D Register"    → purchase
+#
+# Why Debit Notes route to sales: in this firm's accounting practice,
+# Debit Notes are issued BY the firm TO clients as supplementary
+# invoices (additional billing on top of the original Sales invoice).
+# They MUST add to the partner's revenue, not subtract from expenses.
+# v0.3.55 had them on the purchase side (treated as purchase returns
+# which is the textbook interpretation) — but that's wrong for this
+# firm's books.
+#
 # Regex form so we tolerate any "-<branch>" suffix on the voucher type.
 _BANNER_SALES_RE = re.compile(
-    r'\b(?:sales|credit\s*note)(?:[\s-][\w-]*)?\s+register\b',
+    r'\b(?:sales|credit\s*note|debit\s*note)(?:[\s-][\w-]*)?\s+register\b',
     re.IGNORECASE)
 _BANNER_PURCHASE_RE = re.compile(
-    r'\b(?:purchase|debit\s*note)(?:[\s-][\w-]*)?\s+register\b',
+    r'\b(?:purchase)(?:[\s-][\w-]*)?\s+register\b',
     re.IGNORECASE)
 
 

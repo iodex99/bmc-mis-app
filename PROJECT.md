@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.55** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.56** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,49 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.56 — Debit Notes: supplementary sales (+ve revenue), not purchase returns
+Operator reported Debit Note entries booking to expenses as negative
+figures, but in this firm's accounting practice Debit Notes are
+**supplementary sales invoices** (additional bills raised on top of
+the original Sales invoice to clients) — they must add to the
+partner's revenue, not subtract from expenses.
+
+v0.3.54 treated Debit Notes as the textbook "purchase return"
+interpretation: ``kind='expense'``, sign=-1. Wrong for this firm.
+
+Three coordinated changes — plus a data-fix migration so the live DB
+gets corrected on first launch without a re-import:
+
+**Sniffer**. ``Debit Note Register`` / ``Debit Note-D Register``
+banners now route to ``kind='sales'`` (previously purchase).
+Updated the comment block in ``sniffer.py`` so the next person
+reading the code understands the firm-specific interpretation.
+
+**Parser ``_vch_side_and_sign``**. ``Debit Note`` → ``('cr', +1)``
+(was ``('cr', -1)``). Lines on the Credit column like a regular
+Sales voucher, sign +1 so they add to the partner's revenue.
+Credit Notes stay as ``('dr', -1)`` (sales returns reduce revenue).
+7/7 unit tests pass.
+
+**Migration v9**. Reclassifies any already-imported DN data in the
+live DB:
+
+* Snapshots vouchers where ``kind='expense' AND vch_type LIKE
+  'Debit Note%'`` into a TEMP table,
+* Flips ``voucher_splits.amount`` sign (``-X`` → ``+X``) on those
+  vouchers' splits,
+* Updates ``vouchers.kind`` from ``'expense'`` to ``'sales'``.
+
+Snapshot-then-mutate so the two UPDATEs don't see each other's
+effects. Idempotent — a second run finds zero expense-side DNs and
+does nothing. Regular Purchase vouchers (control case in the smoke
+test) untouched.
+
+End-to-end verified: synthesized DB with two DN vouchers (one Mumbai,
+one Delhi suffix) and a regular Purchase row. After v9 migration: DNs
+flipped to ``sales`` + positive amounts, Purchase row untouched.
+Idempotent re-run produces no further changes.
 
 ### v0.3.55 — "Clear all data" preserves every master table
 Operator noticed that "Clear all data" was wiping the Clients and

@@ -71,25 +71,28 @@ def _vch_side_and_sign(vch_type: str, file_kind: str) -> tuple[str, int]:
     * ``side`` — which column the ledger lines AND their CC tags live in
       (``'cr'`` = Credit column, ``'dr'`` = Debit column).
     * ``sign`` — multiplier applied to the parsed amount before storage.
-      ``-1`` for credit/debit notes so they reduce the partner's
-      revenue/expense; ``+1`` for ordinary sales/purchases.
 
     In a Sales Register, ordinary Sales vouchers have ledger lines on the
     Credit side (revenue is credited). A Credit Note voucher is a sales
     return — Tally inverts the sides: ledger lines move to Debit, CC tags
-    say "Dr", and the customer is credited the refund amount. The parser
-    has to flip side + apply sign=-1 for these vouchers, otherwise their
-    ledger lines read as amount=0 and disappear from the MIS.
+    say "Dr". The parser flips side + applies sign=-1 so returns reduce
+    revenue.
 
-    Symmetric story for Debit Notes inside a Purchase Register.
+    Debit Notes are this firm's "supplementary sales" mechanism: an
+    additional bill raised on top of the original Sales invoice. Tally
+    books them with the customer DEBITED (party col) and revenue
+    CREDITED — structurally identical to a regular Sales voucher.
+    So Debit Note → ``('cr', +1)``, treating it as an addition to the
+    partner's revenue.
     """
     t = (vch_type or "").strip().lower()
     # Credit Note (sales return) — lines on Debit, sign -1.
     if t.startswith("credit note"):
         return "dr", -1
-    # Debit Note (purchase return) — lines on Credit, sign -1.
+    # Debit Note (supplementary sales invoice in this firm's books) —
+    # lines on Credit (same as Sales), sign +1 (ADDS to revenue).
     if t.startswith("debit note"):
-        return "cr", -1
+        return "cr", +1
     # Defaults follow the file kind.
     if file_kind == config.VCH_SALES:
         return "cr", +1

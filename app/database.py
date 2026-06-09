@@ -324,6 +324,39 @@ MIGRATIONS: list[tuple[int, str]] = [
         INSERT OR IGNORE INTO entity_aliases(entity_id, alias)
             SELECT id, 'MASD & CO LLP' FROM entities WHERE name='MASD & CO';
     """),
+    (9, """
+        -- Reclassify already-imported Debit Note vouchers from expense
+        -- (textbook "purchase return" interpretation) to sales (this
+        -- firm's "supplementary sales invoice" interpretation), and
+        -- flip the sign on their splits from negative to positive so
+        -- they ADD to partner revenue instead of subtracting from
+        -- expenses.
+        --
+        -- v0.3.54 had Debit Note Registers landing in kind='expense'
+        -- with line amounts negated (sign=-1). v0.3.56 treats them as
+        -- revenue-positive; this migration brings any pre-v0.3.56
+        -- already-imported DN data into the new shape so the operator
+        -- doesn't have to clear + re-import to get a correct MIS.
+        --
+        -- Snapshot the targets to a TEMP table before mutating so the
+        -- two UPDATEs don't see each other's effects. Idempotent: a
+        -- second run finds zero rows because there are no more
+        -- expense-side DNs after the first run.
+        CREATE TEMP TABLE _dn_to_fix AS
+            SELECT id FROM vouchers
+             WHERE kind = 'expense'
+               AND lower(vch_type) LIKE 'debit note%';
+
+        UPDATE voucher_splits
+           SET amount = -amount
+         WHERE voucher_id IN (SELECT id FROM _dn_to_fix);
+
+        UPDATE vouchers
+           SET kind = 'sales'
+         WHERE id IN (SELECT id FROM _dn_to_fix);
+
+        DROP TABLE _dn_to_fix;
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
