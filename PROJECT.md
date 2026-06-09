@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.54** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.55** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,38 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.55 — "Clear all data" preserves every master table
+Operator noticed that "Clear all data" was wiping the Clients and
+Employees masters while leaving Entities, Cost Centres and Managers
+intact. Asymmetric and surprising — those masters cost hours of
+bulk-import + curation work and shouldn't disappear when the operator
+just wants to redo a stale import.
+
+Root cause: ``reset_all_data`` was deleting from **every** table
+(``SELECT name FROM sqlite_master``), then calling ``_seed`` which
+only re-seeds entities, cost centres, managers, and entity aliases.
+Clients / employees / services / targets / saved CC-string mappings
+/ column templates all got nuked with no restore.
+
+Fix: inverted the logic. Reset now explicitly **wipes** only the
+transactional / imported tables:
+
+* ``import_batches``
+* ``vouchers`` + ``voucher_splits``
+* ``timesheet_entries``
+* ``salary_entries``
+
+Everything else — the entire Master Data UI plus saved CC-string
+mappings, column templates, and app settings — is preserved. The
+``_seed`` call after the wipe is now a no-op safety net for the
+exceedingly rare half-broken DB case.
+
+Updated the danger-zone copy + confirmation dialog so the operator
+can see what stays vs. what goes before pressing the button.
+
+Verified end-to-end: 13/13 master + config tables unchanged after
+reset; 5/5 transactional tables wiped to zero.
 
 ### v0.3.54 — Credit/Debit Note registers + branch-suffixed banners
 Operator reported two files broken:

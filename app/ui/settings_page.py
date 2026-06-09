@@ -161,9 +161,10 @@ class SettingsPage(QWidget):
         d = QVBoxLayout(danger)
         d.addWidget(QLabel(
             "Permanently delete every imported voucher, timesheet and salary "
-            "row, plus every mapping and operator-created master record. "
-            "Firm masters (entities, partners, managers) are reset to their "
-            "factory defaults. This cannot be undone."))
+            "row, so a stale import can be redone from scratch. Master data "
+            "(entities, cost centres, managers, clients, employees, "
+            "services, targets, saved CC-string mappings, column templates) "
+            "is preserved. This cannot be undone."))
         reset_row = QHBoxLayout()
         reset_btn = QPushButton("Clear all data…")
         reset_btn.setObjectName("danger")
@@ -260,14 +261,20 @@ class SettingsPage(QWidget):
             self, "Clear all data?",
             "<b>This will permanently delete:</b>"
             "<ul>"
-            "<li>All imported vouchers, timesheets and salary rows</li>"
-            "<li>All client / employee / cost-centre-string mappings</li>"
-            "<li>All saved column-mapping templates</li>"
-            "<li>All operator-created clients, employees, services and "
-            "targets</li>"
+            "<li>All imported vouchers and their splits</li>"
+            "<li>All imported timesheet rows</li>"
+            "<li>All imported salary rows</li>"
+            "<li>The import-batch history</li>"
             "</ul>"
-            "<p>Firm masters (entities, partners and the 4 named managers) "
-            "are reset to factory defaults.</p>"
+            "<b>This will be preserved:</b>"
+            "<ul>"
+            "<li>Master Data — entities, cost centres, managers, "
+            "<b>clients</b>, <b>employees</b>, services, annual targets, "
+            "and every alias / mapping you've curated.</li>"
+            "<li>Saved CC-string mappings (partner + manager resolutions "
+            "from the Review tab).</li>"
+            "<li>Column-mapping templates and app settings.</li>"
+            "</ul>"
             "<p><b>This cannot be undone.</b></p>",
             QMessageBox.Cancel | QMessageBox.Yes, QMessageBox.Cancel)
         if first != QMessageBox.Yes:
