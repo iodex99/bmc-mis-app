@@ -357,6 +357,20 @@ MIGRATIONS: list[tuple[int, str]] = [
 
         DROP TABLE _dn_to_fix;
     """),
+    (10, """
+        -- Fixed office overhead per employee, set by management per
+        -- month. Used in salary costing: each employee's monthly cost
+        -- becomes (salary + this amount), distributed across the
+        -- partner cost-centres via their timesheet hours. Settable
+        -- per period since management can revise it month-to-month.
+        CREATE TABLE IF NOT EXISTS fixed_office_overhead (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            period                TEXT NOT NULL UNIQUE,
+            amount_per_employee   REAL NOT NULL DEFAULT 0,
+            active                INTEGER NOT NULL DEFAULT 1,
+            created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

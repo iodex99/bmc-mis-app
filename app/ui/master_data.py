@@ -104,6 +104,13 @@ SPECS: list[TableSpec] = [
         Field("cost_centre_id", "Cost centre", "fk", fk_table="cost_centres"),
         Field("target_amount", "Target amount", "float"),
     ], soft_delete=False),
+    # Per-month management-decided overhead added to each employee's
+    # cost before timesheet-based partner allocation. See calc.py
+    # _build_labour_facts for how the amount flows into the MIS.
+    TableSpec("fixed_office_overhead", "Fixed Office Overhead", [
+        Field("period", "Period (YYYY-MM, e.g. 2026-05)"),
+        Field("amount_per_employee", "Amount per employee", "float"),
+    ], soft_delete=False, order_by="period DESC"),
 ]
 
 

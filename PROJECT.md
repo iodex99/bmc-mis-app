@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.56** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.57** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,65 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.57 — Fixed office overhead + per-CC salary allocation + client billing
+Three connected enhancements driven by the operator's salary-costing
+workflow.
+
+**1. New ``fixed_office_overhead`` master tab (migration v10).** Table
+holds per-period (YYYY-MM) ``amount_per_employee``. Editable in
+Master Data → Fixed Office Overhead. Management revises monthly.
+
+**2. Salary cost allocation rewritten.** Old behaviour: per-employee
+rate = ``salary_paid / actual_timesheet_hours``, so an under-filled
+timesheet inflated the rate. New behaviour:
+
+* Per (employee, period): ``total_cost = salary_paid + overhead``
+  where ``overhead = fixed_office_overhead.amount_per_employee`` for
+  that period.
+* ``rate = total_cost / (days_in_month × 8)`` — uses the firm's
+  standard month-hours, not actual logged hours. A 250-hour timesheet
+  and a 12-hour timesheet now produce the same hourly rate.
+* Each timesheet line books ``hours × rate`` against the client's
+  cost centre.
+* Any residual (``standard_hours − total_logged``) goes to the
+  employee's home cost centre (``employees.default_cost_centre_id``,
+  fallback to salary-row CC, fallback to Office) so the full monthly
+  cost lands somewhere — no labour cost silently vanishes when a
+  timesheet is sparse.
+
+Worked example from the smoke test: Sahil's home is AM. May 2026 has
+31 × 8 = 248 standard hours. Salary ₹50k + overhead ₹10k → rate
+₹241.94/h. Timesheet: 100h Client ABC (AM) + 4h Client XYZ (JV) +
+8h Client LMN (KS). Residual = 248-112 = 136h to AM.
+
+  AM total: (100+136) × 241.94 = ₹57,096.77
+  JV total:        4 × 241.94 = ₹  967.74
+  KS total:        8 × 241.94 = ₹1,935.48
+                                ─────────
+  Sum:                          ₹60,000.00  ← matches salary+overhead
+
+**3. Sheet renamed "Labour" → "Salary".** Every internal helper,
+SUMIFS reference, sheet name, Cost Centre P&L column header
+("Salary Cost"), and footnote updated. Comparatives sheet's prior-
+period lookup updated too.
+
+**4. New "Client Billing" sheet.** Client × period matrix mirroring
+the operator's reference layout (``client wise biling.xlsx``):
+
+    Client            | Grand Total |  May 26  |  Jun 26  |  …
+    Client ABC        |     75,000  |   75,000 |          |  …
+    TATA SONS PVT     |  1,01,80,000|  …       |  …       |  …
+
+Sorted by Grand Total descending; final TOTAL row summed via formula.
+Credit/Debit notes flow through with their signs so the net billing
+nets returns automatically.
+
+End-to-end smoke test: synthesized employee + 3 clients in 3 partner
+cost centres + salary + overhead + revenue → all numbers reconcile
+to the paise. Sheets present: ``Salary`` ✓, ``Labour`` absent ✓,
+``Client Billing`` ✓. MasterDataPage constructs with the new
+"Fixed Office Overhead" tab.
 
 ### v0.3.56 — Debit Notes: supplementary sales (+ve revenue), not purchase returns
 Operator reported Debit Note entries booking to expenses as negative

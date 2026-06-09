@@ -152,15 +152,16 @@ def generate(data: MISData, path: str | Path,
     _sheet_partner_manager(wb, data, lbl)
     _sheet_entity(wb, data, lbl)
     _sheet_service(wb, data, lbl)
+    _sheet_client_billing(wb, data, lbl)
     if compare is not None:
         _sheet_comparatives(wb, data, compare, lbl, rows_pl)
     _sheet_revenue(wb, data, lbl)
     _sheet_expenses(wb, data, lbl)
-    _sheet_labour(wb, data, lbl)
+    _sheet_salary(wb, data, lbl)
     if compare is not None:
         _sheet_revenue(wb, compare, lbl, CMP)
         _sheet_expenses(wb, compare, lbl, CMP)
-        _sheet_labour(wb, compare, lbl, CMP)
+        _sheet_salary(wb, compare, lbl, CMP)
 
     # Dashboard KPIs link to the Cost Centre P&L total row.
     _link_dashboard(wb, rows_pl)
@@ -399,7 +400,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     ws = wb.create_sheet("Cost Centre P&L")
     ws.sheet_view.showGridLines = False
     headers = ["Code", "Cost Centre", "Revenue", "Direct Expense",
-               "Labour Cost", "Allocated Overhead", "Total Cost", "Profit",
+               "Salary Cost", "Allocated Overhead", "Total Cost", "Profit",
                "Target", "Variance", "Profit %"]
     widths = [10, 26, 16, 16, 16, 18, 16, 16, 16, 16, 11]
     for i, w in enumerate(widths):
@@ -419,7 +420,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
 
     rev = _q("Revenue")
     exp = _q("Expenses")
-    lab = _q("Labour")
+    lab = _q("Salary")
     first = hrow + 1
     n_partners = len(partners)
     # Row order: partners, then Office, then (optional) Unassigned.
@@ -628,7 +629,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
           fill=_SUBHEAD_FILL, align=_CENTER, border=True)
 
     # ---- P&L lines ----
-    rev, exp, lab = _q("Revenue"), _q("Expenses"), _q("Labour")
+    rev, exp, lab = _q("Revenue"), _q("Expenses"), _q("Salary")
 
     # Returns the SUMIFS formula for a (partner, manager) cell on a given
     # data sheet's amount column.
@@ -814,9 +815,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     ws.freeze_panes = f"B{body_start}"
     _cell(ws, r + 1, 1,
-          "Labour is allocated to the partner cost-centre (not split by "
-          "manager); other expenses follow the Cost Center column on the "
-          "voucher split.", font=_SUB)
+          "Salary cost (incl. fixed office overhead) is allocated to "
+          "partners via timesheet hours, not split by manager. Other "
+          "expenses follow the Cost Center column on the voucher split.",
+          font=_SUB)
 
 
 # --- Entity & Service --------------------------------------------------------
@@ -833,6 +835,76 @@ def _sheet_service(wb: Workbook, data: MISData, lbl: dict) -> None:
     _simple_summary(wb, "Service MIS", "Service-wise Revenue & Cost",
                     "Service", data.services, "svc", lbl, key="name",
                     sumcol_rev="F", sumcol_exp="F")
+
+
+def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
+    """Client × period billing matrix.
+
+    One row per client (canonical name from the master, or ``(unmapped)``
+    when the voucher's party didn't resolve). One column per selected
+    period plus a ``Grand Total`` column second from the left, mirroring
+    the operator's reference layout. Cells sum the revenue (net amount)
+    booked to that client × period. Credit / Debit Notes flow through
+    with their signs intact so the net billing nets returns automatically.
+    Sorted by Grand Total descending so the biggest clients sit at top.
+    """
+    if not data.options.periods:
+        return
+    periods = sorted(data.options.periods)
+
+    # (client_id or None) -> {period: amount}
+    agg: dict = {}
+    for f in data.revenue_facts:
+        cid = f.get("client_id")
+        bucket = agg.setdefault(cid, {p: 0.0 for p in periods})
+        bucket[f["period"]] = bucket.get(f["period"], 0.0) + float(f["amount"])
+
+    if not agg:
+        return
+
+    # Build sortable list: (name, total, [per-period amounts])
+    rows = []
+    for cid, per_period in agg.items():
+        name = lbl["cli"].get(cid, "(unmapped)")
+        amounts = [round(per_period.get(p, 0.0), 2) for p in periods]
+        total = round(sum(amounts), 2)
+        rows.append((name, total, amounts))
+    rows.sort(key=lambda r: -r[1])
+
+    ws = wb.create_sheet("Client Billing")
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 36
+    ws.column_dimensions["B"].width = 16
+    for i in range(len(periods)):
+        ws.column_dimensions[get_column_letter(3 + i)].width = 13
+
+    _cell(ws, 1, 1, "Client-wise Billing", font=_TITLE)
+    _cell(ws, 2, 1, "Period(s): " + ", ".join(periods), font=_SUB)
+    hrow = 4
+    headers = ["Client", "Grand Total"] + [_month_short(p) for p in periods]
+    _header_row(ws, hrow, headers)
+
+    body_start = hrow + 1
+    r = body_start
+    for name, total, amounts in rows:
+        _cell(ws, r, 1, name, border=True)
+        _cell(ws, r, 2, total, font=_BOLD, fill=_TOTAL_FILL, fmt=INR,
+              border=True)
+        for i, amt in enumerate(amounts):
+            _cell(ws, r, 3 + i, amt, fmt=INR, border=True)
+        r += 1
+
+    # TOTAL row
+    last_body = r - 1
+    if last_body >= body_start:
+        _cell(ws, r, 1, "TOTAL", font=_BOLD, fill=_TOTAL_FILL, border=True)
+        for col in range(2, 3 + len(periods)):
+            L = get_column_letter(col)
+            _cell(ws, r, col,
+                  f"=SUM({L}{body_start}:{L}{last_body})",
+                  font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
+
+    ws.freeze_panes = f"C{body_start}"
 
 
 def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
@@ -933,12 +1005,19 @@ def _fmt_date(raw):
         return str(raw)
 
 
-def _sheet_labour(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
+def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
+    def _client_label(f):
+        # Residual rows (no specific client) get a distinct label so the
+        # operator can tell un-timesheeted hours from genuinely unmapped
+        # clients.
+        if f.get("client_id") is None:
+            return "(residual / unallocated time)"
+        return lbl["cli"].get(f["client_id"], "(unmapped)")
     rows = [[f["period"], lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
-             f["employee_name"], lbl["cli"].get(f["client_id"], "(unmapped)"),
+             f["employee_name"], _client_label(f),
              round(f["hours"], 2), round(f["amount"], 2)]
             for f in data.labour_facts]
-    _write_data_sheet(wb, "Labour" + suffix,
+    _write_data_sheet(wb, "Salary" + suffix,
                       ["Period", "CostCentre", "Employee", "Client", "Hours",
                        "Amount"], [10, 12, 26, 28, 12, 14], rows)
 
@@ -971,7 +1050,7 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
     pl = _q("Cost Centre P&L")
     rev_c = _q("Revenue" + CMP)
     exp_c = _q("Expenses" + CMP)
-    lab_c = _q("Labour" + CMP)
+    lab_c = _q("Salary" + CMP)
     first = hrow + 1
     r = first
     for code, plrow in rows_pl["row_of"].items():

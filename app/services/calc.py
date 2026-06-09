@@ -185,9 +185,27 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
 # --- labour facts ------------------------------------------------------------
 
 def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> None:
+    """Build per-(employee, client/CC) salary-cost facts for the period.
+
+    Each employee's monthly cost = ``salary_paid`` (+ optional
+    ``reimbursement``) + ``fixed_office_overhead.amount_per_employee``
+    for that period. That total is divided by ``days_in_month * 8`` to
+    get an hourly rate (the firm's standard month-hours, not actual
+    timesheet hours — so an under-filled timesheet doesn't inflate the
+    rate). Each timesheet line then books ``hours × rate`` against the
+    client's cost centre.
+
+    Any residual hours (``standard_month_hours - sum(timesheet_hours)``,
+    if positive) are booked to the employee's home cost centre
+    (``employees.default_cost_centre_id``, fallback to the salary
+    sheet's CC, fallback to Office) so the FULL monthly cost lands
+    somewhere — no labour cost silently vanishes.
+    """
+    import calendar
     office_id = masters["office_id"]
     clients = masters["clients"]
     emp_index = masters["emp_index"]
+    employees = masters["employees"]
     ph = _placeholders(options.periods)
 
     with transaction() as conn:
@@ -199,9 +217,22 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             f"SELECT period, emp_name, client_id, hours, is_billable "
             f"FROM timesheet_entries WHERE period IN ({ph})",
             options.periods).fetchall()
+        overhead_rows = conn.execute(
+            f"SELECT period, amount_per_employee FROM fixed_office_overhead "
+            f"WHERE period IN ({ph}) AND active = 1",
+            options.periods).fetchall()
+    overhead_by_period = {r["period"]: float(r["amount_per_employee"] or 0.0)
+                           for r in overhead_rows}
 
     def emp_key(name: str):
         return emp_index.get(norm(name), f"raw:{norm(name)}")
+
+    def standard_hours(period: str) -> float:
+        try:
+            y, m = int(period[:4]), int(period[5:7])
+            return calendar.monthrange(y, m)[1] * 8.0
+        except (ValueError, IndexError):
+            return 30 * 8.0
 
     # Pay pool per (period, employee).
     pay: dict[tuple, dict] = {}
@@ -223,11 +254,22 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         hours.setdefault(key, []).append(r)
 
     for key, rec in pay.items():
-        period, _ = key
+        period, emp_lookup_key = key
         rows = hours.get(key, [])
-        total_hours = sum(float(t["hours"] or 0.0) for t in rows)
-        if total_hours > 0:
-            rate = rec["amount"] / total_hours
+        total_logged = sum(float(t["hours"] or 0.0) for t in rows)
+        overhead = overhead_by_period.get(period, 0.0)
+        total_cost = rec["amount"] + overhead
+        std_hours = standard_hours(period)
+        rate = total_cost / std_hours if std_hours else 0.0
+
+        # Home CC: master record → fallback to salary's CC → Office.
+        home_cc = rec["fallback_cc"]
+        if isinstance(emp_lookup_key, int):
+            home_cc = (employees.get(emp_lookup_key) or {}).get(
+                "default_cost_centre_id") or home_cc
+        home_cc = home_cc or office_id
+
+        if total_logged > 0:
             for t in rows:
                 h = float(t["hours"] or 0.0)
                 if not h:
@@ -238,14 +280,30 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "employee_name": rec["name"], "client_id": t["client_id"],
                     "hours": h, "amount": h * rate,
                 })
-        elif rec["amount"]:
-            # No hours logged — whole pay to the salary-sheet cost centre.
+            # Residual hours go to the employee's home CC so the FULL
+            # monthly cost (salary + overhead) gets allocated.
+            residual = std_hours - total_logged
+            if residual > 0.01 and rate > 0:
+                data.labour_facts.append({
+                    "period": period, "cost_centre_id": home_cc,
+                    "employee_name": rec["name"], "client_id": None,
+                    "hours": residual, "amount": residual * rate,
+                })
+        elif total_cost:
+            # No hours logged — entire monthly cost to the home CC.
             data.labour_facts.append({
                 "period": period,
-                "cost_centre_id": rec["fallback_cc"] or office_id,
+                "cost_centre_id": home_cc,
                 "employee_name": rec["name"], "client_id": None,
-                "hours": 0.0, "amount": rec["amount"],
+                "hours": std_hours, "amount": total_cost,
             })
+
+    # Even employees with no salary entry can have a per-period overhead
+    # — but without salary data we can't know they exist. The overhead
+    # is therefore only applied alongside an existing salary row. This
+    # matches the operator's workflow: salary upload is monthly; the
+    # overhead figure rides on top of whoever appears on that month's
+    # salary sheet.
 
 
 def _client_cost_centre(ts_row, clients: dict, office_id: int | None):
