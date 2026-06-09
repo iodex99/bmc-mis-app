@@ -225,6 +225,15 @@ class RecordTab(QWidget):
                 "from an Excel file. Expected columns: Client | Cost Centre.")
             self.import_btn.clicked.connect(self._import_clients_from_excel)
             toolbar.addWidget(self.import_btn)
+        elif spec.table == "employees":
+            self.import_btn = QPushButton("📁 Import from Excel…")
+            self.import_btn.setToolTip(
+                "Bulk-import a list of employees with their cost-centre "
+                "codes from an Excel file. Expected columns: Employee Name "
+                "| Cost Centre. Slight name variations in existing salary / "
+                "timesheet data get auto-linked at ≥70% confidence.")
+            self.import_btn.clicked.connect(self._import_employees_from_excel)
+            toolbar.addWidget(self.import_btn)
         self.add_btn = QPushButton(f"＋ Add {spec.title.rstrip('s').lower()}")
         self.add_btn.setObjectName("primary")
         self.add_btn.clicked.connect(self._add)
@@ -357,15 +366,36 @@ class RecordTab(QWidget):
             self.reload()
 
     def _import_clients_from_excel(self) -> None:
-        """Bulk-import client → cost-centre rows from an Excel file.
+        self._import_name_cc_pairs_from_excel(
+            title="Import Clients from Excel",
+            name_synonyms=("client",),
+            descriptor="Client",
+            kind_label="clients",
+            service=resolution.bulk_import_clients,
+        )
 
-        Expected layout: a header row containing 'Client' and 'Cost Centre'
-        (case-insensitive); data rows below. Cost-centre values must match
-        a code (e.g. SD, AM, JV) in the cost_centres master.
-        """
+    def _import_employees_from_excel(self) -> None:
+        self._import_name_cc_pairs_from_excel(
+            title="Import Employees from Excel",
+            name_synonyms=("employee name", "employee", "name"),
+            descriptor="Employee Name",
+            kind_label="employees",
+            service=resolution.bulk_import_employees,
+            extra_summary=lambda r: (
+                [f"Raw names linked to master via fuzzy match: "
+                 f"{r.get('newly_aliased', 0)}"]
+                if r.get("newly_aliased") else []),
+        )
+
+    def _import_name_cc_pairs_from_excel(
+            self, *, title: str,
+            name_synonyms: tuple[str, ...],
+            descriptor: str, kind_label: str,
+            service, extra_summary=None) -> None:
+        """Shared workflow: pick an Excel, extract (name, cc_code) rows
+        from a header row, hand to a bulk-import service, show summary."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Clients from Excel", "",
-            "Excel files (*.xlsx *.xls)")
+            self, title, "", "Excel files (*.xlsx *.xls)")
         if not path:
             return
         try:
@@ -374,31 +404,32 @@ class RecordTab(QWidget):
             QMessageBox.critical(
                 self, "Couldn't read file", f"Could not read {path}:\n\n{exc}")
             return
-        pairs = self._extract_client_cc_pairs(grid)
+        pairs = self._extract_name_cc_pairs(grid, name_synonyms)
         if not pairs:
             QMessageBox.warning(
                 self, "No data found",
-                "Couldn't find a 'Client' + 'Cost Centre' header row in this "
-                "file. Make sure the first two columns are named Client and "
-                "Cost Centre (case-insensitive).")
+                f"Couldn't find a '{descriptor}' + 'Cost Centre' header row "
+                f"in this file. Make sure the first two columns are named "
+                f"'{descriptor}' and 'Cost Centre' (case-insensitive).")
             return
-        # Confirm before applying — make the operator aware of the scope.
-        msg = (f"Found {len(pairs)} client → cost-centre rows in this file.\n\n"
-               "Existing clients keep any cost-centre already assigned; "
-               "clients whose cost-centre is unset will be filled in. New "
-               "clients are created.\n\nContinue?")
-        if QMessageBox.question(self, "Import clients?", msg) != \
-                QMessageBox.Yes:
+        msg = (f"Found {len(pairs)} {kind_label} → cost-centre rows in this "
+               "file.\n\nExisting rows keep any cost-centre already "
+               "assigned; rows whose cost-centre is unset will be filled "
+               "in. New rows are created.\n\nContinue?")
+        if QMessageBox.question(self, f"Import {kind_label}?", msg) \
+                != QMessageBox.Yes:
             return
-        report = resolution.bulk_import_clients(
-            pairs, overwrite_existing_cc=False)
+        report = service(pairs, overwrite_existing_cc=False)
         lines = [
             f"Total rows processed: {report['rows_total']}",
-            f"New clients created: {report['created']}",
-            f"Existing clients whose cost-centre got filled in: {report['cc_set']}",
-            f"Existing clients unchanged (already had the same CC): "
+            f"New {kind_label} created: {report['created']}",
+            f"Existing rows whose cost-centre got filled in: "
+            f"{report['cc_set']}",
+            f"Existing rows unchanged (already had the same CC): "
             f"{report['unchanged']}",
         ]
+        if extra_summary:
+            lines.extend(extra_summary(report))
         if report["unknown_cc"]:
             lines.append(
                 f"\nSkipped {len(report['unknown_cc'])} row(s) with unknown "
@@ -409,29 +440,32 @@ class RecordTab(QWidget):
         self.reload()
 
     @staticmethod
-    def _extract_client_cc_pairs(grid: list[list]) -> list[tuple[str, str]]:
-        """Find the header row + return (client_name, cc_code) tuples below it."""
+    def _extract_name_cc_pairs(
+            grid: list[list],
+            name_synonyms: tuple[str, ...]) -> list[tuple[str, str]]:
+        """Find the (name, cost-centre) header row + return data tuples."""
         header_row = -1
-        client_col = cc_col = -1
+        name_col = cc_col = -1
+        cc_synonyms = ("cost centre", "cost center", "cc")
         for r_idx, row in enumerate(grid[:20]):
             cells = [(str(c).strip().lower() if c is not None else "")
                      for c in row]
             for i, txt in enumerate(cells):
-                if txt == "client":
-                    client_col = i
-                elif txt in ("cost centre", "cost center", "cc"):
+                if txt in name_synonyms:
+                    name_col = i
+                elif txt in cc_synonyms:
                     cc_col = i
-            if client_col >= 0 and cc_col >= 0:
+            if name_col >= 0 and cc_col >= 0:
                 header_row = r_idx
                 break
-            client_col = cc_col = -1
+            name_col = cc_col = -1
         if header_row < 0:
             return []
         out: list[tuple[str, str]] = []
         for row in grid[header_row + 1:]:
             if not row:
                 continue
-            name = row[client_col] if client_col < len(row) else None
+            name = row[name_col] if name_col < len(row) else None
             code = row[cc_col] if cc_col < len(row) else None
             name_s = (str(name).strip() if name is not None else "")
             code_s = (str(code).strip() if code is not None else "")

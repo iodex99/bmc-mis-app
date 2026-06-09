@@ -755,10 +755,158 @@ def bulk_create_clients() -> int:
 
 # =========================== EMPLOYEES ======================================
 
-def apply_known_employee_aliases() -> None:
-    """No row updates needed — employees are matched by name at calc time —
-    but this keeps the API symmetric and is a hook for future use."""
-    return None
+def apply_known_employee_aliases(*, fuzzy_threshold: int = 70) -> int:
+    """Fuzzy-link unresolved raw employee names to the employees master.
+
+    Employees are matched by name at calc-time via name + alias, so
+    "resolving" an employee just means writing an alias row. This
+    function looks at every distinct raw name in salary / timesheet
+    that has no exact match, and for each one fuzzy-ranks the active
+    employees. When the top score is ≥``fuzzy_threshold`` AND at
+    least 5 points clear of the runner-up, the raw name is saved as
+    an alias on that employee.
+
+    Returns the number of alias rows newly written.
+    """
+    return _fuzzy_link_employees(threshold=fuzzy_threshold)
+
+
+def _fuzzy_link_employees(*, threshold: int = 70, gap: int = 5) -> int:
+    """Fuzzy-match every unresolved raw employee name to the master.
+
+    See :func:`_fuzzy_link_clients` for the rationale. Same shape:
+    score the raw against all active employees, accept only the clear
+    winner above the threshold, and save it as an alias so the next
+    import skips the fuzzy pass entirely.
+    """
+    linked = 0
+    with transaction() as conn:
+        emps = [(r["id"], r["name"]) for r in conn.execute(
+            "SELECT id, name FROM employees WHERE active = 1")]
+        if not emps:
+            return 0
+        norms = {eid: norm_loose(name) for eid, name in emps}
+        # Names already known directly or via alias.
+        known: set[str] = set()
+        for r in conn.execute("SELECT name FROM employees"):
+            known.add(norm(r["name"]))
+        for r in conn.execute("SELECT alias_text FROM employee_aliases"):
+            known.add(norm(r["alias_text"]))
+        # Every distinct raw employee name in salary + timesheet.
+        raws: set[str] = set()
+        for r in conn.execute(
+                "SELECT DISTINCT employee_name FROM salary_entries "
+                "WHERE employee_name <> ''"):
+            raws.add(r["employee_name"])
+        for r in conn.execute(
+                "SELECT DISTINCT emp_name FROM timesheet_entries "
+                "WHERE emp_name <> ''"):
+            raws.add(r["emp_name"])
+        for raw in raws:
+            if norm(raw) in known:
+                continue
+            target = norm_loose(raw)
+            if not target:
+                continue
+            ranked = process.extract(
+                target, norms, scorer=fuzz.token_sort_ratio, limit=3)
+            if not ranked:
+                continue
+            top_score = int(ranked[0][1])
+            top_id = ranked[0][2]
+            runner = int(ranked[1][1]) if len(ranked) > 1 else 0
+            if top_score >= threshold and (top_score - runner) >= gap:
+                conn.execute(
+                    "INSERT OR IGNORE INTO employee_aliases "
+                    "(employee_id, alias_text, source) "
+                    "VALUES (?, ?, 'fuzzy')", (top_id, raw))
+                linked += 1
+    return linked
+
+
+def bulk_import_employees(
+        pairs: list[tuple[str, str]],
+        *,
+        overwrite_existing_cc: bool = False
+) -> dict:
+    """Upsert employees from a list of ``(employee_name, cc_code)`` pairs.
+
+    Mirrors :func:`bulk_import_clients`. For each row:
+
+    * Look up the cost-centre by code (case-insensitive).
+    * If an employee with the same normalised name already exists, fill
+      in their ``default_cost_centre_id`` when it's NULL, leave it alone
+      when set (unless ``overwrite_existing_cc=True``).
+    * Otherwise insert a new employee row with name + default_cost_centre.
+
+    After the upsert, runs the fuzzy alias pass so any previously
+    unresolved raw names in salary/timesheet get linked to the newly
+    populated master.
+
+    Returns a dict:
+      ``created`` — new employee rows inserted
+      ``cc_set`` — existing rows whose NULL cost-centre was filled
+      ``cc_overwritten`` — existing rows whose cost-centre changed
+      ``unchanged`` — existing rows already matching
+      ``unknown_cc`` — list of (name, code) with unknown CC code
+      ``rows_total`` — total rows processed
+      ``newly_aliased`` — raw names linked via the post-import fuzzy pass
+    """
+    created = cc_set = cc_overwritten = unchanged = 0
+    unknown_cc: list[tuple[str, str]] = []
+    with transaction() as conn:
+        cc_by_code = {
+            r["code"].strip().lower(): r["id"] for r in conn.execute(
+                "SELECT id, code FROM cost_centres WHERE active = 1")}
+        existing: dict[str, tuple[int, int | None]] = {}
+        for r in conn.execute(
+                "SELECT id, name, default_cost_centre_id FROM employees"):
+            existing[norm(r["name"])] = (r["id"], r["default_cost_centre_id"])
+        for raw_name, raw_code in pairs:
+            name = (raw_name or "").strip()
+            code = (raw_code or "").strip()
+            if not name:
+                continue
+            cc_id = cc_by_code.get(code.lower())
+            if cc_id is None:
+                unknown_cc.append((name, code))
+                continue
+            key = norm(name)
+            hit = existing.get(key)
+            if hit is None:
+                eid = conn.execute(
+                    "INSERT INTO employees (name, default_cost_centre_id) "
+                    "VALUES (?, ?)", (name, cc_id)).lastrowid
+                existing[key] = (eid, cc_id)
+                created += 1
+            else:
+                emp_id, current_cc = hit
+                if current_cc == cc_id:
+                    unchanged += 1
+                elif current_cc is None:
+                    conn.execute(
+                        "UPDATE employees SET default_cost_centre_id = ? "
+                        "WHERE id = ?", (cc_id, emp_id))
+                    existing[key] = (emp_id, cc_id)
+                    cc_set += 1
+                elif overwrite_existing_cc:
+                    conn.execute(
+                        "UPDATE employees SET default_cost_centre_id = ? "
+                        "WHERE id = ?", (cc_id, emp_id))
+                    existing[key] = (emp_id, cc_id)
+                    cc_overwritten += 1
+                else:
+                    unchanged += 1
+    newly_aliased = _fuzzy_link_employees()
+    return {
+        "created": created,
+        "cc_set": cc_set,
+        "cc_overwritten": cc_overwritten,
+        "unchanged": unchanged,
+        "unknown_cc": unknown_cc,
+        "rows_total": len(pairs),
+        "newly_aliased": newly_aliased,
+    }
 
 
 def unresolved_employees() -> list[dict]:

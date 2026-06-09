@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.51** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.52** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,38 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.52 — Bulk employee master import + fuzzy-link unresolved
+Operator dropped an EmployeeData Excel (125 rows of name + cost-centre
+code) and asked: load this into the master, and clean up the
+salary/timesheet rows that are still sitting in the unresolved queue.
+
+Mirrors the v0.3.50 client-import pattern:
+
+* New service ``bulk_import_employees(pairs)`` — case-insensitive
+  CC-code lookup, fills NULL ``default_cost_centre_id`` on existing
+  rows, inserts new employees for missing names, reports unknown
+  codes. After the upsert, runs the fuzzy-link pass automatically.
+* ``_fuzzy_link_employees`` — for every distinct raw name in
+  ``salary_entries.employee_name`` and ``timesheet_entries.emp_name``
+  that doesn't exact-match an employee or alias, score against active
+  employees by ``token_sort_ratio``; if the top score is ≥70 AND ≥5
+  points clear of the runner-up, write a ``source='fuzzy'`` row to
+  ``employee_aliases``. Re-imports of the same raw name then hit the
+  cheap exact path.
+* ``apply_known_employee_aliases`` (was a no-op) now drives the
+  fuzzy pass, so the same resolution happens automatically after
+  any import.
+* New 📁 Import-from-Excel button on Master Data → Employees;
+  shares the ``_import_name_cc_pairs_from_excel`` helper with the
+  v0.3.50 clients flow.
+
+Verified end-to-end on the operator's real EmployeeData file:
+125 employees created, 0 unknowns; 3 of 6 pre-existing salary
+rows resolved via exact-norm (case + whitespace), 2 via fuzzy
+(``Harjeet Singh`` → ``Harjeet Arjun Singh``; ``Pranali P Gurav``
+→ ``Pranali Pravin Gurav``), 1 truly-unknown name correctly held
+for review.
 
 ### v0.3.51 — Auto-detect file type + entity from Tally exports
 Two operator asks bundled.
