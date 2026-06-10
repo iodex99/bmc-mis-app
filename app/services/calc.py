@@ -297,7 +297,8 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 h = float(t["hours"] or 0.0)
                 if not h:
                     continue
-                cc = _client_cost_centre(t, clients, office_id)
+                cc = _client_cost_centre(t, clients, office_id,
+                                          home_cc=home_cc)
                 data.labour_facts.append({
                     "period": period,
                     "txn_date": t["txn_date"],
@@ -347,14 +348,40 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
     # salary sheet.
 
 
-def _client_cost_centre(ts_row, clients: dict, office_id: int | None):
-    """Cost centre a timesheet line's labour belongs to."""
+def _client_cost_centre(ts_row, clients: dict, office_id: int | None,
+                         home_cc: int | None = None):
+    """Cost centre a timesheet line's labour belongs to.
+
+    Priority:
+
+    1. **Resolved client's cost centre** — explicit attribution. A
+       timesheet line booked to Client X (mapped to partner P)
+       contributes to P's labour cost.
+    2. **Employee's home cost centre** — the default for everything
+       else: non-billable time, billable time on an unresolved
+       client_raw, or billable time on a client whose master row has
+       no cost-centre set. Lines up with how the residual-row logic
+       already attributes leftover hours, so an employee's full
+       monthly salary cost lands on the partner they're assigned to
+       unless an explicit timesheet entry on someone else's client
+       overrides.
+    3. **Office** — last-resort fallback when the employee isn't in
+       the master and we have no other signal.
+
+    Pre-v0.3.60 this returned ``office_id`` for both #1's miss and
+    non-billable rows, which dumped every office-boy / receptionist
+    style time into Office regardless of which partner they reported
+    under. The fix routes them to ``home_cc`` so e.g. Bhavik (home
+    partner JV) sees ALL his time on JV, not 8h on JV + 200h on
+    Office.
+    """
+    default_cc = home_cc if home_cc is not None else office_id
     if not ts_row["is_billable"]:
-        return office_id
+        return default_cc
     client = clients.get(ts_row["client_id"])
     if client and client["cost_centre_id"] is not None:
         return client["cost_centre_id"]
-    return office_id
+    return default_cc
 
 
 # --- roll-ups ----------------------------------------------------------------

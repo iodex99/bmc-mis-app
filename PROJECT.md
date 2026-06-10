@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.59** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.60** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,49 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.60 — Salary sheet: unresolved / non-billable timesheet rows go to employee's home CC
+Operator screenshot showed Bhavik Shah (master CC = JV) with most of
+his 8h/day timesheet entries booking to ``Office`` cost centre — only
+one row (his explicit residual) landed on JV correctly.
+
+Root cause: ``calc._client_cost_centre`` fell back to ``office_id``
+whenever a timesheet row was:
+
+* non-billable, OR
+* billable but its ``client_id`` was NULL (unmapped client), OR
+* billable but the resolved client's master row had no cost centre.
+
+That meant every "office boy time logged against an unmapped or
+internal activity" row dumped to Office, regardless of which partner
+the employee actually reports under. Bhavik's 200+ hours of monthly
+time scattered across Office while the residual logic correctly
+sent his leftover hours to JV — visibly inconsistent.
+
+Fix: ``_client_cost_centre`` now accepts a ``home_cc`` argument
+(the employee's ``default_cost_centre_id`` from the master, with
+the same fallback chain ``_build_labour_facts`` already uses for
+residual rows) and routes all three "no explicit client CC" cases
+to it instead of Office. Lines up the timesheet attribution with
+the residual attribution: an employee's full monthly salary now
+accrues to their home partner unless an explicit timesheet entry
+on someone else's client overrides.
+
+Smoke test on the operator's scenario:
+
+    Bhavik Shah (home CC = JV)
+    8h on 'Acme' (client master CC = AM)  → AM
+    8h on 'Some Unmapped Client'          → JV  (was Office)
+    8h on 'Another Unmapped'              → JV  (was Office)
+    8h on 'Internal Training' (non-bill)  → JV  (was Office)
+    208h residual                          → JV
+    ---------------------------------------------
+    AM     = 8h
+    JV     = 232h
+    Office = 0h    (was 24h before this fix)
+
+Lines up with what the operator expected when she pointed out
+"his master is JV — why is his time going to Office?".
 
 ### v0.3.59 — Salary sheet: distinguish residual from unmapped-timesheet rows
 Operator reported the Salary sheet "only shows (residual / unallocated
