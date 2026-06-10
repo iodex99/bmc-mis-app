@@ -367,9 +367,12 @@ class RecordTab(QWidget):
         dlg = RecordDialog(self.spec, None, self)
         if dlg.exec() == QDialog.Accepted:
             try:
-                repo.insert(self.spec.table, dlg.values())
+                values = dlg.values()
+                new_id = repo.insert(self.spec.table, values)
             except Exception as exc:  # e.g. UNIQUE violation
                 QMessageBox.critical(self, "Could not add", str(exc))
+            else:
+                self._post_save_repoint(new_id, values)
             self.reload()
 
     def _import_clients_from_excel(self) -> None:
@@ -493,10 +496,34 @@ class RecordTab(QWidget):
         dlg = RecordDialog(self.spec, record, self)
         if dlg.exec() == QDialog.Accepted:
             try:
-                repo.update(self.spec.table, record["id"], dlg.values())
+                values = dlg.values()
+                repo.update(self.spec.table, record["id"], values)
             except Exception as exc:
                 QMessageBox.critical(self, "Could not save", str(exc))
+            else:
+                self._post_save_repoint(record["id"], values)
             self.reload()
+
+    def _post_save_repoint(self, row_id: int,
+                            values: dict[str, Any]) -> None:
+        """After adding / editing a client or employee master row, force
+        any stale voucher / timesheet links whose raw name matches the
+        new canonical name to point at this row.
+
+        Without this, an earlier wrong fuzzy or Review-dialog link
+        persists in the data even after the operator manually creates
+        the correct master row (the symptom: 'I added Bilimoria Mehta
+        & Co as a client but the salary sheet still shows Dinaz Mehta
+        for the firm's own internal time').
+        """
+        if self.spec.table == "clients":
+            name = (values.get("canonical_name") or "").strip()
+            if name:
+                resolution.repoint_client_links(int(row_id), name)
+        elif self.spec.table == "employees":
+            name = (values.get("name") or "").strip()
+            if name:
+                resolution.repoint_employee_links(int(row_id), name)
 
     def _deactivate_row(self, idx: int) -> None:
         if not (0 <= idx < len(self._rows)):

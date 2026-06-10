@@ -219,11 +219,17 @@ def apply_known_client_aliases(*, fuzzy_threshold: int = 70) -> int:
     """
     with transaction() as conn:
         pairs: dict[str, int] = {}
-        for r in conn.execute("SELECT id, canonical_name FROM clients"):
-            pairs[norm(r["canonical_name"])] = r["id"]
+        # Aliases first so canonical names OVERWRITE them on key collision.
+        # Without this, a stale alias (often left over from a previous
+        # mis-click in the Review dialog or an old fuzzy guess) would
+        # silently override a correct canonical-name match — the
+        # operator's authoritative master row would never get a chance
+        # to win.
         for r in conn.execute(
                 "SELECT client_id, alias_text FROM client_aliases"):
             pairs[norm(r["alias_text"])] = r["client_id"]
+        for r in conn.execute("SELECT id, canonical_name FROM clients"):
+            pairs[norm(r["canonical_name"])] = r["id"]
         linked = _apply_client_norm_mapping(conn, pairs)
     linked += _fuzzy_link_clients(threshold=fuzzy_threshold)
     infer_all_masters()
@@ -342,12 +348,14 @@ def create_client(raw: str, canonical_name: str,
                    manager_id: int | None = None) -> int:
     """Create a new client from a raw name and link all matching rows.
 
-    ``manager_id`` is accepted for back-compat with v0.3.47 callers but
-    is no longer wired to the client master — the Sales Register Excel
-    now carries manager+partner per voucher line, so a default manager
-    on the client master became redundant. New clients are created
-    without a manager assignment; the DB column stays (NULL) for any
-    legacy data already present.
+    Also REPOINTS any existing voucher / timesheet rows whose raw name
+    matches the new canonical name but currently links to a different
+    client — typical when the operator finally adds a master row to
+    fix a stale fuzzy / Review-dialog mis-click.
+
+    ``manager_id`` is accepted for back-compat with v0.3.47 callers
+    but is no longer wired to the client master (DB column stays
+    NULL for new rows).
     """
     if cost_centre_id is None:
         cost_centre_id = suggest_cc_for_raw_client(raw)
@@ -361,12 +369,62 @@ def create_client(raw: str, canonical_name: str,
                 "INSERT OR IGNORE INTO client_aliases (client_id, alias_text, source) "
                 "VALUES (?, ?, 'tally')", (cid, raw))
         _link_client_rows(conn, raw, cid)
+    # Outside the transaction since repoint_client_links opens its own.
+    repoint_client_links(int(cid), canonical_name)
     return int(cid)
 
 
 def _link_client_rows(conn, raw: str, client_id: int) -> int:
     """Set client_id on all rows whose raw name normalises to *raw*."""
     return _apply_client_norm_mapping(conn, {norm(raw): client_id})
+
+
+def repoint_client_links(client_id: int, canonical_name: str) -> int:
+    """Force every voucher / timesheet row whose raw name matches the
+    given canonical (norm-equal) to point at ``client_id``.
+
+    Unlike ``_apply_client_norm_mapping``, this OVERRIDES existing
+    client_id values when they're wrong — the typical case being a
+    stale fuzzy / accidental link to a different client that needs
+    correcting now that the operator has added the right master row.
+
+    Also wipes any ``client_aliases`` rows whose alias_text matches
+    the canonical_name but points to a different client, so the
+    next run of ``apply_known_client_aliases`` doesn't immediately
+    undo this repoint.
+
+    Returns the number of rows actually updated.
+    """
+    key = norm(canonical_name)
+    if not key:
+        return 0
+    updated = 0
+    with transaction() as conn:
+        # 1. Drop conflicting aliases — same alias_text, different
+        #    client_id. Keep aliases that already point to the right
+        #    place (no-op).
+        conn.execute(
+            "DELETE FROM client_aliases "
+            "WHERE lower(trim(alias_text)) = ? AND client_id <> ?",
+            (key, client_id))
+        # 2. Repoint vouchers + timesheet rows whose raw name matches
+        #    AND currently point somewhere else (or nowhere).
+        for table, raw_col in (
+                ("vouchers", "party_name"),
+                ("timesheet_entries", "client_raw")):
+            rows = conn.execute(
+                f"SELECT id, {raw_col} FROM {table} "
+                f"WHERE {raw_col} <> '' "
+                f"  AND (client_id IS NULL OR client_id <> ?)",
+                (client_id,)).fetchall()
+            ids = [r["id"] for r in rows if norm(r[raw_col]) == key]
+            if ids:
+                ph = ",".join("?" * len(ids))
+                cur = conn.execute(
+                    f"UPDATE {table} SET client_id = ? "
+                    f"WHERE id IN ({ph})", (client_id, *ids))
+                updated += cur.rowcount
+    return updated
 
 
 def bulk_import_clients(
@@ -400,6 +458,9 @@ def bulk_import_clients(
     """
     created = cc_set = cc_overwritten = unchanged = 0
     unknown_cc: list[tuple[str, str]] = []
+    # Track newly-created clients so we can repoint stale links after
+    # the transaction closes.
+    newly_created: list[tuple[int, str]] = []
     with transaction() as conn:
         cc_by_code = {
             r["code"].strip().lower(): r["id"] for r in conn.execute(
@@ -427,6 +488,7 @@ def bulk_import_clients(
                     "VALUES (?, ?)", (name, cc_id)).lastrowid
                 existing[key] = (cid, cc_id)
                 created += 1
+                newly_created.append((int(cid), name))
             else:
                 client_id, current_cc = hit
                 if current_cc == cc_id:
@@ -445,6 +507,11 @@ def bulk_import_clients(
                     cc_overwritten += 1
                 else:
                     unchanged += 1
+    # Repoint any voucher / timesheet rows that were stale-linked to
+    # something else but should now point at the freshly-created
+    # master row.
+    for cid, name in newly_created:
+        repoint_client_links(cid, name)
     apply_known_client_aliases()
     return {
         "created": created,
@@ -1024,6 +1091,29 @@ def link_employee(raw: str, employee_id: int, source: str = "timesheet") -> None
             "INSERT OR IGNORE INTO employee_aliases (employee_id, alias_text, source) "
             "VALUES (?, ?, ?)", (employee_id, raw, source))
     infer_all_masters()
+
+
+def repoint_employee_links(employee_id: int, employee_name: str) -> int:
+    """Drop any ``employee_aliases`` rows whose ``alias_text`` matches
+    the given canonical name but points at a different employee.
+
+    Employees are looked up by name at MIS-build time (not stored as
+    foreign-keyed columns on salary/timesheet rows), so all we need to
+    do here is clean up stale aliases that would still shadow the new
+    master row's canonical name in ``emp_index``. The v0.3.58 fix
+    that re-orders alias-vs-canonical priority in
+    ``_load_masters`` makes this largely belt-and-braces, but
+    pruning keeps the alias table tidy.
+    """
+    key = norm(employee_name)
+    if not key:
+        return 0
+    with transaction() as conn:
+        cur = conn.execute(
+            "DELETE FROM employee_aliases "
+            "WHERE lower(trim(alias_text)) = ? AND employee_id <> ?",
+            (key, employee_id))
+        return cur.rowcount or 0
 
 
 def create_employee(raw: str, name: str, category: str | None,

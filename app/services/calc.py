@@ -131,12 +131,16 @@ def _load_masters() -> dict:
                     for r in conn.execute("SELECT * FROM services")}
         clients = {r["id"]: dict(r)
                    for r in conn.execute("SELECT * FROM clients")}
-        # name -> employee id (master names + aliases)
+        # name -> employee id (master names + aliases). Insert aliases
+        # FIRST so canonical names overwrite them on key collision —
+        # the same correctness fix applied to clients in v0.3.58.
+        # Otherwise a stale fuzzy alias silently outranks the operator's
+        # authoritative master row.
         emp_index: dict[str, int] = {}
-        for r in conn.execute("SELECT id, name FROM employees"):
-            emp_index[norm(r["name"])] = r["id"]
         for r in conn.execute("SELECT employee_id, alias_text FROM employee_aliases"):
             emp_index[norm(r["alias_text"])] = r["employee_id"]
+        for r in conn.execute("SELECT id, name FROM employees"):
+            emp_index[norm(r["name"])] = r["id"]
         employees = {r["id"]: dict(r)
                      for r in conn.execute("SELECT * FROM employees")}
     office_id = next((cid for cid, c in cost_centres.items()
@@ -214,7 +218,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             f"reimbursement FROM salary_entries WHERE period IN ({ph})",
             options.periods).fetchall()
         ts_rows = conn.execute(
-            f"SELECT period, emp_name, client_id, hours, is_billable "
+            f"SELECT period, txn_date, emp_name, client_id, hours, is_billable "
             f"FROM timesheet_entries WHERE period IN ({ph})",
             options.periods).fetchall()
         overhead_rows = conn.execute(
@@ -276,7 +280,9 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     continue
                 cc = _client_cost_centre(t, clients, office_id)
                 data.labour_facts.append({
-                    "period": period, "cost_centre_id": cc,
+                    "period": period,
+                    "txn_date": t["txn_date"],
+                    "cost_centre_id": cc,
                     "employee_name": rec["name"], "client_id": t["client_id"],
                     "hours": h, "amount": h * rate,
                 })
@@ -285,7 +291,9 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             residual = std_hours - total_logged
             if residual > 0.01 and rate > 0:
                 data.labour_facts.append({
-                    "period": period, "cost_centre_id": home_cc,
+                    "period": period,
+                    "txn_date": None,
+                    "cost_centre_id": home_cc,
                     "employee_name": rec["name"], "client_id": None,
                     "hours": residual, "amount": residual * rate,
                 })
@@ -293,6 +301,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             # No hours logged — entire monthly cost to the home CC.
             data.labour_facts.append({
                 "period": period,
+                "txn_date": None,
                 "cost_centre_id": home_cc,
                 "employee_name": rec["name"], "client_id": None,
                 "hours": std_hours, "amount": total_cost,

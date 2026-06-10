@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.57** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.58** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,68 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.58 — Salary sheet correctness: stale links auto-fix + Date col + Client Billing formulas
+Operator reported the firm's own name "Bilimoria Mehta & Co" (when
+logged on a timesheet by office boys / receptionists for internal
+time) was showing up as "Dinaz Mehta" in the generated Salary sheet —
+and even after adding the correct client to the master, the
+mis-attribution persisted. Plus two smaller asks: a Date column on
+the Salary sheet, and the Client Billing Grand Total as a formula.
+
+**Five fixes — root cause + immediate corrective + UX polish.**
+
+**1. Canonical names now always beat aliases in name-resolution.**
+``_apply_client_norm_mapping`` was building its lookup with canonical
+names first, then aliases — so when both held the same key, the
+alias silently overrode. A stale fuzzy / Review-dialog mis-alias
+would shadow the operator's authoritative master row indefinitely.
+Swapped the insertion order: aliases first, canonical last so
+canonical wins on collision. Same one-line fix applied to
+``calc.py`` ``emp_index`` for the employee side.
+
+**2. Adding a new master row now re-points stale links.**
+New ``resolution.repoint_client_links(client_id, canonical_name)``:
+deletes conflicting aliases for the new canonical, AND updates
+vouchers / timesheet_entries whose raw name normalises to the new
+canonical but currently points somewhere else. Wired into
+``create_client``, ``bulk_import_clients``, and the Master Data
+Add / Edit dialog (via a new ``RecordTab._post_save_repoint`` hook).
+Direct corrective for the user's symptom: adding "Bilimoria Mehta
+& Co" to clients now repoints every stale timesheet row away from
+"Dinaz Mehta" automatically.
+
+**3. Same repoint helper for employees**
+(``resolution.repoint_employee_links``) — wired into the same
+Master Data hook for the employees tab. Mostly belt-and-braces
+now that fix #1 also covers ``emp_index``.
+
+**4. Salary sheet: new ``Date`` column after ``Period``.**
+Timesheet rows already carried ``txn_date``; surfaced it into
+``labour_facts["txn_date"]`` and rendered in the Salary sheet via
+the existing ``_fmt_date`` helper. Residual / unallocated rows
+leave the cell blank. Cost Centre P&L, Partner-Manager P&L, and
+Comparatives sheet SUMIFS references shifted to account for the
+new column position (Amount F → G, CostCentre B → C).
+
+**5. Client Billing: ``Grand Total`` column now SUM-formula driven.**
+Each row's Grand Total is ``=SUM(<first period col>:<last period
+col>)`` so the operator can tweak a cell and the total recalculates
+live. Was a hard-coded value before.
+
+Smoke test reproduces the operator's exact bug + verifies both
+displayed-and-stored fixes:
+
+    BEFORE: raw 'Bilimoria Mehta & Co' -> client 'Dinaz Mehta'
+    AFTER : raw 'Bilimoria Mehta & Co' -> client 'Bilimoria Mehta & Co'
+
+Generated Salary sheet now reads:
+    Period | Date        | CostCentre | Employee | Client    | Hours | Amount
+    2026-05| 03-May-2026 | AM         | Sahil    | Client A  | 4     |    806.45
+    2026-05| 15-May-2026 | JV         | Sahil    | Client B  | 8     |  1,612.90
+    2026-05|             | AM         | Sahil    | (residual)| 236   | 47,580.65
+
+Generated Client Billing shows ``=SUM(C5:C5)`` in the Grand Total cell.
 
 ### v0.3.57 — Fixed office overhead + per-CC salary allocation + client billing
 Three connected enhancements driven by the operator's salary-costing

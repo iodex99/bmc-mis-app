@@ -438,7 +438,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
               fmt=INR, border=True)
         _cell(ws, r, 4, f"=SUMIFS({exp}!$H:$H,{exp}!$D:$D,$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 5, f"=SUMIFS({lab}!$F:$F,{lab}!$B:$B,$A{r})",
+        _cell(ws, r, 5, f"=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r})",
               fmt=INR, border=True)
         # Allocated overhead (col F).
         _cell(ws, r, 6, _overhead_formula(r, kind, office_row, first,
@@ -653,7 +653,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         # Labour facts don't carry a manager, so cells under a manager column
         # just read the partner-level labour cost. We attribute it to the
         # partner's "Self" (first) column only, leaving manager columns at 0.
-        return f"=SUMIFS({lab}!$F:$F,{lab}!$B:$B,\"{cc_code}\")"
+        return f"=SUMIFS({lab}!$G:$G,{lab}!$C:$C,\"{cc_code}\")"
 
     # Row layout. Each entry: (label, kind, params)
     # kinds:
@@ -886,10 +886,16 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     body_start = hrow + 1
     r = body_start
-    for name, total, amounts in rows:
+    first_period_col = get_column_letter(3)
+    last_period_col = get_column_letter(3 + len(periods) - 1)
+    for name, _total, amounts in rows:
         _cell(ws, r, 1, name, border=True)
-        _cell(ws, r, 2, total, font=_BOLD, fill=_TOTAL_FILL, fmt=INR,
-              border=True)
+        # Grand Total is a SUM formula across the period columns —
+        # not a baked-in value — so the operator can edit a cell and
+        # the total updates live.
+        _cell(ws, r, 2,
+              f"=SUM({first_period_col}{r}:{last_period_col}{r})",
+              font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
         for i, amt in enumerate(amounts):
             _cell(ws, r, 3 + i, amt, fmt=INR, border=True)
         r += 1
@@ -1013,13 +1019,15 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
         if f.get("client_id") is None:
             return "(residual / unallocated time)"
         return lbl["cli"].get(f["client_id"], "(unmapped)")
-    rows = [[f["period"], lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+    rows = [[f["period"], _fmt_date(f.get("txn_date")),
+             lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
              f["employee_name"], _client_label(f),
              round(f["hours"], 2), round(f["amount"], 2)]
             for f in data.labour_facts]
     _write_data_sheet(wb, "Salary" + suffix,
-                      ["Period", "CostCentre", "Employee", "Client", "Hours",
-                       "Amount"], [10, 12, 26, 28, 12, 14], rows)
+                      ["Period", "Date", "CostCentre", "Employee", "Client",
+                       "Hours", "Amount"],
+                      [10, 12, 12, 26, 28, 12, 14], rows)
 
 
 # --- Comparatives ------------------------------------------------------------
@@ -1065,7 +1073,7 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
         # Comparison profit = comp revenue − comp direct − comp labour.
         _cell(ws, r, 7,
               f"=D{r}-SUMIFS({exp_c}!$H:$H,{exp_c}!$D:$D,$A{r})"
-              f"-SUMIFS({lab_c}!$F:$F,{lab_c}!$B:$B,$A{r})",
+              f"-SUMIFS({lab_c}!$G:$G,{lab_c}!$C:$C,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 8, f"=F{r}-G{r}", fmt=INR, border=True)
         _cell(ws, r, 9, f"=IF(G{r}=0,\"\",(F{r}-G{r})/ABS(G{r}))",
