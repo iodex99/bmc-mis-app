@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -36,6 +37,36 @@ _FILE_TYPE_LABELS = {
     config.FILE_TYPE_TIMESHEET: "Timesheet",
     config.FILE_TYPE_SALARY: "Salary & Reimbursements",
 }
+
+
+class _CommitWorker(QObject):
+    """Run ``commit.commit_result`` off the UI thread.
+
+    Connected to a ``QProgressDialog`` via the ``progress`` signal so a
+    5k+ row timesheet import doesn't freeze the app while SQLite is
+    inserting. Each stage of the commit + the post-commit resolution
+    sweeps emits its own progress update.
+    """
+
+    progress = Signal(str, int, int)         # stage, done, total
+    finished = Signal(object, str)           # report, error_message
+
+    def __init__(self, result, entity_id, file_name):
+        super().__init__()
+        self._result = result
+        self._entity_id = entity_id
+        self._file_name = file_name
+
+    def run(self):
+        try:
+            report = commit.commit_result(
+                self._result, self._entity_id, self._file_name,
+                progress_cb=lambda stage, d, t:
+                    self.progress.emit(stage, d, t))
+        except Exception as exc:
+            self.finished.emit(None, str(exc))
+            return
+        self.finished.emit(report, "")
 
 
 class ImportPage(QWidget):
@@ -385,19 +416,71 @@ class ImportPage(QWidget):
                     "Continue? Vouchers with a matching voucher number will be "
                     "skipped automatically.") != QMessageBox.Yes:
                 return
-        try:
-            report = commit.commit_result(
-                self._result, entity_id, self._path.name)
-        except Exception as exc:
-            QMessageBox.critical(self, "Import failed", str(exc))
+
+        # Heavy work — commit + post-commit resolution sweeps — runs on a
+        # worker thread so a 5k+ row timesheet doesn't freeze the UI.
+        # Progress dialog gives the operator feedback at each stage.
+        progress = QProgressDialog(
+            "Preparing import…", "Cancel", 0, 0, self)
+        progress.setWindowTitle("Importing")
+        progress.setMinimumWidth(420)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setCancelButton(None)  # commit is atomic, cancel mid-way
+                                           # would leave partial state
+
+        worker = _CommitWorker(self._result, entity_id, self._path.name)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        def on_progress(stage: str, done: int, total: int):
+            if total > 0:
+                progress.setRange(0, total)
+                progress.setValue(done)
+            else:
+                progress.setRange(0, 0)
+            progress.setLabelText(stage)
+
+        result_box = {"report": None, "error": ""}
+
+        def on_finished(report, error):
+            result_box["report"] = report
+            result_box["error"] = error
+            thread.quit()
+
+        worker.progress.connect(on_progress)
+        worker.finished.connect(on_finished)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        # Hold refs so neither gets GC'd before completion.
+        self._commit_thread = thread
+        self._commit_worker = worker
+
+        progress.show()
+        thread.start()
+        # Block until the worker finishes, but keep the event loop spinning
+        # so the progress dialog redraws and Qt stays responsive.
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        thread.finished.connect(loop.quit)
+        loop.exec()
+        progress.close()
+        self._commit_thread = None
+        self._commit_worker = None
+        report = result_box["report"]
+        error = result_box["error"]
+        if error or report is None:
+            QMessageBox.critical(self, "Import failed",
+                                 error or "Unknown error")
             return
 
-        # Auto-resolve any names this import already has saved aliases for.
-        auto_linked = resolution.apply_known_client_aliases()
-        cc_linked = resolution.apply_known_cc_string_mappings()
+        # The commit_result run already applied saved client aliases +
+        # cc-string mappings + ran inference. Just gather the counts so
+        # we can tell the operator what still needs review.
         unmapped_c = len(resolution.unresolved_clients())
         unmapped_e = len(resolution.unresolved_employees())
         unmapped_cc = len(resolution.unresolved_cc_strings())
+        auto_linked = cc_linked = 0  # already done in worker
 
         head_lines = [
             f"Import committed — batch #{report.batch_id}.",
@@ -419,11 +502,6 @@ class ImportPage(QWidget):
             head_lines.append(
                 f"  • {fmt_inr(report.salary_rows)} salary row(s) added.")
         head = "\n".join(head_lines)
-
-        auto_total = auto_linked + cc_linked
-        if auto_total:
-            head += (f"\n\n{fmt_inr(auto_total)} row(s) auto-mapped from "
-                     "previously remembered names.")
 
         if unmapped_c or unmapped_e or unmapped_cc:
             parts = []

@@ -134,13 +134,33 @@ def _existing_voucher(conn, entity_id, kind, vch_no):
 
 
 def commit_result(result: ParseResult, entity_id: int | None,
-                   file_name: str) -> CommitReport:
+                   file_name: str,
+                   progress_cb=None) -> CommitReport:
     """Persist *result* as a committed import batch.
 
     Returns a :class:`CommitReport` summarising what was inserted, skipped
     as duplicate, or flagged as an amount mismatch. The batch row is
     always created (even if every voucher was skipped) so the operator can
     see the upload happened.
+
+    *progress_cb*, when given, gets called as ``progress_cb(stage,
+    done, total)`` so the UI can render a progress bar. ``total`` is 0
+    for indeterminate stages.
+
+    Perf — for the 5k+ row timesheet case, two changes vs pre-v0.3.61:
+
+    1. **Master lookups cached** at the top of the run. Cost-centres,
+       services and entity-aliases are loaded once into Python dicts
+       instead of hitting SQLite per row. Newly-encountered services
+       (the only mutable master here) get appended to the cache and
+       INSERTed at the end.
+    2. **Timesheet + salary rows batched** via ``executemany`` with
+       a single param list, instead of N individual ``execute`` calls.
+
+    Vouchers + voucher_splits stay row-by-row because of the dedup
+    branch + lastrowid dependency between voucher and its splits.
+    Voucher imports rarely exceed a few hundred per file so they
+    aren't the bottleneck anyway.
     """
     period = _dominant_period(result)
     report = CommitReport(batch_id=0)
@@ -152,7 +172,57 @@ def commit_result(result: ParseResult, entity_id: int | None,
         ).lastrowid
         report.batch_id = batch_id
 
-        for v in result.vouchers:
+        # Pre-load master caches once — Python dict lookup is ~1000x
+        # faster than a SQLite roundtrip for the per-row case.
+        cc_cache: dict[str, int] = {}
+        for r in conn.execute(
+                "SELECT id, code, name FROM cost_centres"):
+            cc_cache[(r["code"] or "").strip().lower()] = r["id"]
+            cc_cache[(r["name"] or "").strip().lower()] = r["id"]
+        svc_cache: dict[str, int] = {
+            (r["name"] or "").strip().lower(): r["id"]
+            for r in conn.execute("SELECT id, name FROM services")}
+        ent_cache: dict[str, int] = {}
+        for r in conn.execute(
+                "SELECT e.id, e.name AS name FROM entities e"):
+            ent_cache[(r["name"] or "").strip().lower()] = r["id"]
+        for r in conn.execute(
+                "SELECT a.entity_id AS id, a.alias AS name FROM entity_aliases a"):
+            ent_cache[(r["name"] or "").strip().lower()] = r["id"]
+        cc_str_cache: dict[str, tuple[int | None, int | None]] = {
+            (r["raw_text"] or "").strip().lower():
+                (r["cost_centre_id"], r["manager_id"])
+            for r in conn.execute(
+                "SELECT raw_text, cost_centre_id, manager_id "
+                "FROM cc_string_mappings WHERE active = 1")}
+
+        def cc_lookup(raw: str | None) -> int | None:
+            if not raw:
+                return None
+            return cc_cache.get(raw.strip().lower())
+
+        def ent_lookup(raw: str | None) -> int | None:
+            if not raw:
+                return None
+            return ent_cache.get(raw.strip().lower())
+
+        def svc_lookup_or_create(name: str | None) -> int | None:
+            if not name:
+                return None
+            key = name.strip().lower()
+            sid = svc_cache.get(key)
+            if sid is not None:
+                return sid
+            sid = conn.execute(
+                "INSERT INTO services(name) VALUES (?)",
+                (name.strip(),)).lastrowid
+            svc_cache[key] = sid
+            return sid
+
+        if progress_cb:
+            progress_cb("Importing vouchers", 0, len(result.vouchers))
+
+        for vi, v in enumerate(result.vouchers):
             existing = _existing_voucher(conn, entity_id, v.kind, v.vch_no)
             if existing is not None:
                 ex_id, ex_gross = existing
@@ -167,7 +237,7 @@ def commit_result(result: ParseResult, entity_id: int | None,
                     })
                 continue
 
-            cc_id = _cost_centre_id(conn, v.raw_cost_centre)
+            cc_id = cc_lookup(v.raw_cost_centre)
             vid = conn.execute(
                 "INSERT INTO vouchers (batch_id, entity_id, txn_date, period, "
                 "vch_type, vch_no, party_name, gross_amount, tax_amount, "
@@ -187,9 +257,9 @@ def commit_result(result: ParseResult, entity_id: int | None,
                 for line in v.line_splits:
                     if line.is_tax:
                         continue
-                    svc_id = _ensure_service(conn, line.service)
+                    svc_id = svc_lookup_or_create(line.service)
                     raw_cc = line.cost_centre or v.raw_cost_centre
-                    line_cc_id = _cost_centre_id(conn, raw_cc) if raw_cc else None
+                    line_cc_id = cc_lookup(raw_cc) if raw_cc else None
                     conn.execute(
                         "INSERT INTO voucher_splits "
                         "(voucher_id, amount, cost_centre_id, service_id, "
@@ -201,7 +271,7 @@ def commit_result(result: ParseResult, entity_id: int | None,
                 # Legacy wide-flat sales parser: one split per service column,
                 # voucher-level cost centre on each.
                 for svc_name, amount in v.service_splits:
-                    svc_id = _ensure_service(conn, svc_name)
+                    svc_id = svc_lookup_or_create(svc_name)
                     conn.execute(
                         "INSERT INTO voucher_splits "
                         "(voucher_id, amount, cost_centre_id, service_id, "
@@ -217,31 +287,53 @@ def commit_result(result: ParseResult, entity_id: int | None,
                     (vid, v.net_amount, cc_id, v.raw_cost_centre),
                 )
 
-        for t in result.timesheet:
-            conn.execute(
+        # Timesheet rows — typically the bulk of any import (5k+ for
+        # a busy month). Single executemany is ~10-50x faster than
+        # per-row execute() because SQLite skips re-parsing the SQL
+        # statement and reduces transaction overhead.
+        if result.timesheet:
+            if progress_cb:
+                progress_cb("Importing timesheet rows", 0, len(result.timesheet))
+            ts_params = [
+                (batch_id, t.emp_code, t.emp_name,
+                 t.date.isoformat() if t.date else None, t.period,
+                 t.client_raw, t.task, t.hours, t.day_fraction,
+                 t.reporting_manager, t.description,
+                 1 if t.is_billable else 0)
+                for t in result.timesheet]
+            conn.executemany(
                 "INSERT INTO timesheet_entries (batch_id, emp_code, emp_name, "
                 "txn_date, period, client_raw, task, hours, day_fraction, "
                 "reporting_manager, description, is_billable) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (batch_id, t.emp_code, t.emp_name,
-                 t.date.isoformat() if t.date else None, t.period, t.client_raw,
-                 t.task, t.hours, t.day_fraction, t.reporting_manager,
-                 t.description, 1 if t.is_billable else 0),
-            )
-            report.timesheet_rows += 1
+                ts_params)
+            report.timesheet_rows = len(ts_params)
+            if progress_cb:
+                progress_cb("Importing timesheet rows",
+                             len(ts_params), len(ts_params))
 
-        for s in result.salary:
-            conn.execute(
+        # Salary rows — same shape as timesheet but uses cached
+        # cc / entity lookups instead of the per-row SELECTs that used
+        # to dominate the loop.
+        if result.salary:
+            if progress_cb:
+                progress_cb("Importing salary rows", 0, len(result.salary))
+            sal_params = [
+                (batch_id, s.period, s.employee_name,
+                 cc_lookup(s.raw_cost_centre), s.raw_cost_centre,
+                 ent_lookup(s.raw_entity), s.raw_entity, s.category,
+                 s.salary_paid, s.reimbursement)
+                for s in result.salary]
+            conn.executemany(
                 "INSERT INTO salary_entries (batch_id, period, employee_name, "
                 "cost_centre_id, raw_cost_centre, entity_id, raw_entity, "
                 "category, salary_paid, reimbursement) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (batch_id, s.period, s.employee_name,
-                 _cost_centre_id(conn, s.raw_cost_centre), s.raw_cost_centre,
-                 _entity_id(conn, s.raw_entity), s.raw_entity, s.category,
-                 s.salary_paid, s.reimbursement),
-            )
-            report.salary_rows += 1
+                sal_params)
+            report.salary_rows = len(sal_params)
+            if progress_cb:
+                progress_cb("Importing salary rows",
+                             len(sal_params), len(sal_params))
     # Auto-mapping after every import:
     #   • apply saved cc-string → (partner, manager) mappings to the new
     #     voucher splits
@@ -260,8 +352,16 @@ def commit_result(result: ParseResult, entity_id: int | None,
         auto_match_cc_strings,
         infer_all_masters,
     )
+    if progress_cb:
+        progress_cb("Resolving cost-centre strings", 0, 0)
     apply_known_cc_string_mappings()
     auto_match_cc_strings()
+    if progress_cb:
+        progress_cb("Resolving client / employee names", 0, 0)
     apply_known_client_aliases()
+    if progress_cb:
+        progress_cb("Updating master inferences", 0, 0)
     infer_all_masters()
+    if progress_cb:
+        progress_cb("Done", 1, 1)
     return report

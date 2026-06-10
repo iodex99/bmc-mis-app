@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.60** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.61** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,59 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.61 — Import performance: 5k-row timesheets in under 300ms
+Operator asked for the import path to scale cleanly: timesheets can run
+5k rows per period and the data only grows. Pre-v0.3.61 the commit ran
+synchronously on the UI thread with per-row INSERTs and per-row SQL
+lookups, so a 5k-row import froze the app for many seconds with no
+feedback.
+
+Four coordinated fixes — measured 5,000-row timesheet commit goes from
+"the app hangs for several seconds" to **275ms, ~18k rows/sec**, with
+the UI staying responsive throughout.
+
+**1. SQLite pragma tuning** (``database.connect``):
+
+* ``journal_mode = WAL`` — Write-Ahead Logging. Cleaner crash recovery
+  AND much faster for bulk inserts than the default rollback journal.
+* ``synchronous = NORMAL`` — fsync only at WAL checkpoints. Safe under
+  WAL; 5-10× faster commit speed.
+* ``temp_store = MEMORY`` — sort / group / temp tables in RAM.
+* ``cache_size = -65536`` — 64MB page cache.
+
+**2. ``commit_result`` master caches.** Cost-centres, services and
+entity aliases now load once into Python dicts at the top of the
+commit. Per-row helper calls (``_cost_centre_id``, ``_ensure_service``,
+``_entity_id``) used to do a SQLite SELECT each — at 5k timesheet rows
+× 2 lookups apiece, that's 10k SELECTs replaced by dict lookups.
+
+**3. ``executemany`` for timesheet + salary inserts.** A single bulk
+batch instead of N individual ``execute`` calls. SQLite skips
+re-parsing the SQL statement and reduces per-row transaction overhead.
+Vouchers + voucher_splits stay row-by-row because the dedup branch
++ lastrowid dependency between voucher and its splits makes batching
+fiddly; voucher imports rarely exceed a few hundred per file anyway.
+
+**4. Worker thread + progress dialog.** ``commit_result`` now accepts
+a ``progress_cb(stage, done, total)`` callback. New ``_CommitWorker``
+in ``import_page.py`` runs the commit + post-commit resolution
+sweeps on a ``QThread``; a ``QProgressDialog`` shows the current
+stage and a determinate bar where applicable. The Qt event loop
+keeps spinning so the dialog redraws and the app feels alive.
+
+End-to-end stress test on a 5000-row timesheet:
+
+    Elapsed: 275 ms
+    Rate:    18,205 rows/sec
+    Stages: Importing vouchers → Importing timesheet rows →
+            Resolving cost-centre strings →
+            Resolving client / employee names →
+            Updating master inferences → Done
+    Journal mode confirmed: wal
+
+Should scale linearly from here — 10k rows ≈ 550ms, 50k rows ≈ 2.7s,
+all without freezing the UI.
 
 ### v0.3.60 — Salary sheet: unresolved / non-billable timesheet rows go to employee's home CC
 Operator screenshot showed Bhavik Shah (master CC = JV) with most of

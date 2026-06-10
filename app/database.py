@@ -382,10 +382,32 @@ def latest_version() -> int:
 # --- Connection management ---------------------------------------------------
 
 def connect() -> sqlite3.Connection:
-    """Open a connection to the MIS database with sane pragmas applied."""
+    """Open a connection to the MIS database with sane pragmas applied.
+
+    Performance pragmas tuned for the operator's workload (single-user
+    desktop app, periodic bulk imports of 5k+ timesheet rows):
+
+    * ``journal_mode = WAL`` — Write-Ahead Logging. Far faster than
+      the default rollback journal for bulk inserts (no full-file
+      rewrite per transaction). Survives crashes correctly.
+    * ``synchronous = NORMAL`` — fsync only at WAL checkpoints, not
+      every transaction. Safe under WAL; trades a tiny crash-window
+      durability for 5-10× faster commit speed.
+    * ``temp_store = MEMORY`` — keep sort/group/temp tables in RAM.
+    * ``cache_size = -65536`` — 64MB page cache (negative = KB).
+
+    Foreign-keys stays on. Both WAL settings are persistent on the
+    DB file itself, so they only need to be set once, but re-setting
+    each connection is cheap and protects against an external tool
+    flipping them.
+    """
     config.ensure_dirs()
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -65536")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
