@@ -1,3 +1,3 @@
 """Bilimoria Mehta & Co. — Automated MIS Generator."""
 
-__version__ = "0.3.63"
+__version__ = "0.3.64"

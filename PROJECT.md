@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.63** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.64** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,41 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.64 — Drop QThread, commit on UI thread (stop the crash for good)
+Operator still seeing commit crashes / "not responding" after v0.3.63:
+
+* Reimbursement upload → Importing → app closes
+* Tally upload → Importing → "not responding"
+
+v0.3.61 introduced a ``QThread`` + ``_CommitWorker`` to keep the UI
+responsive during long commits. v0.3.62 still used a nested
+``QEventLoop`` to block on the worker. v0.3.63 swapped to a callback
+pattern matching ``settings_page.py``'s ``_run_thread``. The
+smoke-tests passed on the dev machine each time. On the operator's
+machine all three shapes crashed the app AFTER the commit landed in
+the DB (records present on next launch) — strongly suggests a
+``QObject`` lifetime / cross-thread signal-delivery edge case in
+some PySide6 builds that we can't reproduce or debug remotely.
+
+v0.3.64 drops threading altogether. ``_commit`` now runs the
+commit synchronously on the UI thread and pumps the event loop via
+``QApplication.processEvents()`` inside the progress callback
+between stages. The progress dialog still appears and stays
+responsive throughout. For a 5k-row timesheet that's ~275ms of
+work (v0.3.61 perf measurement) — imperceptible. For larger
+files the UI briefly freezes but the app never dies.
+
+A reliable simple flow beats a fast threaded flow that crashes.
+
+Removed: ``_CommitWorker`` class, ``QThread``/``QObject`` imports,
+``self._commit_thread``/``self._commit_worker`` instance attrs,
+the ``_on_commit_finished`` callback (folded back into ``_commit``).
+
+Verified end-to-end: ImportPage constructs, reimbursement parser
+emits 2 rows from a 2-row sheet, ``commit_result`` runs with all 7
+progress stages, batch report counter populated, rows actually land
+in the DB.
 
 ### v0.3.63 — Fix v0.3.61 commit-then-close crash + v0.3.62 reimbursement parser
 Operator reported two regressions:

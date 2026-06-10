@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -40,34 +41,19 @@ _FILE_TYPE_LABELS = {
 }
 
 
-class _CommitWorker(QObject):
-    """Run ``commit.commit_result`` off the UI thread.
-
-    Connected to a ``QProgressDialog`` via the ``progress`` signal so a
-    5k+ row timesheet import doesn't freeze the app while SQLite is
-    inserting. Each stage of the commit + the post-commit resolution
-    sweeps emits its own progress update.
-    """
-
-    progress = Signal(str, int, int)         # stage, done, total
-    finished = Signal(object, str)           # report, error_message
-
-    def __init__(self, result, entity_id, file_name):
-        super().__init__()
-        self._result = result
-        self._entity_id = entity_id
-        self._file_name = file_name
-
-    def run(self):
-        try:
-            report = commit.commit_result(
-                self._result, self._entity_id, self._file_name,
-                progress_cb=lambda stage, d, t:
-                    self.progress.emit(stage, d, t))
-        except Exception as exc:
-            self.finished.emit(None, str(exc))
-            return
-        self.finished.emit(report, "")
+# v0.3.61/62/63 ran the commit on a QThread with a custom worker and
+# either a nested QEventLoop or a finished-callback to bridge back to
+# the UI thread. On the operator's system both shapes crashed the app
+# AFTER the commit succeeded (records landed in DB, then the process
+# died or hung). Suspected root cause: a QObject lifetime / threading
+# edge case in some PySide6 builds.
+#
+# v0.3.64 drops threading altogether. The commit runs on the UI thread
+# and pumps Qt's event loop via processEvents() between progress
+# stages. For a 5k-row timesheet (~275ms of pure DB work in v0.3.61
+# perf measurements) this is still imperceptible to the operator; for
+# larger imports the UI briefly freezes but the app never dies. A
+# reliable simple flow beats a fast threaded flow that crashes.
 
 
 class ImportPage(QWidget):
@@ -426,12 +412,9 @@ class ImportPage(QWidget):
                     "skipped automatically.") != QMessageBox.Yes:
                 return
 
-        # Heavy work — commit + post-commit resolution sweeps — runs on a
-        # worker thread so a 5k+ row timesheet doesn't freeze the UI.
-        # Progress dialog gives feedback. Result is delivered via the
-        # ``finished`` signal to ``_on_commit_finished`` — no nested
-        # event loop, no QEventLoop. (v0.3.62 used a nested QEventLoop
-        # which caused the app to close on commit on some systems.)
+        # Single-threaded commit with a progress dialog that's pumped
+        # via processEvents() between stages. See the module-level
+        # comment for why threading was dropped in v0.3.64.
         progress = QProgressDialog(
             "Preparing import…", None, 0, 0, self)
         progress.setWindowTitle("Importing")
@@ -439,12 +422,10 @@ class ImportPage(QWidget):
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
-        progress.setCancelButton(None)  # commit is atomic, cancel mid-way
-                                           # would leave partial state
-
-        worker = _CommitWorker(self._result, entity_id, self._path.name)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        QApplication.processEvents()
 
         def on_progress(stage: str, done: int, total: int):
             if total > 0:
@@ -453,31 +434,22 @@ class ImportPage(QWidget):
             else:
                 progress.setRange(0, 0)
             progress.setLabelText(stage)
+            # Pump the event loop so the dialog redraws and the OS
+            # doesn't flag the window as "not responding". Cheap —
+            # progress_cb only fires a handful of times per import.
+            QApplication.processEvents()
 
-        def on_finished(report, error):
-            # Close dialog + tidy up the thread before showing the result
-            # message box. Doing it in this order avoids a window-stacking
-            # crash some Qt builds hit when a modal QMessageBox opens
-            # while a still-active QProgressDialog has focus.
+        try:
+            report = commit.commit_result(
+                self._result, entity_id, self._path.name,
+                progress_cb=on_progress)
+        except Exception as exc:
             progress.close()
-            thread.quit()
-            self._commit_thread = None
-            self._commit_worker = None
-            self._on_commit_finished(report, error)
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
 
-        worker.progress.connect(on_progress)
-        worker.finished.connect(on_finished)
-        thread.started.connect(worker.run)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        # Hold Python refs so the QObject isn't GC'd while still in use.
-        self._commit_thread = thread
-        self._commit_worker = worker
-
-        progress.show()
-        thread.start()
-        # _commit returns immediately — control flows to _on_commit_finished
-        # when the worker reports back.
+        progress.close()
+        self._on_commit_finished(report, "")
 
     def _on_commit_finished(self, report, error: str) -> None:
         """Continuation after the commit worker reports back."""
