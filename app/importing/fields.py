@@ -65,11 +65,23 @@ _SALARY_FIELDS = [
     F("reimbursement", "Reimbursement"),
 ]
 
+# Per-row employee reimbursement sheet. Distinct from the per-employee
+# aggregate ``reimbursement`` column on the salary sheet.
+_REIMBURSEMENT_FIELDS = [
+    F("period", "Period", required=True),
+    F("date", "Date"),
+    F("name", "Employee Name", required=True),
+    F("amount", "Reimbursement Amount", required=True),
+    F("client", "Client Name", required=True),
+    F("client_reimbursable", "Client Reimbursement (Yes/No)", required=True),
+]
+
 FIELDS: dict[str, list[F]] = {
     config.FILE_TYPE_SALES: _SALES_FIELDS,
     config.FILE_TYPE_PURCHASE: _PURCHASE_FIELDS,
     config.FILE_TYPE_TIMESHEET: _TIMESHEET_FIELDS,
     config.FILE_TYPE_SALARY: _SALARY_FIELDS,
+    config.FILE_TYPE_REIMBURSEMENT: _REIMBURSEMENT_FIELDS,
 }
 
 

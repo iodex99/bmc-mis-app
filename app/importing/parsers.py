@@ -289,6 +289,52 @@ def parse_salary(grid: list[list[Any]], colmap: ColMap,
     return result
 
 
+def parse_reimbursement(grid: list[list[Any]], colmap: ColMap,
+                         data_start: int) -> ParseResult:
+    """Parse the firm's per-row reimbursement sheet.
+
+    Expected columns (matched by header label, see sniffer mapping):
+
+    * ``period`` — YYYY-MM or any parseable date / month text
+    * ``date`` — optional, falls back to ``period`` for the day
+    * ``name`` — employee name
+    * ``amount`` — reimbursement amount in ₹
+    * ``client`` — raw client name (resolved at MIS-build time)
+    * ``client_reimbursable`` — yes / no / 1 / 0 / true / false
+
+    Each non-blank row becomes one ``ParsedReimbursement``. Truly empty
+    rows are skipped silently; rows missing only the amount get a
+    warning so the operator can find typos.
+    """
+    result = ParseResult(file_type=config.FILE_TYPE_REIMBURSEMENT)
+    for row in grid[data_start:]:
+        if _is_blank(row):
+            continue
+        name = clean(_cell(row, colmap.get("name")))
+        if not name:
+            continue
+        date = to_date(_cell(row, colmap.get("date")))
+        period = (period_of(_cell(row, colmap.get("period")))
+                   or (period_of(date) if date else None))
+        amount = to_number(_cell(row, colmap.get("amount"))) or 0.0
+        if abs(amount) < 0.01:
+            continue
+        flag_raw = clean(_cell(row, colmap.get("client_reimbursable"))).lower()
+        flag = flag_raw in ("yes", "y", "true", "1", "t")
+        result.reimbursements.append(ParsedReimbursement(
+            period=period,
+            date=date,
+            employee_name=name,
+            client_raw=clean(_cell(row, colmap.get("client"))),
+            amount=amount,
+            client_reimbursable=flag,
+        ))
+    if not result.reimbursements:
+        result.warnings.append(
+            "No reimbursement rows were detected — check the column map.")
+    return result
+
+
 _CANCELLED_KEYWORDS = ("cancel", "void", "cancelled", "voided")
 
 
@@ -382,4 +428,6 @@ def parse(file_type: str, grid: list[list[Any]], colmap: ColMap,
         return parse_timesheet(grid, colmap, data_start)
     if file_type == config.FILE_TYPE_SALARY:
         return parse_salary(grid, colmap, data_start)
+    if file_type == config.FILE_TYPE_REIMBURSEMENT:
+        return parse_reimbursement(grid, colmap, data_start)
     raise ValueError(f"Unknown file type: {file_type}")

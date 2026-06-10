@@ -81,14 +81,34 @@ class ParsedSalaryRow:
 
 
 @dataclass
+class ParsedReimbursement:
+    """One row of the dedicated reimbursement sheet.
+
+    Distinct from ``ParsedSalaryRow.reimbursement`` (which holds the
+    salary sheet's per-employee monthly total). Each row here ties an
+    employee outlay to a specific client and records whether the
+    client refunds the firm. Cost-centre attribution comes from the
+    client master at MIS-build time.
+    """
+    period: str | None = None
+    date: _dt.date | None = None
+    employee_name: str = ""
+    client_raw: str = ""
+    amount: float = 0.0
+    client_reimbursable: bool = False
+
+
+@dataclass
 class ParseResult:
     """Outcome of parsing one file."""
     file_type: str
     vouchers: list[ParsedVoucher] = field(default_factory=list)
     timesheet: list[ParsedTimesheetRow] = field(default_factory=list)
     salary: list[ParsedSalaryRow] = field(default_factory=list)
+    reimbursements: list[ParsedReimbursement] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
     def row_count(self) -> int:
-        return len(self.vouchers) + len(self.timesheet) + len(self.salary)
+        return (len(self.vouchers) + len(self.timesheet)
+                + len(self.salary) + len(self.reimbursements))

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.61** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.62** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,82 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.62 — Reimbursements: dedicated upload sheet + partner P&L impact
+Operator asked for a new dedicated reimbursement sheet (distinct from
+the salary sheet's per-employee monthly aggregate), with these fields
+on each row: period, employee, amount, client, ``client_reimbursable``
+(yes/no). And a corresponding sheet on the generated MIS, AND for
+the amounts to actually move profit.
+
+End-to-end build — schema, parser, commit, calc, report.
+
+**1. Schema (migration v11).** New ``reimbursements`` table:
+``period | txn_date | employee_name | employee_id |
+  client_raw | client_id | amount | client_reimbursable``
+indexed on period. Raw client text resolves to a master row via the
+existing client-resolution sweeps.
+
+**2. Parser + file type.** New ``FILE_TYPE_REIMBURSEMENT`` + canonical
+fields (``period``, ``date``, ``name``, ``amount``, ``client``,
+``client_reimbursable``). New ``parse_reimbursement`` recognises yes /
+y / true / 1 / t (case-insensitive) as ``True`` for the flag. Slots
+into the existing column-mapping dialog automatically.
+
+**3. UI.** New "Reimbursements (per-row sheet)" entry in the Import
+page's file-type dropdown.
+
+**4. Commit.** Batched ``executemany`` for the per-row INSERTs (same
+perf pattern as v0.3.61's timesheet path). ``CommitReport`` gains a
+``reimbursement_rows`` counter.
+
+**5. Resolution.** ``_apply_client_norm_mapping`` and
+``repoint_client_links`` extended to touch
+``reimbursements.client_id`` alongside vouchers + timesheet_entries.
+So a fresh reimbursement upload picks up master mappings, AND adding
+a new client to the master back-links any stale reimbursement rows.
+
+**6. Calc.** New ``MISData.reimbursement_facts`` built by
+``_build_reimbursement_facts``:
+
+* Cost-centre comes from the **client master** (the partner serving
+  that client bears the cost).
+* If the client isn't resolved yet, falls back to the employee's
+  home cost-centre — same chain ``_build_labour_facts`` uses, so
+  reimbursements never silently land on Office.
+
+These facts are rolled into ``CostCentreLine.direct_expense`` on
+each partner so the partner P&L's Direct Expense and Profit reflect
+reimbursements automatically.
+
+**7. Report.** New ``Reimbursements`` sheet:
+``Period | Date | CostCentre | Employee | Client |
+  Client Reimbursable | Amount``
+Cost Centre P&L's Direct Expense formula extended to
+``SUMIFS(Expenses) + SUMIFS(Reimbursements)`` so the live P&L picks
+up the new sheet.
+
+### How this affects profit
+
+* ``client_reimbursable = YES`` — the matching revenue line comes
+  through the Sales Register (as a ``Reimbursement`` / ``OPE``
+  ledger), so the partner P&L nets the wash naturally. No special
+  handling needed on the expense side.
+* ``client_reimbursable = NO`` — the firm absorbs the cost. Partner's
+  Direct Expense rises by the amount; Profit drops by the same.
+
+Cost Centre P&L → Direct Expense → Total Cost → Profit chain
+propagates automatically. Same for Comparatives + Dashboard KPIs.
+
+### End-to-end test verified
+
+4 reimbursement rows: ₹5k (Client A on AM, yes) + ₹2k (Client A on
+AM, no) + ₹1.5k (Client B on JV, yes) + ₹1k (unmapped → falls to
+Sahil's home AM, no).
+``cost_centres`` rollup: AM direct_expense=8,000, JV
+direct_expense=1,500. Reimbursements sheet rendered with all 4 rows
++ proper labels. Cost Centre P&L formula confirmed as
+``SUMIFS(Expenses) + SUMIFS(Reimbursements)``.
 
 ### v0.3.61 — Import performance: 5k-row timesheets in under 300ms
 Operator asked for the import path to scale cleanly: timesheets can run

@@ -36,6 +36,7 @@ from .tally_pull import TallyPullWidget
 _FILE_TYPE_LABELS = {
     config.FILE_TYPE_TIMESHEET: "Timesheet",
     config.FILE_TYPE_SALARY: "Salary & Reimbursements",
+    config.FILE_TYPE_REIMBURSEMENT: "Reimbursements (per-row sheet)",
 }
 
 

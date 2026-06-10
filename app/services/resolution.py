@@ -73,6 +73,17 @@ def _apply_client_norm_mapping(conn, name_to_cid: dict[str, int]) -> int:
             conn.execute("UPDATE timesheet_entries SET client_id = ? WHERE id = ?",
                          (cid, r["id"]))
             linked += 1
+    # Reimbursements: same logic — link client_raw to the master.
+    rows = conn.execute(
+        "SELECT id, client_raw FROM reimbursements "
+        "WHERE client_id IS NULL AND client_raw <> ''").fetchall()
+    for r in rows:
+        cid = name_to_cid.get(norm(r["client_raw"]))
+        if cid is not None:
+            conn.execute(
+                "UPDATE reimbursements SET client_id = ? WHERE id = ?",
+                (cid, r["id"]))
+            linked += 1
     return linked
 
 
@@ -413,7 +424,8 @@ def repoint_client_links(client_id: int, canonical_name: str) -> int:
         #    AND currently point somewhere else (or nowhere).
         for table, raw_col in (
                 ("vouchers", "party_name"),
-                ("timesheet_entries", "client_raw")):
+                ("timesheet_entries", "client_raw"),
+                ("reimbursements", "client_raw")):
             rows = conn.execute(
                 f"SELECT id, {raw_col} FROM {table} "
                 f"WHERE {raw_col} <> '' "

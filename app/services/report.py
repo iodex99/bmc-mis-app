@@ -158,10 +158,12 @@ def generate(data: MISData, path: str | Path,
     _sheet_revenue(wb, data, lbl)
     _sheet_expenses(wb, data, lbl)
     _sheet_salary(wb, data, lbl)
+    _sheet_reimbursements(wb, data, lbl)
     if compare is not None:
         _sheet_revenue(wb, compare, lbl, CMP)
         _sheet_expenses(wb, compare, lbl, CMP)
         _sheet_salary(wb, compare, lbl, CMP)
+        _sheet_reimbursements(wb, compare, lbl, CMP)
 
     # Dashboard KPIs link to the Cost Centre P&L total row.
     _link_dashboard(wb, rows_pl)
@@ -421,6 +423,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     rev = _q("Revenue")
     exp = _q("Expenses")
     lab = _q("Salary")
+    reimb = _q("Reimbursements")
     first = hrow + 1
     n_partners = len(partners)
     # Row order: partners, then Office, then (optional) Unassigned.
@@ -436,7 +439,11 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         _cell(ws, r, 2, name, font=_NORMAL, border=True)
         _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 4, f"=SUMIFS({exp}!$H:$H,{exp}!$D:$D,$A{r})",
+        # Direct Expense includes voucher-driven expenses AND uploaded
+        # reimbursement rows (the latter booked to the client's CC).
+        _cell(ws, r, 4,
+              f"=SUMIFS({exp}!$H:$H,{exp}!$D:$D,$A{r})"
+              f"+SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 5, f"=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r})",
               fmt=INR, border=True)
@@ -1009,6 +1016,44 @@ def _fmt_date(raw):
         return _dt.date.fromisoformat(str(raw)[:10]).strftime("%d-%b-%Y")
     except (ValueError, TypeError):
         return str(raw)
+
+
+def _sheet_reimbursements(wb, data: MISData, lbl: dict,
+                            suffix: str = "") -> None:
+    """Per-row reimbursement detail. One row per uploaded entry.
+
+    Columns: Period | Date | CostCentre | Employee | Client |
+             Client Reimbursable | Amount
+
+    Cost centre comes from the client master (the partner serving
+    that client). The Client column shows the resolved master name
+    or the raw text + a "unmapped" hint if the client_raw hasn't
+    been linked yet.
+
+    Cost Centre P&L SUMIFs against this sheet's Amount column (G)
+    via CostCentre (C) so the partner-level totals include
+    reimbursements.
+    """
+    def _client_label(f):
+        cid = f.get("client_id")
+        if cid is not None:
+            return lbl["cli"].get(cid, "(unmapped)")
+        raw = f.get("client_raw")
+        if raw:
+            return f"{raw}  ← unmapped, link in Review tab"
+        return "(no client)"
+    rows = [[
+        f["period"], _fmt_date(f.get("txn_date")),
+        lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+        f["employee_name"], _client_label(f),
+        "Yes" if f["client_reimbursable"] else "No",
+        round(f["amount"], 2),
+    ] for f in data.reimbursement_facts]
+    _write_data_sheet(
+        wb, "Reimbursements" + suffix,
+        ["Period", "Date", "CostCentre", "Employee", "Client",
+         "Client Reimbursable", "Amount"],
+        [10, 12, 12, 26, 28, 16, 14], rows)
 
 
 def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:

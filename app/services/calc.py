@@ -73,6 +73,7 @@ class MISData:
     revenue_facts: list[dict] = field(default_factory=list)
     expense_facts: list[dict] = field(default_factory=list)
     labour_facts: list[dict] = field(default_factory=list)
+    reimbursement_facts: list[dict] = field(default_factory=list)
     cost_centres: list[CostCentreLine] = field(default_factory=list)
     partner_manager: list[dict] = field(default_factory=list)
     entities: list[dict] = field(default_factory=list)
@@ -131,6 +132,7 @@ def compute(options: MISOptions) -> MISData:
     masters = _load_masters()
     _build_voucher_facts(data, options, masters)
     _build_labour_facts(data, options, masters)
+    _build_reimbursement_facts(data, options, masters)
     _roll_up(data, masters)
     return data
 
@@ -384,6 +386,58 @@ def _client_cost_centre(ts_row, clients: dict, office_id: int | None,
     return default_cc
 
 
+def _build_reimbursement_facts(data: MISData, options: MISOptions,
+                                masters: dict) -> None:
+    """Build one fact per uploaded reimbursement row.
+
+    Each fact's cost-centre is the CLIENT'S cost centre from the master
+    (the partner who serves that client bears the cost). When the
+    client_id hasn't been resolved yet (raw text not matched to master),
+    the fact falls back to the employee's home cost centre — same chain
+    the labour facts use, so it doesn't silently land on Office.
+
+    Whether the firm recovers the cost from the client (the
+    ``client_reimbursable`` flag) is preserved on the fact but does
+    NOT change the expense booking. The corresponding recovery
+    appears on the revenue side via the Sales Register's
+    Reimbursement / OPE ledger lines — the partner P&L nets the wash
+    naturally without us double-handling here.
+    """
+    if not options.periods:
+        return
+    clients = masters["clients"]
+    employees = masters["employees"]
+    emp_index = masters["emp_index"]
+    office_id = masters["office_id"]
+    ph = _placeholders(options.periods)
+    with transaction() as conn:
+        rows = conn.execute(
+            f"SELECT period, txn_date, employee_name, client_id, "
+            f"       client_raw, amount, client_reimbursable "
+            f"FROM reimbursements "
+            f"WHERE period IN ({ph})",
+            options.periods).fetchall()
+    for r in rows:
+        client = clients.get(r["client_id"])
+        cc = client["cost_centre_id"] if client else None
+        if cc is None:
+            emp_id = emp_index.get(norm(r["employee_name"]))
+            if isinstance(emp_id, int):
+                cc = (employees.get(emp_id) or {}).get(
+                    "default_cost_centre_id")
+        cc = cc or office_id
+        data.reimbursement_facts.append({
+            "period": r["period"],
+            "txn_date": r["txn_date"],
+            "cost_centre_id": cc,
+            "employee_name": r["employee_name"],
+            "client_id": r["client_id"],
+            "client_raw": r["client_raw"],
+            "client_reimbursable": bool(r["client_reimbursable"]),
+            "amount": float(r["amount"] or 0.0),
+        })
+
+
 # --- roll-ups ----------------------------------------------------------------
 
 def _roll_up(data: MISData, masters: dict) -> None:
@@ -410,6 +464,14 @@ def _roll_up(data: MISData, masters: dict) -> None:
         line_for(f["cost_centre_id"]).direct_expense += f["amount"]
     for f in data.labour_facts:
         line_for(f["cost_centre_id"]).labour += f["amount"]
+    # Reimbursement costs roll into Direct Expense on the partner P&L.
+    # They behave like any other operating expense: when
+    # client_reimbursable=YES the matching revenue line comes through
+    # the Sales Register as a Reimbursement/OPE ledger, so the
+    # partner's net is washed automatically; when NO the firm absorbs
+    # the cost and the partner's profit drops by that amount.
+    for f in data.reimbursement_facts:
+        line_for(f["cost_centre_id"]).direct_expense += f["amount"]
 
     # Targets (annual, pro-rated to the number of months selected).
     fys = {financial_year(p) for p in options.periods}

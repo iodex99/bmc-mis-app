@@ -371,6 +371,34 @@ MIGRATIONS: list[tuple[int, str]] = [
             created_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """),
+    (11, """
+        -- Per-row employee reimbursements (a separate sheet the operator
+        -- uploads — distinct from the salary sheet's per-employee
+        -- aggregate ``reimbursement`` column, which captures the
+        -- monthly total). Each row says: "Employee X spent ``amount``
+        -- for Client Y in this period; the client refunds us back
+        -- iff client_reimbursable=1".
+        --
+        -- Cost-centre attribution: looked up from the CLIENT master at
+        -- MIS-build time. Each row's cost lands on the partner who
+        -- serves that client. When client_reimbursable=1 the
+        -- corresponding revenue line comes through the Sales Register
+        -- (as a 'Reimbursement' / 'OPE' ledger), so the partner P&L
+        -- nets the wash naturally.
+        CREATE TABLE IF NOT EXISTS reimbursements (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id              INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+            period                TEXT,
+            txn_date              TEXT,
+            employee_name         TEXT,
+            employee_id           INTEGER REFERENCES employees(id),
+            client_raw            TEXT,
+            client_id             INTEGER REFERENCES clients(id),
+            amount                REAL NOT NULL DEFAULT 0,
+            client_reimbursable   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_reimb_period ON reimbursements(period);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

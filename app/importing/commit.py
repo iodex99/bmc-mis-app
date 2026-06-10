@@ -31,10 +31,12 @@ class CommitReport:
     amount_mismatches: list[dict] = field(default_factory=list)  # diff amounts
     timesheet_rows: int = 0
     salary_rows: int = 0
+    reimbursement_rows: int = 0
 
     @property
     def total_inserted(self) -> int:
-        return self.new_vouchers + self.timesheet_rows + self.salary_rows
+        return (self.new_vouchers + self.timesheet_rows
+                + self.salary_rows + self.reimbursement_rows)
 
 
 def _dominant_period(result: ParseResult) -> str | None:
@@ -334,6 +336,30 @@ def commit_result(result: ParseResult, entity_id: int | None,
             if progress_cb:
                 progress_cb("Importing salary rows",
                              len(sal_params), len(sal_params))
+
+        # Reimbursement rows — same shape as timesheet/salary: bulk
+        # executemany with masters cached. Per-row CC lookup happens
+        # at MIS-build time via the client master, not here.
+        if result.reimbursements:
+            if progress_cb:
+                progress_cb("Importing reimbursement rows",
+                             0, len(result.reimbursements))
+            rb_params = [
+                (batch_id, r.period,
+                 r.date.isoformat() if r.date else None,
+                 r.employee_name, r.client_raw, r.amount,
+                 1 if r.client_reimbursable else 0)
+                for r in result.reimbursements]
+            conn.executemany(
+                "INSERT INTO reimbursements "
+                "(batch_id, period, txn_date, employee_name, "
+                " client_raw, amount, client_reimbursable) "
+                "VALUES (?,?,?,?,?,?,?)",
+                rb_params)
+            report.reimbursement_rows = len(rb_params)
+            if progress_cb:
+                progress_cb("Importing reimbursement rows",
+                             len(rb_params), len(rb_params))
     # Auto-mapping after every import:
     #   • apply saved cc-string → (partner, manager) mappings to the new
     #     voucher splits
