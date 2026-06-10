@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.64** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.65** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,26 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.65 — Records page counts reimbursement rows
+Operator imported a 708-row reimbursement sheet on v0.3.64. Import
+preview showed "Parsed 708 records", commit succeeded, but the
+Records page showed the batch as "0 rows" — looked like the data
+had been lost.
+
+Diagnosis: ``records.list_import_batches`` (the SQL feeding the
+Records list) only sums vouchers + timesheet_entries + salary_entries
+per batch. The v0.3.62 reimbursements table was never wired in.
+Verified with a 708-row synthesised import: rows ARE in the DB
+(``SELECT COUNT(*) FROM reimbursements`` returns 708), they just
+weren't being counted in the display.
+
+Fix: extended the SQL to also count ``reimbursements`` per batch
+and added the new field to the Python total used by both the Records
+page summary line and the Delete-confirmation prompt.
+
+After v0.3.65, the operator's batch #18 will read "708 rows" instead
+of "0 rows" without re-importing — the data was always there.
 
 ### v0.3.64 — Drop QThread, commit on UI thread (stop the crash for good)
 Operator still seeing commit crashes / "not responding" after v0.3.63:

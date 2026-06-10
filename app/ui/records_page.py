@@ -88,7 +88,8 @@ class ImportsTab(QWidget):
         ent = repo.fk_label_map("entities")
         body = []
         for b in self._rows:
-            rows_total = (b["vch"] or 0) + (b["ts"] or 0) + (b["sal"] or 0)
+            rows_total = ((b["vch"] or 0) + (b["ts"] or 0)
+                          + (b["sal"] or 0) + (b.get("reim") or 0))
             body.append([
                 b["id"],
                 b["imported_at"][:16] if b["imported_at"] else "",
@@ -114,7 +115,8 @@ class ImportsTab(QWidget):
         if not (0 <= idx < len(self._rows)):
             return
         b = self._rows[idx]
-        rows_total = (b["vch"] or 0) + (b["ts"] or 0) + (b["sal"] or 0)
+        rows_total = ((b["vch"] or 0) + (b["ts"] or 0)
+                          + (b["sal"] or 0) + (b.get("reim") or 0))
         confirm = QMessageBox.warning(
             self, "Delete import?",
             f"This will permanently delete batch #{b['id']} "

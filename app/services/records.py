@@ -20,7 +20,8 @@ def list_import_batches() -> list[dict]:
             "  b.file_name, b.status, "
             "  (SELECT COUNT(*) FROM vouchers v WHERE v.batch_id = b.id) AS vch, "
             "  (SELECT COUNT(*) FROM timesheet_entries t WHERE t.batch_id = b.id) AS ts, "
-            "  (SELECT COUNT(*) FROM salary_entries s WHERE s.batch_id = b.id) AS sal "
+            "  (SELECT COUNT(*) FROM salary_entries s WHERE s.batch_id = b.id) AS sal, "
+            "  (SELECT COUNT(*) FROM reimbursements r WHERE r.batch_id = b.id) AS reim "
             "FROM import_batches b ORDER BY b.imported_at DESC, b.id DESC"
         ).fetchall()
     return [dict(r) for r in rows]
