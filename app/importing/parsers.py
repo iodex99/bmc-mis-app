@@ -10,6 +10,7 @@ from typing import Any
 
 from .. import config
 from .models import (
+    ParsedReimbursement,
     ParsedSalaryRow,
     ParsedTimesheetRow,
     ParsedVoucher,

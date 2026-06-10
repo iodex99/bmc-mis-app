@@ -381,6 +381,14 @@ class ImportPage(QWidget):
             rows = [[t.emp_name, str(t.date or ""), t.client_raw, t.task,
                      f"{t.hours:.2f}", t.reporting_manager,
                      "Yes" if t.is_billable else "No"] for t in res.timesheet]
+        elif res.reimbursements:
+            cols = ["Period", "Date", "Employee", "Client",
+                    "Amount", "Client Reimbursable"]
+            rows = [[r.period or "", str(r.date or ""),
+                     r.employee_name, r.client_raw,
+                     fmt_inr(r.amount, 2),
+                     "Yes" if r.client_reimbursable else "No"]
+                    for r in res.reimbursements]
         else:
             cols = ["Period", "Employee", "Cost Centre", "Entity", "Category",
                     "Salary Paid", "Reimbursement"]
@@ -420,13 +428,17 @@ class ImportPage(QWidget):
 
         # Heavy work — commit + post-commit resolution sweeps — runs on a
         # worker thread so a 5k+ row timesheet doesn't freeze the UI.
-        # Progress dialog gives the operator feedback at each stage.
+        # Progress dialog gives feedback. Result is delivered via the
+        # ``finished`` signal to ``_on_commit_finished`` — no nested
+        # event loop, no QEventLoop. (v0.3.62 used a nested QEventLoop
+        # which caused the app to close on commit on some systems.)
         progress = QProgressDialog(
-            "Preparing import…", "Cancel", 0, 0, self)
+            "Preparing import…", None, 0, 0, self)
         progress.setWindowTitle("Importing")
         progress.setMinimumWidth(420)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.setCancelButton(None)  # commit is atomic, cancel mid-way
                                            # would leave partial state
 
@@ -442,51 +454,48 @@ class ImportPage(QWidget):
                 progress.setRange(0, 0)
             progress.setLabelText(stage)
 
-        result_box = {"report": None, "error": ""}
-
         def on_finished(report, error):
-            result_box["report"] = report
-            result_box["error"] = error
+            # Close dialog + tidy up the thread before showing the result
+            # message box. Doing it in this order avoids a window-stacking
+            # crash some Qt builds hit when a modal QMessageBox opens
+            # while a still-active QProgressDialog has focus.
+            progress.close()
             thread.quit()
+            self._commit_thread = None
+            self._commit_worker = None
+            self._on_commit_finished(report, error)
 
         worker.progress.connect(on_progress)
         worker.finished.connect(on_finished)
         thread.started.connect(worker.run)
         thread.finished.connect(worker.deleteLater)
-        # Hold refs so neither gets GC'd before completion.
+        thread.finished.connect(thread.deleteLater)
+        # Hold Python refs so the QObject isn't GC'd while still in use.
         self._commit_thread = thread
         self._commit_worker = worker
 
         progress.show()
         thread.start()
-        # Block until the worker finishes, but keep the event loop spinning
-        # so the progress dialog redraws and Qt stays responsive.
-        from PySide6.QtCore import QEventLoop
-        loop = QEventLoop()
-        thread.finished.connect(loop.quit)
-        loop.exec()
-        progress.close()
-        self._commit_thread = None
-        self._commit_worker = None
-        report = result_box["report"]
-        error = result_box["error"]
+        # _commit returns immediately — control flows to _on_commit_finished
+        # when the worker reports back.
+
+    def _on_commit_finished(self, report, error: str) -> None:
+        """Continuation after the commit worker reports back."""
         if error or report is None:
             QMessageBox.critical(self, "Import failed",
                                  error or "Unknown error")
             return
 
-        # The commit_result run already applied saved client aliases +
-        # cc-string mappings + ran inference. Just gather the counts so
-        # we can tell the operator what still needs review.
         unmapped_c = len(resolution.unresolved_clients())
         unmapped_e = len(resolution.unresolved_employees())
         unmapped_cc = len(resolution.unresolved_cc_strings())
-        auto_linked = cc_linked = 0  # already done in worker
 
         head_lines = [
             f"Import committed — batch #{report.batch_id}.",
-            f"  • {fmt_inr(report.new_vouchers)} new voucher(s) added.",
         ]
+        if report.new_vouchers:
+            head_lines.append(
+                f"  • {fmt_inr(report.new_vouchers)} new voucher(s) added.")
         if report.skipped_duplicates:
             head_lines.append(
                 f"  • {fmt_inr(report.skipped_duplicates)} duplicate "
@@ -502,6 +511,10 @@ class ImportPage(QWidget):
         if report.salary_rows:
             head_lines.append(
                 f"  • {fmt_inr(report.salary_rows)} salary row(s) added.")
+        if report.reimbursement_rows:
+            head_lines.append(
+                f"  • {fmt_inr(report.reimbursement_rows)} reimbursement "
+                "row(s) added.")
         head = "\n".join(head_lines)
 
         if unmapped_c or unmapped_e or unmapped_cc:

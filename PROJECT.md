@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.62** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.63** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,64 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.63 — Fix v0.3.61 commit-then-close crash + v0.3.62 reimbursement parser
+Operator reported two regressions:
+
+1. The reimbursement sheet uploaded fine through the column-mapping
+   dialog but no preview rendered and the Commit button stayed greyed
+   out.
+2. Tally imports completed (records actually landed in the DB) but
+   the app closed immediately after the commit.
+
+Two unrelated bugs.
+
+**Bug 1 — ``ParsedReimbursement`` was never imported in
+``parsers.py``.** The new ``parse_reimbursement`` function (v0.3.62)
+referenced ``ParsedReimbursement(...)`` to build its result rows, but
+the import statement only pulled the other four model classes. So
+the moment the parser tried to construct its first row it raised
+``NameError`` — silently inside ``parse()``, since the exception
+propagated to the UI layer where ``ResparseResult.row_count == 0``
+left the Commit button disabled.
+
+Fix: one-line import addition. Verified parsing 4 sample rows now
+produces 4 ``reimbursement_facts`` end-to-end. Also added a
+reimbursement preview branch in ``_render_preview`` so the operator
+sees what was parsed in the preview table (Period, Date, Employee,
+Client, Amount, Client Reimbursable) before clicking Commit.
+
+**Bug 2 — nested ``QEventLoop`` in ``_commit`` (introduced v0.3.61).**
+The post-commit flow was:
+
+    progress.show()
+    thread.start()
+    loop = QEventLoop()
+    thread.finished.connect(loop.quit)
+    loop.exec()
+    progress.close()
+    # … show result dialog …
+
+Nesting a ``QEventLoop`` inside a click-handler-driven outer event
+loop is fragile on Qt builds where the outer loop's slot stack
+interacts with subsequent modal dialogs. On the operator's machine
+that interaction was crashing the app after the worker completed
+(but after the commit had already landed in the DB).
+
+Fix: switched to the callback pattern (matches ``settings_page.py``'s
+existing ``_run_thread`` helper). ``_commit`` now returns immediately
+after starting the worker; the worker's ``finished`` signal fires
+``_on_commit_finished(report, error)`` which runs the result-summary
+dialog flow. The progress dialog is closed before the result dialog
+opens, the thread is quit and ``deleteLater``'d cleanly, the Python
+refs to the worker/thread are released. No nested event loops.
+
+Also reported the new ``reimbursement_rows`` counter in the result
+summary dialog ("N reimbursement row(s) added.").
+
+Verified end-to-end: parser produces rows, worker commits without
+error, all 7 progress stages emit, batch report counter populated,
+ImportPage constructs cleanly.
 
 ### v0.3.62 — Reimbursements: dedicated upload sheet + partner P&L impact
 Operator asked for a new dedicated reimbursement sheet (distinct from
