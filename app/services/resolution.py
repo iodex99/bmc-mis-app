@@ -200,7 +200,8 @@ def match_entity(raw_name: str, *,
     return None
 
 
-def apply_known_client_aliases(*, fuzzy_threshold: int = 70) -> int:
+def apply_known_client_aliases(*, fuzzy_threshold: int = 70,
+                                 skip_fuzzy: bool = False) -> int:
     """Auto-link unresolved rows whose raw name matches a known client/alias.
 
     Two passes:
@@ -231,7 +232,8 @@ def apply_known_client_aliases(*, fuzzy_threshold: int = 70) -> int:
         for r in conn.execute("SELECT id, canonical_name FROM clients"):
             pairs[norm(r["canonical_name"])] = r["id"]
         linked = _apply_client_norm_mapping(conn, pairs)
-    linked += _fuzzy_link_clients(threshold=fuzzy_threshold)
+    if not skip_fuzzy:
+        linked += _fuzzy_link_clients(threshold=fuzzy_threshold)
     infer_all_masters()
     return linked
 

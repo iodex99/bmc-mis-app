@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.58** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.59** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,54 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.59 — Salary sheet: distinguish residual from unmapped-timesheet rows
+Operator reported the Salary sheet "only shows (residual / unallocated
+time) in the Client column, the bifurcation is gone — it is not taking
+from the timesheet" after v0.3.58. Investigation: timesheet rows ARE
+in ``labour_facts`` (the data is correct), but v0.3.57 introduced a
+label that converts ANY row with ``client_id IS NULL`` to
+``(residual / unallocated time)``. Many of the operator's timesheet
+rows have ``client_raw`` set (the office boy logged time against
+"Bilimoria Mehta & Co" etc.) but their ``client_id`` was never
+resolved to a master row — so the label made every unresolved
+timesheet row LOOK like residual, hiding the actual bifurcation.
+
+Two-part fix.
+
+**1. Distinguish the three cases in ``labour_facts``.** Each fact now
+carries:
+
+* ``is_residual: bool`` — ``True`` only on rows the builder creates
+  to absorb the leftover ``standard_hours - timesheet_hours``.
+* ``client_raw: str | None`` — the original timesheet text, so when
+  a timesheet row's ``client_id`` is still unresolved the Salary
+  sheet can show the raw text + a hint instead of pretending it's
+  residual.
+
+Salary sheet's Client column now reads:
+
+* resolved client → master canonical name
+* unresolved timesheet → ``"<raw>  ← unmapped, link in Review tab"``
+* true residual → ``"(residual / unallocated time)"``
+
+**2. Auto-resolve clients at MIS-build time (skip fuzzy).** Added a
+``skip_fuzzy=`` flag on ``apply_known_client_aliases`` and called it
+from ``calc.compute`` so any master rows the operator added after
+the last import get a chance to resolve their unmapped timesheet
+rows during MIS generation. The fuzzy pass is deliberately skipped
+at build time — operator can't see/audit new fuzzy auto-links there,
+and the v0.3.50 fuzzy pass already runs as part of imports and
+Master Data Add/Edit.
+
+So if the operator does what the v0.3.58 docs suggested ("edit
+Bilimoria Mehta & Co in Master Data and save without changes"),
+v0.3.58's ``repoint_client_links`` handles the existing wrong-linked
+rows. v0.3.59's build-time sweep handles the still-unlinked rows
+for any client master row added later.
+
+Smoke test verifies all four Salary-sheet cases produce the right
+label and the right CC attribution.
 
 ### v0.3.58 — Salary sheet correctness: stale links auto-fix + Date col + Client Billing formulas
 Operator reported the firm's own name "Bilimoria Mehta & Co" (when

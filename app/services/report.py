@@ -1013,12 +1013,26 @@ def _fmt_date(raw):
 
 def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     def _client_label(f):
-        # Residual rows (no specific client) get a distinct label so the
-        # operator can tell un-timesheeted hours from genuinely unmapped
-        # clients.
-        if f.get("client_id") is None:
+        # Three distinct cases the operator needs to tell apart:
+        # 1. Truly residual (no timesheet logged) — distinct from
+        #    a timesheet row that just hasn't had its raw client text
+        #    resolved to a master row yet.
+        # 2. Timesheet row with a resolved client_id — show the
+        #    canonical name.
+        # 3. Timesheet row with an unresolved client — show the raw
+        #    text from the timesheet + a hint so the operator knows
+        #    to map it in the Review tab. (Pre-v0.3.59 this got
+        #    labelled "(residual / unallocated time)" along with case 1,
+        #    making it look like the timesheet bifurcation had vanished.)
+        if f.get("is_residual"):
             return "(residual / unallocated time)"
-        return lbl["cli"].get(f["client_id"], "(unmapped)")
+        cid = f.get("client_id")
+        if cid is not None:
+            return lbl["cli"].get(cid, "(unmapped)")
+        raw = f.get("client_raw")
+        if raw:
+            return f"{raw}  ← unmapped, link in Review tab"
+        return "(no client)"
     rows = [[f["period"], _fmt_date(f.get("txn_date")),
              lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
              f["employee_name"], _client_label(f),

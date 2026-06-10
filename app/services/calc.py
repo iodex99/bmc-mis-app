@@ -104,11 +104,29 @@ def financial_year(period: str) -> str:
 # --- main entry point --------------------------------------------------------
 
 def compute(options: MISOptions) -> MISData:
-    """Run the full calculation for the selected periods."""
+    """Run the full calculation for the selected periods.
+
+    Re-runs name resolution before reading masters so any client /
+    employee master rows the operator added since the last import get
+    picked up. Otherwise timesheet ``client_raw`` rows imported before
+    a client was added stay forever unresolved — exactly the symptom
+    behind the "Salary sheet only shows unallocated time" report.
+    """
     data = MISData(options=options)
     if not options.periods:
         data.warnings.append("No period selected.")
         return data
+
+    # Cheap idempotent sweep — picks up any new master rows the
+    # operator added since the last import so unresolved timesheet /
+    # voucher rows finally get their client_id. We deliberately
+    # skip the fuzzy pass here: it's risky to introduce new fuzzy
+    # auto-links at report-generation time (operator can't see what
+    # happened), and the v0.3.50 fuzzy logic already runs as part of
+    # imports + Master Data add/edit. Only the safe exact / alias
+    # matches fire at build time.
+    from .resolution import apply_known_client_aliases
+    apply_known_client_aliases(skip_fuzzy=True)
 
     masters = _load_masters()
     _build_voucher_facts(data, options, masters)
@@ -218,7 +236,8 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             f"reimbursement FROM salary_entries WHERE period IN ({ph})",
             options.periods).fetchall()
         ts_rows = conn.execute(
-            f"SELECT period, txn_date, emp_name, client_id, hours, is_billable "
+            f"SELECT period, txn_date, emp_name, client_raw, client_id, "
+            f"       hours, is_billable "
             f"FROM timesheet_entries WHERE period IN ({ph})",
             options.periods).fetchall()
         overhead_rows = conn.execute(
@@ -283,7 +302,14 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "period": period,
                     "txn_date": t["txn_date"],
                     "cost_centre_id": cc,
-                    "employee_name": rec["name"], "client_id": t["client_id"],
+                    "employee_name": rec["name"],
+                    "client_id": t["client_id"],
+                    # Preserve the raw text from the timesheet so the
+                    # Salary sheet can show it when the client_id link
+                    # hasn't been resolved yet (much more useful than
+                    # printing "(unmapped)" with no further info).
+                    "client_raw": t["client_raw"],
+                    "is_residual": False,
                     "hours": h, "amount": h * rate,
                 })
             # Residual hours go to the employee's home CC so the FULL
@@ -294,7 +320,10 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "period": period,
                     "txn_date": None,
                     "cost_centre_id": home_cc,
-                    "employee_name": rec["name"], "client_id": None,
+                    "employee_name": rec["name"],
+                    "client_id": None,
+                    "client_raw": None,
+                    "is_residual": True,
                     "hours": residual, "amount": residual * rate,
                 })
         elif total_cost:
@@ -303,7 +332,10 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "period": period,
                 "txn_date": None,
                 "cost_centre_id": home_cc,
-                "employee_name": rec["name"], "client_id": None,
+                "employee_name": rec["name"],
+                "client_id": None,
+                "client_raw": None,
+                "is_residual": True,
                 "hours": std_hours, "amount": total_cost,
             })
 
