@@ -308,10 +308,21 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     continue
                 cc = _client_cost_centre(t, clients, office_id,
                                           home_cc=home_cc)
+                # Client's own CC — only populated for billable rows
+                # whose client master row has a CC set. The Salary
+                # sheet's "Client CC" column displays this; rendered
+                # blank otherwise (residual, non-billable, overhead).
+                client_cc = None
+                if t["is_billable"] and t["client_id"] is not None:
+                    client = clients.get(t["client_id"])
+                    if client and client["cost_centre_id"] is not None:
+                        client_cc = client["cost_centre_id"]
                 data.labour_facts.append({
                     "period": period,
                     "txn_date": t["txn_date"],
                     "cost_centre_id": cc,
+                    "home_cost_centre_id": home_cc,
+                    "client_cost_centre_id": client_cc,
                     "employee_name": rec["name"],
                     "client_id": t["client_id"],
                     "client_raw": t["client_raw"],
@@ -319,14 +330,14 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "is_overhead": False,
                     "hours": h, "amount": h * salary_rate,
                 })
-            # Residual salary hours go to home CC so the full salary
-            # gets allocated even when timesheet is sparse.
             residual = std_hours - total_logged
             if residual > 0.01 and salary_rate > 0:
                 data.labour_facts.append({
                     "period": period,
                     "txn_date": None,
                     "cost_centre_id": home_cc,
+                    "home_cost_centre_id": home_cc,
+                    "client_cost_centre_id": None,
                     "employee_name": rec["name"],
                     "client_id": None,
                     "client_raw": None,
@@ -335,11 +346,12 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "hours": residual, "amount": residual * salary_rate,
                 })
         elif rec["amount"]:
-            # No hours logged — entire salary to home CC.
             data.labour_facts.append({
                 "period": period,
                 "txn_date": None,
                 "cost_centre_id": home_cc,
+                "home_cost_centre_id": home_cc,
+                "client_cost_centre_id": None,
                 "employee_name": rec["name"],
                 "client_id": None,
                 "client_raw": None,
@@ -348,14 +360,13 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "hours": std_hours, "amount": rec["amount"],
             })
 
-        # OVERHEAD: a single row per employee, fully attributed to the
-        # employee's home CC. Doesn't depend on timesheet hours and
-        # doesn't get sliced across other partners' clients.
         if overhead > 0:
             data.labour_facts.append({
                 "period": period,
                 "txn_date": None,
                 "cost_centre_id": home_cc,
+                "home_cost_centre_id": home_cc,
+                "client_cost_centre_id": None,
                 "employee_name": rec["name"],
                 "client_id": None,
                 "client_raw": None,

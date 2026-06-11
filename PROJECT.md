@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.67** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.68** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,43 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.68 — Salary sheet: three-CC representation for clarity
+
+Operator pointed out that the single "CostCentre" column on the
+Salary sheet — while computing the right destination — was opaque.
+Reading a row "Bhavya / ABC / VK" you couldn't tell at a glance why
+SD's employee landed on VK without cross-referencing the client
+master. The mechanics were correct since v0.3.57 (billable hours
+follow the client's CC because that's where the revenue lands),
+but the transparency was missing.
+
+Three CC columns on the Salary sheet now:
+
+* **Charged To** (was "CostCentre", same column C — SUMIFS unchanged
+  in semantics) — where the cost actually lands.
+* **Client CC** (NEW, col F) — the CC the worked-on client belongs
+  to. Blank for residual / non-billable / overhead rows.
+* **Home CC** (NEW, col G) — the employee's home CC from the master.
+  Always populated; differing from "Charged To" instantly signals
+  cross-partner work.
+
+A row reads top-to-bottom: "Bhavya (Home SD) worked on ABC (Client
+CC VK) → 4 h charged to VK." No master cross-reference needed.
+
+Column shift cascade: Hours F→H, Amount G→I, Type H→J. All five
+SUMIFS sites that reference the Salary sheet were repointed:
+Cost Centre P&L Salary Cost + Allocated Overhead; Partner-Manager
+P&L labour_sumifs + overhead; Comparatives comp labour. The
+labour_sumifs in the Partner-Manager P&L additionally picked up a
+Type="Salary" filter so the Overhead rows (v0.3.67) don't
+double-count under the salary line.
+
+Verified with the operator's example: Bhavya 4 h on ABC ⇒ row
+shows Charged VK / Client CC VK / Home CC SD. Isha 6 h on XYZ ⇒
+Charged SD / Client CC SD / Home CC VK. Per-partner sums:
+VK ₹49,596 salary + ₹5,000 overhead, SD ₹50,403 salary + ₹5,000
+overhead.
 
 ### v0.3.67 — Fixed office overhead reaches Cost Centre P&L + variance off revenue
 

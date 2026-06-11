@@ -451,8 +451,8 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # broken out separately into the Allocated Overhead column,
         # not bundled inside Salary Cost as it was pre-v0.3.67.
         _cell(ws, r, 5,
-              f'=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r},'
-              f'{lab}!$H:$H,"Salary")',
+              f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
+              f'{lab}!$J:$J,"Salary")',
               fmt=INR, border=True)
         # Allocated Overhead: ONLY the Overhead-type rows of the Salary
         # sheet. v0.3.57 created these per employee from the
@@ -463,8 +463,8 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # incurred by each employee … expense to the respective cost
         # centre of the employee from the emp master").
         _cell(ws, r, 6,
-              f'=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r},'
-              f'{lab}!$H:$H,"Overhead")',
+              f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
+              f'{lab}!$J:$J,"Overhead")',
               fmt=INR, border=True)
         _cell(ws, r, 7, f"=D{r}+E{r}+F{r}", fmt=INR, border=True, font=_NORMAL)
         _cell(ws, r, 8, f"=C{r}-G{r}", fmt=INR, border=True)
@@ -675,10 +675,13 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         return "=SUMIFS(" + ",".join(parts) + ")"
 
     def labour_sumifs(cc_code):
-        # Labour facts don't carry a manager, so cells under a manager column
-        # just read the partner-level labour cost. We attribute it to the
-        # partner's "Self" (first) column only, leaving manager columns at 0.
-        return f"=SUMIFS({lab}!$G:$G,{lab}!$C:$C,\"{cc_code}\")"
+        # Labour (salary) facts don't carry a manager, so cells under
+        # a manager column just read the partner-level salary cost.
+        # Attributed to the partner's "Self" (first) column only.
+        # Filter by Type="Salary" so the Overhead facts (v0.3.67) don't
+        # double-count here — they have their own dedicated row.
+        return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                f'{lab}!$J:$J,"Salary")')
 
     # Row layout. Each entry: (label, kind, params)
     # kinds:
@@ -749,8 +752,8 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     # SUMIFS on Type="Overhead" so it stays formula-
                     # driven (v0.3.67). Pre-v0.3.67 baked the computed
                     # number directly into the cell.
-                    formula = (f'=SUMIFS({lab}!$G:$G,{lab}!$C:$C,'
-                               f'"{cc_code}",{lab}!$H:$H,"Overhead")')
+                    formula = (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,'
+                               f'"{cc_code}",{lab}!$J:$J,"Overhead")')
                 elif is_total_col and kind == "net":
                     gross_r = rows_by_kind["gross"]
                     overhead_r = rows_by_kind["overhead"]
@@ -1092,21 +1095,41 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
         if raw:
             return f"{raw}  ← unmapped, link in Review tab"
         return "(no client)"
-    # Type column lets the Cost Centre P&L's SUMIFS split Salary Cost
-    # from Allocated Overhead. "Salary" includes both real timesheet
-    # rows and salary-side residual rows; "Overhead" is the flat
-    # per-employee fixed_office_overhead amount, attributed entirely
-    # to the employee's home CC.
+    # Column layout (v0.3.68 — three CC columns for clarity):
+    #   A Period         B Date           C Charged To      D Employee
+    #   E Client         F Client CC      G Home CC         H Hours
+    #   I Amount         J Type
+    #
+    # "Charged To" (was "CostCentre" pre-v0.3.68) = where the cost
+    # actually lands. SUMIFS in Cost Centre P&L / Partner-Manager P&L
+    # uses this column (still at C) so existing formulas keep working;
+    # the rename is header-only.
+    # "Client CC" — the CC the worked-on client belongs to; blank for
+    # residual / non-billable / overhead rows. Helps the operator see
+    # WHY a billable slice was charged to a partner other than the
+    # employee's home.
+    # "Home CC" — the employee's home CC from the master. Always
+    # populated. Lets the operator read the salary bifurcation at a
+    # glance: an employee whose Home CC differs from Charged To has
+    # worked on a client belonging to another partner.
+    # Type — "Salary" or "Overhead"; SUMIFS uses this (now at J) to
+    # split Salary Cost from Allocated Overhead.
+    def _cc_label(cc_id):
+        if cc_id is None:
+            return ""
+        return lbl["cc"].get(cc_id, "")
     rows = [[f["period"], _fmt_date(f.get("txn_date")),
-             lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+             _cc_label(f["cost_centre_id"]) or "Unassigned",
              f["employee_name"], _client_label(f),
+             _cc_label(f.get("client_cost_centre_id")),
+             _cc_label(f.get("home_cost_centre_id")),
              round(f["hours"], 2), round(f["amount"], 2),
              "Overhead" if f.get("is_overhead") else "Salary"]
             for f in data.labour_facts]
     _write_data_sheet(wb, "Salary" + suffix,
-                      ["Period", "Date", "CostCentre", "Employee", "Client",
-                       "Hours", "Amount", "Type"],
-                      [10, 12, 12, 26, 28, 12, 14, 12], rows)
+                      ["Period", "Date", "Charged To", "Employee", "Client",
+                       "Client CC", "Home CC", "Hours", "Amount", "Type"],
+                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12], rows)
 
 
 # --- Comparatives ------------------------------------------------------------
@@ -1152,7 +1175,7 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
         # Comparison profit = comp revenue − comp direct − comp labour.
         _cell(ws, r, 7,
               f"=D{r}-SUMIFS({exp_c}!$H:$H,{exp_c}!$D:$D,$A{r})"
-              f"-SUMIFS({lab_c}!$G:$G,{lab_c}!$C:$C,$A{r})",
+              f"-SUMIFS({lab_c}!$I:$I,{lab_c}!$C:$C,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 8, f"=F{r}-G{r}", fmt=INR, border=True)
         _cell(ws, r, 9, f"=IF(G{r}=0,\"\",(F{r}-G{r})/ABS(G{r}))",
