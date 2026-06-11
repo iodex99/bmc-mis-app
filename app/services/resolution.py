@@ -313,7 +313,23 @@ def _fuzzy_link_clients(*, threshold: int = 70, gap: int = 5) -> int:
 
 
 def unresolved_clients() -> list[dict]:
-    """Distinct raw client names not yet linked, with their source and counts."""
+    """Distinct raw party names not yet linked, with their source counts.
+
+    Pulls from EVERY table that carries a client-link column —
+    sales vouchers, purchase vouchers, timesheet entries, and the
+    per-row reimbursement sheet. Pre-v0.3.66 only sales + timesheet
+    were queried, so purchase-register parties (e.g. a vendor name
+    that turns out to actually be a billable client whose master
+    row doesn't exist yet) silently never surfaced in the Review
+    queue. Same omission for reimbursement client_raw values.
+
+    Most purchase-register parties ARE vendors and won't be mapped —
+    that's fine, they just stay unmapped. But the few that are
+    legitimately clients (or recharged-to-client expenses the firm
+    tracks per partner) now show up so the operator can map them.
+    Sort order is by count descending so the high-volume entries
+    bubble to the top regardless of which table they came from.
+    """
     with transaction() as conn:
         agg: dict[str, dict] = {}
         for r in conn.execute(
@@ -322,10 +338,20 @@ def unresolved_clients() -> list[dict]:
                 "AND party_name <> '' GROUP BY lower(trim(party_name))"):
             _bump(agg, r["raw"], "Sales", r["n"])
         for r in conn.execute(
+                "SELECT party_name AS raw, COUNT(*) AS n FROM vouchers "
+                "WHERE kind = 'expense' AND client_id IS NULL "
+                "AND party_name <> '' GROUP BY lower(trim(party_name))"):
+            _bump(agg, r["raw"], "Purchase", r["n"])
+        for r in conn.execute(
                 "SELECT client_raw AS raw, COUNT(*) AS n FROM timesheet_entries "
                 "WHERE client_id IS NULL AND client_raw <> '' "
                 "GROUP BY lower(trim(client_raw))"):
             _bump(agg, r["raw"], "Timesheet", r["n"])
+        for r in conn.execute(
+                "SELECT client_raw AS raw, COUNT(*) AS n FROM reimbursements "
+                "WHERE client_id IS NULL AND client_raw <> '' "
+                "GROUP BY lower(trim(client_raw))"):
+            _bump(agg, r["raw"], "Reimbursement", r["n"])
     return sorted(agg.values(), key=lambda d: -d["count"])
 
 

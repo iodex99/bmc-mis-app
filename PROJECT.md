@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.65** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.66** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,38 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.66 — Review queue shows purchase + reimbursement parties
+Operator reported parties from the Purchase Register weren't appearing
+in the Review & Map tab even though the corresponding client master
+rows didn't exist.
+
+Root cause: ``resolution.unresolved_clients`` hard-coded
+``WHERE kind = 'sales'`` when scanning ``vouchers``, and never
+queried ``reimbursements`` at all. v0.3.46 had extended the
+auto-LINK pass to all voucher kinds; the Review LISTING never
+caught up. v0.3.62 added the reimbursements table; the listing
+never knew about it either.
+
+Fix: the unresolved list now pulls from all four sources:
+
+* ``vouchers WHERE kind = 'sales'``       → labelled "Sales"
+* ``vouchers WHERE kind = 'expense'``     → labelled "Purchase"
+* ``timesheet_entries``                   → labelled "Timesheet"
+* ``reimbursements``                      → labelled "Reimbursement"
+
+All four merged into the existing ``raw → count + sources`` aggregator
+and sorted by count descending so the high-volume entries surface at
+the top regardless of which table they came from.
+
+Most purchase-register parties ARE vendors and don't need mapping —
+they just stay in the list as unmapped. But the few that are
+legitimately clients (or recharged-to-client expenses tracked
+per partner) now show up so the operator can map them.
+
+Verified with a 4-source synthesized scenario: 5 unresolved entries
+returned, including the 2 purchase-side parties and 1 reimbursement
+party that v0.3.65 would have hidden.
 
 ### v0.3.65 — Records page counts reimbursement rows
 Operator imported a 708-row reimbursement sheet on v0.3.64. Import
