@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-05-29
 >
-> Current version: **v0.3.66** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.67** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,49 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.67 — Fixed office overhead reaches Cost Centre P&L + variance off revenue
+
+Three coordinated changes:
+
+**1. Allocated Overhead column now reflects the master-defined fixed
+office overhead.** Pre-v0.3.67 the per-employee overhead from the
+``fixed_office_overhead`` master got rolled into the per-employee
+salary RATE in ``_build_labour_facts``, which meant the overhead
+silently bifurcated across whichever partner's clients an employee
+worked on — useful in some costing theories but NOT what the
+operator wants. They told us plainly: "the allocated overhead is a
+fixed cost incurred by each employee in that particular month, so
+it will be an expense to the respective cost centre of the employee,
+which you can find from the emp master." So:
+
+* ``calc.py`` — salary rate uses salary only (not salary + overhead).
+* Each employee now gets ONE additional ``is_overhead=True`` labour
+  fact per period, entirely on their home CC, with no timesheet
+  bifurcation.
+* Salary sheet gains a ``Type`` column ("Salary" / "Overhead").
+* Cost Centre P&L "Salary Cost" column = SUMIFS over Type="Salary".
+* Cost Centre P&L "Allocated Overhead" column = SUMIFS over
+  Type="Overhead" — fully formula-driven.
+* Partner-Manager P&L overhead row now SUMIFS-driven too (was a
+  baked numeric value).
+
+**2. All MIS cells that can be formula-driven now are.** Auditing
+the Cost Centre P&L and Partner-Manager P&L confirmed every Salary
+Cost / Allocated Overhead reference now uses SUMIFS against the
+data sheets rather than baked values from the calc engine. The only
+non-formula numbers left are: Targets (master input), and master
+lookup labels — everything else recomputes when data sheet rows
+change.
+
+**3. Variance = Revenue − Target.** Pre-v0.3.67 was
+``Profit − Target`` which conflated achievement-against-revenue-
+target with operating profit margin. Changed to ``=C{r}-I{r}``.
+
+Verified with a 2-employee × ₹50k salary + ₹10k overhead each
+scenario: AM home gets ₹98,387 salary + ₹20,000 overhead, JV (where
+Emp1 logged 8h on a JV client) gets ₹1,613 salary and ZERO
+overhead. Variance formula correctly reads ``=C6-I6`` on the AM row.
 
 ### v0.3.66 — Review queue shows purchase + reimbursement parties
 Operator reported parties from the Purchase Register weren't appearing

@@ -437,24 +437,42 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     def write_row(r, code, name, target, kind):
         _cell(ws, r, 1, code, font=_NORMAL, border=True)
         _cell(ws, r, 2, name, font=_NORMAL, border=True)
+        # Revenue: SUMIFS over the Revenue sheet (col H = Amount).
         _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})",
               fmt=INR, border=True)
-        # Direct Expense includes voucher-driven expenses AND uploaded
-        # reimbursement rows (the latter booked to the client's CC).
+        # Direct Expense: voucher-driven expenses + reimbursement rows
+        # (the latter booked to the client's CC).
         _cell(ws, r, 4,
               f"=SUMIFS({exp}!$H:$H,{exp}!$D:$D,$A{r})"
               f"+SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 5, f"=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r})",
+        # Salary Cost: ONLY the Salary-type rows of the Salary sheet
+        # (Type column = "Salary"). The fixed office overhead is now
+        # broken out separately into the Allocated Overhead column,
+        # not bundled inside Salary Cost as it was pre-v0.3.67.
+        _cell(ws, r, 5,
+              f'=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r},'
+              f'{lab}!$H:$H,"Salary")',
               fmt=INR, border=True)
-        # Allocated overhead (col F).
-        _cell(ws, r, 6, _overhead_formula(r, kind, office_row, first,
-                                          n_partners, mode),
+        # Allocated Overhead: ONLY the Overhead-type rows of the Salary
+        # sheet. v0.3.57 created these per employee from the
+        # fixed_office_overhead master, attributed wholly to the
+        # employee's home CC. Replacing v0.3.56's office-actuals
+        # spread logic with this master-driven formula was the v0.3.67
+        # operator ask ("the allocated overhead is a fixed cost
+        # incurred by each employee … expense to the respective cost
+        # centre of the employee from the emp master").
+        _cell(ws, r, 6,
+              f'=SUMIFS({lab}!$G:$G,{lab}!$C:$C,$A{r},'
+              f'{lab}!$H:$H,"Overhead")',
               fmt=INR, border=True)
         _cell(ws, r, 7, f"=D{r}+E{r}+F{r}", fmt=INR, border=True, font=_NORMAL)
         _cell(ws, r, 8, f"=C{r}-G{r}", fmt=INR, border=True)
         _cell(ws, r, 9, target or 0, fmt=INR, border=True)
-        _cell(ws, r, 10, f"=H{r}-I{r}", fmt=INR, border=True)
+        # Variance: Revenue − Target (v0.3.67). Pre-v0.3.67 was
+        # Profit − Target which confused achievement-against-revenue-
+        # target with operating profit margin.
+        _cell(ws, r, 10, f"=C{r}-I{r}", fmt=INR, border=True)
         _cell(ws, r, 11, f"=IF(C{r}=0,0,H{r}/C{r})", fmt=PCT, border=True,
               align=_CENTER)
 
@@ -727,8 +745,12 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                                f"{L}{gross_r}/{L}{inc_r})")
                 elif is_total_col and kind == "overhead":
                     # Allocated office overhead is partner-level, not
-                    # manager-level — write the value into the Total column.
-                    formula = round(overhead_by_code.get(cc_code, 0.0), 2)
+                    # manager-level — pull from the Salary sheet via
+                    # SUMIFS on Type="Overhead" so it stays formula-
+                    # driven (v0.3.67). Pre-v0.3.67 baked the computed
+                    # number directly into the cell.
+                    formula = (f'=SUMIFS({lab}!$G:$G,{lab}!$C:$C,'
+                               f'"{cc_code}",{lab}!$H:$H,"Overhead")')
                 elif is_total_col and kind == "net":
                     gross_r = rows_by_kind["gross"]
                     overhead_r = rows_by_kind["overhead"]
@@ -1058,17 +1080,9 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
 
 def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     def _client_label(f):
-        # Three distinct cases the operator needs to tell apart:
-        # 1. Truly residual (no timesheet logged) — distinct from
-        #    a timesheet row that just hasn't had its raw client text
-        #    resolved to a master row yet.
-        # 2. Timesheet row with a resolved client_id — show the
-        #    canonical name.
-        # 3. Timesheet row with an unresolved client — show the raw
-        #    text from the timesheet + a hint so the operator knows
-        #    to map it in the Review tab. (Pre-v0.3.59 this got
-        #    labelled "(residual / unallocated time)" along with case 1,
-        #    making it look like the timesheet bifurcation had vanished.)
+        # Distinct labels for residual vs unresolved-timesheet vs resolved.
+        if f.get("is_overhead"):
+            return "(fixed office overhead per employee)"
         if f.get("is_residual"):
             return "(residual / unallocated time)"
         cid = f.get("client_id")
@@ -1078,15 +1092,21 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
         if raw:
             return f"{raw}  ← unmapped, link in Review tab"
         return "(no client)"
+    # Type column lets the Cost Centre P&L's SUMIFS split Salary Cost
+    # from Allocated Overhead. "Salary" includes both real timesheet
+    # rows and salary-side residual rows; "Overhead" is the flat
+    # per-employee fixed_office_overhead amount, attributed entirely
+    # to the employee's home CC.
     rows = [[f["period"], _fmt_date(f.get("txn_date")),
              lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
              f["employee_name"], _client_label(f),
-             round(f["hours"], 2), round(f["amount"], 2)]
+             round(f["hours"], 2), round(f["amount"], 2),
+             "Overhead" if f.get("is_overhead") else "Salary"]
             for f in data.labour_facts]
     _write_data_sheet(wb, "Salary" + suffix,
                       ["Period", "Date", "CostCentre", "Employee", "Client",
-                       "Hours", "Amount"],
-                      [10, 12, 12, 26, 28, 12, 14], rows)
+                       "Hours", "Amount", "Type"],
+                      [10, 12, 12, 26, 28, 12, 14, 12], rows)
 
 
 # --- Comparatives ------------------------------------------------------------

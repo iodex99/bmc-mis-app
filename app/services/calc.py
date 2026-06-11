@@ -283,9 +283,16 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         rows = hours.get(key, [])
         total_logged = sum(float(t["hours"] or 0.0) for t in rows)
         overhead = overhead_by_period.get(period, 0.0)
-        total_cost = rec["amount"] + overhead
         std_hours = standard_hours(period)
-        rate = total_cost / std_hours if std_hours else 0.0
+        # SALARY rate uses salary alone (NOT salary + overhead). v0.3.57
+        # baked them together which let overhead bifurcate across whichever
+        # partner's client the employee worked on. v0.3.67 separates the
+        # two: salary still bifurcates by timesheet (rate × hours per
+        # client's CC), overhead is a flat per-employee cost that lands
+        # entirely on the employee's home CC — exactly as the operator
+        # specified ("a fixed cost incurred by each employee … expense to
+        # the respective cost centre of the employee, from the emp master").
+        salary_rate = rec["amount"] / std_hours if std_hours else 0.0
 
         # Home CC: master record → fallback to salary's CC → Office.
         home_cc = rec["fallback_cc"]
@@ -307,18 +314,15 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "cost_centre_id": cc,
                     "employee_name": rec["name"],
                     "client_id": t["client_id"],
-                    # Preserve the raw text from the timesheet so the
-                    # Salary sheet can show it when the client_id link
-                    # hasn't been resolved yet (much more useful than
-                    # printing "(unmapped)" with no further info).
                     "client_raw": t["client_raw"],
                     "is_residual": False,
-                    "hours": h, "amount": h * rate,
+                    "is_overhead": False,
+                    "hours": h, "amount": h * salary_rate,
                 })
-            # Residual hours go to the employee's home CC so the FULL
-            # monthly cost (salary + overhead) gets allocated.
+            # Residual salary hours go to home CC so the full salary
+            # gets allocated even when timesheet is sparse.
             residual = std_hours - total_logged
-            if residual > 0.01 and rate > 0:
+            if residual > 0.01 and salary_rate > 0:
                 data.labour_facts.append({
                     "period": period,
                     "txn_date": None,
@@ -327,10 +331,11 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "client_id": None,
                     "client_raw": None,
                     "is_residual": True,
-                    "hours": residual, "amount": residual * rate,
+                    "is_overhead": False,
+                    "hours": residual, "amount": residual * salary_rate,
                 })
-        elif total_cost:
-            # No hours logged — entire monthly cost to the home CC.
+        elif rec["amount"]:
+            # No hours logged — entire salary to home CC.
             data.labour_facts.append({
                 "period": period,
                 "txn_date": None,
@@ -339,7 +344,24 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "client_id": None,
                 "client_raw": None,
                 "is_residual": True,
-                "hours": std_hours, "amount": total_cost,
+                "is_overhead": False,
+                "hours": std_hours, "amount": rec["amount"],
+            })
+
+        # OVERHEAD: a single row per employee, fully attributed to the
+        # employee's home CC. Doesn't depend on timesheet hours and
+        # doesn't get sliced across other partners' clients.
+        if overhead > 0:
+            data.labour_facts.append({
+                "period": period,
+                "txn_date": None,
+                "cost_centre_id": home_cc,
+                "employee_name": rec["name"],
+                "client_id": None,
+                "client_raw": None,
+                "is_residual": False,
+                "is_overhead": True,
+                "hours": 0.0, "amount": overhead,
             })
 
     # Even employees with no salary entry can have a per-period overhead
