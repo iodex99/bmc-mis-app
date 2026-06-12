@@ -17,9 +17,11 @@ See [PROJECT.md](PROJECT.md) for the full specification, decisions and design.
    remembered), and split vouchers across `Partner – Manager` strings.
 3. **Master Data** — maintain entities, cost centres, managers, employees,
    clients, services and annual targets — all add/edit/deactivate.
-4. **Generate MIS** — pick the month(s), set the toggles (reimbursements,
-   office-expense allocation) and an optional comparison period, then export a
-   multi-sheet Excel workbook where every report figure is a live formula.
+4. **Generate MIS** — pick the month(s), set the reimbursements toggle and an
+   optional comparison period, then export a multi-sheet Excel workbook where
+   every report figure is a live formula. Office overhead is computed from
+   the books automatically (Office-cost-centre indirect expenses ÷ active
+   employees — see the Employee Register sheet).
 
 All history is kept in a local SQLite database, so any period can be
 re-reported or compared at any time.
