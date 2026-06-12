@@ -29,6 +29,10 @@ class ParsedVoucher:
     period: str | None = None
     vch_type: str = ""
     vch_no: str = ""
+    # Bill reference from the register's "New Ref" sub-row (the vendor's /
+    # firm's invoice number). "Agst Ref" is the fallback when a voucher
+    # only adjusts an existing reference. Multiple refs join with ", ".
+    invoice_no: str = ""
     party_name: str = ""
     kind: str = "expense"                 # sales | expense
     gross_amount: float = 0.0             # total billed / payable

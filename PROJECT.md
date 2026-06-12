@@ -1,8 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-05-29
+> Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.68** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.69** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.44)
+## 16. Post-launch iterations (v0.2.0 → v0.3.69)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,86 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.69 — Multi-CC splits, invoice no, expense bifurcation, Employee Register, books-driven overhead
+
+One coordinated release covering the operator's eight-point list.
+
+**1. Parser: multi-cost-centre voucher splits (the big one).** A
+ledger line followed by SEVERAL Dr/Cr cost-centre tags ("PROFESSIONAL
+FEES 3,60,000" tagged "Mr. Shreyans Dedhia 1,60,000" + "Mr. Vishal
+Kothari 2,00,000") was keeping only the FIRST tag — ``flush_pending``
+fired on the first tag row, so the second arrived with
+``pending_line=None`` and was silently dropped. The whole 3,60,000
+landed on Shreyans. Tags now accumulate per ledger line: N tags → N
+splits, each with the tag's own amount; a single partial tag (or tags
+that don't sum to the line) leaves the remainder as an unassigned
+split so Review flags it instead of hiding it. Verified on the real
+``BMCA Sale.xlsx``: Sycon voucher MUM/26-27/1 now produces SD 1,60,000
++ VK 2,00,000 + SD 4,543 OPE; file-level net unchanged to the paise.
+NOTE: already-imported vouchers keep their old single-CC splits (dedup
+skips re-imports) — delete the affected batch on the Records page and
+re-upload to pick up the fix.
+
+**2. Invoice number from "New Ref" (migration v12).** The detailed
+register export carries the bill reference on a "New Ref" sub-row
+(party side, opposite Dr/Cr marker — previously skipped silently).
+Captured per voucher ("New Ref" preferred, "Agst Ref" fallback,
+multiple refs joined), stored in ``vouchers.invoice_no``, shown in the
+import preview and on the Expenses sheet right after Voucher No.
+78/84 vouchers in the operator's real purchase file carry one.
+
+**3. Party → Client on every register.** Expense/revenue facts now
+carry ``party_name``; the Client column (Review vouchers tab, Revenue
+/ Expenses sheets, Client Billing rows) shows the master canonical
+name when resolved and falls back to the raw party text otherwise —
+no more "(unmapped)" wall on the Expenses sheet. Genuinely-new names
+still queue in Review → Clients exactly as before.
+
+**4. Type of Expense column.** Every expense row is bifurcated:
+service name contains "professional" (but not "professional tax") →
+``Professional Fees`` (direct); everything else → ``Indirect
+Expense``. New column after Service on the Expenses sheet; the P&Ls
+SUMIFS against it.
+
+**5. Partner-Manager P&L restructure.**
+
+* "Other Direct Expenses" → **Professional Fees** (Type-filtered
+  SUMIFS), plus a **Reimbursement Expenses** row so Total Direct Costs
+  (= Salary + Professional Fees + Reimbursements) still ties with the
+  Cost Centre P&L's Direct Expense column.
+* The overhead block above Net Profit is split in two: **Office
+  Overhead (allocated)** (per-employee share, Salary-sheet SUMIFS) and
+  **Indirect Expenses** (the partner's own indirect costs, Expenses-
+  sheet SUMIFS). Net = Gross − Overhead − Indirect.
+
+**6. Employee Register sheet.** Built from the stored timesheet rows:
+per-period summary (active employees = filed hours that period; new
+joiners / exits vs the previous month's timesheet — read from the DB
+even when that month isn't part of the report), full roster with home
+CC + movement, and headcount-by-cost-centre — all COUNTIFS-driven off
+the roster. First month with no prior timesheet shows "(no data)"
+instead of declaring everyone a joiner.
+
+**7. Office overhead = books ÷ headcount (replaces the master).** The
+``fixed_office_overhead`` master tab is gone (table stays; nothing
+reads it). Per period: ``overhead/employee = Office-CC indirect
+expenses ÷ active employees``. Each active employee carries one
+Overhead-type Salary-sheet row on their home CC; a single negative
+offset row on Office backs the pool out (it already sits in Office's
+Direct Expense — without the offset the firm total would double-count).
+The old allocate-by-revenue/equally toggle on the Generate page is
+retired too.
+
+**8. Fully live formula chain.** Expenses (Type/CC/Period columns) →
+Employee Register (pool SUMIFS, headcount COUNTIFS, per-employee
+ROUND) → Salary sheet Overhead rows (SUMIFS into the register) →
+both P&Ls (SUMIFS on Type="Overhead"). Tweak any office expense row
+and the entire overhead cascade recomputes inside Excel. Verified
+with the ``formulas`` engine on the real Apr+May files: workbook
+revenue / cost / profit equal the calc engine to the rupee, register
+counts and per-employee overhead evaluate correctly, and the P&L's
+Professional Fees / Indirect rows match the classifier's totals.
 
 ### v0.3.68 — Salary sheet: three-CC representation for clarity
 

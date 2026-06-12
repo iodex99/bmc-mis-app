@@ -356,9 +356,9 @@ class ImportPage(QWidget):
 
     def _render_preview(self, res) -> None:
         if res.vouchers:
-            cols = ["Date", "Vch No.", "Party", "Net Amount", "Tax",
-                    "Cost Centre (raw)", "Description"]
-            rows = [[str(v.date or ""), v.vch_no, v.party_name,
+            cols = ["Date", "Vch No.", "Invoice No", "Party", "Net Amount",
+                    "Tax", "Cost Centre (raw)", "Description"]
+            rows = [[str(v.date or ""), v.vch_no, v.invoice_no, v.party_name,
                      fmt_inr(v.net_amount), fmt_inr(v.tax_amount),
                      v.raw_cost_centre, v.description] for v in res.vouchers]
         elif res.timesheet:

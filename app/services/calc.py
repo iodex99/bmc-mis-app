@@ -19,10 +19,21 @@ naturally lands on the right cost centre. Hours on non-billable / unmapped
 clients fall to the Office (overhead) cost centre. If an employee has pay but
 no timesheet hours, the whole amount falls back to the cost centre named on the
 salary sheet.
+
+Office overhead (v0.3.69)
+-------------------------
+Office overhead is no longer a management-entered master figure. It is
+computed from the books: the period's **indirect expenses booked to the
+Office cost centre** (rent, staff welfare, electricity, …) divided by the
+number of **active employees** (distinct employees who filed timesheet
+hours that period). Each active employee carries one per-head share to
+their home cost centre; a single negative offset row on Office keeps the
+pool from double-counting (it already sits in Office's direct expenses).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from ..database import transaction
@@ -32,13 +43,37 @@ OVERHEAD_SEPARATE = "separate"
 OVERHEAD_REVENUE = "revenue"
 OVERHEAD_EQUAL = "equal"
 
+# --- expense classification --------------------------------------------------
+
+EXPENSE_TYPE_PROFESSIONAL = "Professional Fees"
+EXPENSE_TYPE_INDIRECT = "Indirect Expense"
+
+_PROFESSIONAL_RE = re.compile(r"professional", re.IGNORECASE)
+_PROF_TAX_RE = re.compile(r"professional\s+tax", re.IGNORECASE)
+
+
+def expense_type(service_name: str | None) -> str:
+    """Bifurcate an expense ledger head into the firm's two buckets.
+
+    * ``Professional Fees`` — sub-contracted professional work, a DIRECT
+      cost of the partner ("Professional Fees", "Legal & Professional
+      Fees", "Professional Charges", …).
+    * ``Indirect Expense`` — everything else (rent, staff welfare,
+      electricity, courier, …). "Professional Tax" is a statutory levy,
+      not bought-in work, so it stays indirect.
+    """
+    s = service_name or ""
+    if _PROFESSIONAL_RE.search(s) and not _PROF_TAX_RE.search(s):
+        return EXPENSE_TYPE_PROFESSIONAL
+    return EXPENSE_TYPE_INDIRECT
+
 
 @dataclass
 class MISOptions:
     """Operator-chosen toggles for one MIS run."""
     periods: list[str]
     include_reimbursement: bool = True
-    overhead_mode: str = OVERHEAD_SEPARATE      # separate | revenue | equal
+    overhead_mode: str = OVERHEAD_SEPARATE      # retained for compatibility
 
 
 @dataclass
@@ -74,6 +109,11 @@ class MISData:
     expense_facts: list[dict] = field(default_factory=list)
     labour_facts: list[dict] = field(default_factory=list)
     reimbursement_facts: list[dict] = field(default_factory=list)
+    # One entry per selected period: active-employee roster (from the
+    # timesheet), joiners/exits vs the previous month, and the office
+    # overhead computation (indirect pool ÷ active headcount). Feeds the
+    # Employee Register sheet AND the per-employee overhead labour facts.
+    employee_register: list[dict] = field(default_factory=list)
     cost_centres: list[CostCentreLine] = field(default_factory=list)
     partner_manager: list[dict] = field(default_factory=list)
     entities: list[dict] = field(default_factory=list)
@@ -131,6 +171,9 @@ def compute(options: MISOptions) -> MISData:
 
     masters = _load_masters()
     _build_voucher_facts(data, options, masters)
+    # Employee register BEFORE labour facts: the register's active-employee
+    # roster + office-indirect pool drive the per-employee overhead facts.
+    _build_employee_register(data, options, masters)
     _build_labour_facts(data, options, masters)
     _build_reimbursement_facts(data, options, masters)
     _roll_up(data, masters)
@@ -182,18 +225,26 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
     ph = _placeholders(options.periods)
     with transaction() as conn:
         rows = conn.execute(
-            f"SELECT v.period, v.txn_date, v.vch_no, v.entity_id, v.client_id, "
+            f"SELECT v.period, v.txn_date, v.vch_no, v.invoice_no, "
+            f"  v.entity_id, v.client_id, v.party_name, "
             f"  v.kind, v.description, "
             f"  s.amount, s.cost_centre_id, s.manager_id, s.service_id "
             f"FROM voucher_splits s JOIN vouchers v ON v.id = s.voucher_id "
             f"WHERE v.period IN ({ph})", options.periods).fetchall()
+    services = masters["services"]
     for r in rows:
         fact = {
             "period": r["period"],
             "txn_date": r["txn_date"], "vch_no": r["vch_no"],
+            "invoice_no": r["invoice_no"],
             "entity_id": r["entity_id"],
             "cost_centre_id": r["cost_centre_id"], "manager_id": r["manager_id"],
             "service_id": r["service_id"], "client_id": r["client_id"],
+            # Raw party text — the Client column's fallback when the
+            # party hasn't been linked to a client-master row (most
+            # purchase-register vendors). The party IS the client/vendor
+            # name as Tally knows it, so showing it beats "(unmapped)".
+            "party_name": r["party_name"],
             "amount": float(r["amount"] or 0.0),
         }
         if r["kind"] == "sales":
@@ -203,7 +254,141 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
             if fact["cost_centre_id"] is None:
                 fact["cost_centre_id"] = masters["office_id"]
             fact["description"] = r["description"]
+            svc_name = (services.get(r["service_id"]) or {}).get("name")
+            fact["expense_type"] = expense_type(svc_name)
             data.expense_facts.append(fact)
+
+
+# --- employee register --------------------------------------------------------
+
+def _prev_period(period: str) -> str:
+    """'2026-04' -> '2026-03' (calendar-month arithmetic)."""
+    y, m = int(period[:4]), int(period[5:7])
+    y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    return f"{y:04d}-{m:02d}"
+
+
+def _build_employee_register(data: MISData, options: MISOptions,
+                              masters: dict) -> None:
+    """Active-employee roster per period + the office-overhead computation.
+
+    "Active" = the employee filed at least one timesheet row in the
+    period (the timesheet is the operator's source of truth for who
+    worked that month). Joiners/exits compare against the PREVIOUS
+    calendar month's timesheet — read straight from the DB, so the
+    previous month doesn't have to be part of the selected periods.
+
+    Each period entry also carries the office-overhead computation
+    that replaced the ``fixed_office_overhead`` master (v0.3.69):
+
+        pool       = indirect expenses booked to the Office cost centre
+        per_employee = pool ÷ active employee count
+
+    The per-employee share is charged to each active employee's home
+    cost centre by :func:`_build_labour_facts`.
+    """
+    emp_index = masters["emp_index"]
+    employees = masters["employees"]
+    office_id = masters["office_id"]
+    cost_centres = masters["cost_centres"]
+
+    periods = sorted(options.periods)
+    prev_map = {p: _prev_period(p) for p in periods}
+    all_periods = sorted(set(periods) | set(prev_map.values()))
+    ph = _placeholders(all_periods)
+    with transaction() as conn:
+        ts_rows = conn.execute(
+            f"SELECT DISTINCT period, emp_name FROM timesheet_entries "
+            f"WHERE period IN ({ph}) AND emp_name <> ''",
+            all_periods).fetchall()
+        # Salary-sheet CC per (period, employee) — fallback for the home
+        # cost centre when the employee master has no default CC. Same
+        # chain _build_labour_facts uses.
+        sal_rows = conn.execute(
+            f"SELECT period, employee_name, cost_centre_id FROM salary_entries "
+            f"WHERE period IN ({ph}) AND cost_centre_id IS NOT NULL",
+            all_periods).fetchall()
+
+    def emp_key(name: str):
+        return emp_index.get(norm(name), f"raw:{norm(name)}")
+
+    sal_cc: dict[tuple, int] = {}
+    for r in sal_rows:
+        sal_cc[(r["period"], emp_key(r["employee_name"]))] = r["cost_centre_id"]
+
+    # period -> {key: display name}. Master canonical name wins over the
+    # raw timesheet spelling when the employee is resolved.
+    roster: dict[str, dict] = {p: {} for p in all_periods}
+    for r in ts_rows:
+        key = emp_key(r["emp_name"])
+        name = r["emp_name"]
+        if isinstance(key, int):
+            name = (employees.get(key) or {}).get("name") or name
+        roster.setdefault(r["period"], {})[key] = name
+
+    def home_cc(period: str, key) -> int | None:
+        cc = None
+        if isinstance(key, int):
+            cc = (employees.get(key) or {}).get("default_cost_centre_id")
+        return cc or sal_cc.get((period, key)) or office_id
+
+    def cc_code(cc_id) -> str:
+        return (cost_centres.get(cc_id) or {}).get("code") or "—"
+
+    # Office indirect pool per period, from the already-built expense facts.
+    pool_by_period: dict[str, float] = {p: 0.0 for p in periods}
+    for f in data.expense_facts:
+        if (f["cost_centre_id"] == office_id
+                and f.get("expense_type") == EXPENSE_TYPE_INDIRECT
+                and f["period"] in pool_by_period):
+            pool_by_period[f["period"]] += f["amount"]
+
+    for p in periods:
+        prev_p = prev_map[p]
+        cur = roster.get(p, {})
+        prev = roster.get(prev_p, {})
+        has_prev = bool(prev)
+        active = []
+        for key, name in sorted(cur.items(), key=lambda kv: kv[1].lower()):
+            cc_id = home_cc(p, key)
+            active.append({
+                "key": key, "name": name,
+                "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
+                # Movement is only meaningful when we actually hold the
+                # previous month's timesheet — otherwise EVERYONE would
+                # read as a "new joiner" on the first ever import.
+                "is_new": has_prev and key not in prev,
+            })
+        exits = []
+        if has_prev:
+            for key, name in sorted(prev.items(), key=lambda kv: kv[1].lower()):
+                if key in cur:
+                    continue
+                cc_id = home_cc(prev_p, key)
+                exits.append({
+                    "key": key, "name": name,
+                    "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
+                })
+        n = len(active)
+        pool = round(pool_by_period.get(p, 0.0), 2)
+        per_emp = round(pool / n, 2) if n and pool > 0 else 0.0
+        data.employee_register.append({
+            "period": p,
+            "prev_period": prev_p,
+            "has_prev_data": has_prev,
+            "active": active,
+            "exits": exits,
+            "active_count": n,
+            "new_count": sum(1 for a in active if a["is_new"]),
+            "exit_count": len(exits),
+            "pool": pool,
+            "per_employee": per_emp,
+        })
+        if pool > 0 and n == 0:
+            data.warnings.append(
+                f"{p}: office indirect expenses of {pool:,.0f} could not be "
+                f"allocated — no timesheet rows found for the period, so the "
+                f"active-employee count is zero.")
 
 
 # --- labour facts ------------------------------------------------------------
@@ -211,19 +396,25 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
 def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> None:
     """Build per-(employee, client/CC) salary-cost facts for the period.
 
-    Each employee's monthly cost = ``salary_paid`` (+ optional
-    ``reimbursement``) + ``fixed_office_overhead.amount_per_employee``
-    for that period. That total is divided by ``days_in_month * 8`` to
-    get an hourly rate (the firm's standard month-hours, not actual
-    timesheet hours — so an under-filled timesheet doesn't inflate the
-    rate). Each timesheet line then books ``hours × rate`` against the
-    client's cost centre.
+    Each employee's monthly salary (+ optional ``reimbursement``) is
+    divided by ``days_in_month * 8`` to get an hourly rate (the firm's
+    standard month-hours, not actual timesheet hours — so an
+    under-filled timesheet doesn't inflate the rate). Each timesheet
+    line then books ``hours × rate`` against the client's cost centre.
 
     Any residual hours (``standard_month_hours - sum(timesheet_hours)``,
     if positive) are booked to the employee's home cost centre
     (``employees.default_cost_centre_id``, fallback to the salary
     sheet's CC, fallback to Office) so the FULL monthly cost lands
     somewhere — no labour cost silently vanishes.
+
+    Office overhead facts ride on the employee register built by
+    :func:`_build_employee_register`: every ACTIVE employee (filed
+    timesheet hours that period) carries one ``is_overhead=True`` fact
+    of ``office indirect pool ÷ active count`` on their home cost
+    centre, plus a single negative offset fact on Office so the pool —
+    which already sits in Office's direct expenses — isn't counted
+    twice. (Replaces the ``fixed_office_overhead`` master, v0.3.69.)
     """
     import calendar
     office_id = masters["office_id"]
@@ -242,12 +433,6 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             f"       hours, is_billable "
             f"FROM timesheet_entries WHERE period IN ({ph})",
             options.periods).fetchall()
-        overhead_rows = conn.execute(
-            f"SELECT period, amount_per_employee FROM fixed_office_overhead "
-            f"WHERE period IN ({ph}) AND active = 1",
-            options.periods).fetchall()
-    overhead_by_period = {r["period"]: float(r["amount_per_employee"] or 0.0)
-                           for r in overhead_rows}
 
     def emp_key(name: str):
         return emp_index.get(norm(name), f"raw:{norm(name)}")
@@ -282,16 +467,13 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         period, emp_lookup_key = key
         rows = hours.get(key, [])
         total_logged = sum(float(t["hours"] or 0.0) for t in rows)
-        overhead = overhead_by_period.get(period, 0.0)
         std_hours = standard_hours(period)
         # SALARY rate uses salary alone (NOT salary + overhead). v0.3.57
         # baked them together which let overhead bifurcate across whichever
         # partner's client the employee worked on. v0.3.67 separates the
         # two: salary still bifurcates by timesheet (rate × hours per
         # client's CC), overhead is a flat per-employee cost that lands
-        # entirely on the employee's home CC — exactly as the operator
-        # specified ("a fixed cost incurred by each employee … expense to
-        # the respective cost centre of the employee, from the emp master").
+        # entirely on the employee's home CC.
         salary_rate = rec["amount"] / std_hours if std_hours else 0.0
 
         # Home CC: master record → fallback to salary's CC → Office.
@@ -360,27 +542,48 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "hours": std_hours, "amount": rec["amount"],
             })
 
-        if overhead > 0:
+    # --- office overhead: per ACTIVE employee, from the employee register.
+    # The per-head share (office indirect pool ÷ active count) lands on
+    # each active employee's home cost centre; one negative offset fact
+    # on Office backs the pool out of the office bucket (the pool's
+    # source rows already sit in Office's direct expenses, and the CC
+    # P&L shows them there — without the offset the same rupees would
+    # appear twice in the firm total).
+    for reg in data.employee_register:
+        per_emp = reg["per_employee"]
+        if per_emp <= 0 or not reg["active"]:
+            continue
+        period = reg["period"]
+        for emp in reg["active"]:
             data.labour_facts.append({
                 "period": period,
                 "txn_date": None,
-                "cost_centre_id": home_cc,
-                "home_cost_centre_id": home_cc,
+                "cost_centre_id": emp["cost_centre_id"],
+                "home_cost_centre_id": emp["cost_centre_id"],
                 "client_cost_centre_id": None,
-                "employee_name": rec["name"],
+                "employee_name": emp["name"],
                 "client_id": None,
                 "client_raw": None,
                 "is_residual": False,
                 "is_overhead": True,
-                "hours": 0.0, "amount": overhead,
+                "is_overhead_offset": False,
+                "hours": 0.0, "amount": per_emp,
             })
-
-    # Even employees with no salary entry can have a per-period overhead
-    # — but without salary data we can't know they exist. The overhead
-    # is therefore only applied alongside an existing salary row. This
-    # matches the operator's workflow: salary upload is monthly; the
-    # overhead figure rides on top of whoever appears on that month's
-    # salary sheet.
+        data.labour_facts.append({
+            "period": period,
+            "txn_date": None,
+            "cost_centre_id": office_id,
+            "home_cost_centre_id": office_id,
+            "client_cost_centre_id": None,
+            "employee_name": "(Office indirect allocated to employees)",
+            "client_id": None,
+            "client_raw": None,
+            "is_residual": False,
+            "is_overhead": True,
+            "is_overhead_offset": True,
+            "hours": 0.0,
+            "amount": -round(per_emp * reg["active_count"], 2),
+        })
 
 
 def _client_cost_centre(ts_row, clients: dict, office_id: int | None,
@@ -475,7 +678,6 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
 
 def _roll_up(data: MISData, masters: dict) -> None:
     cost_centres = masters["cost_centres"]
-    office_id = masters["office_id"]
     options = data.options
 
     lines: dict[int | None, CostCentreLine] = {}
@@ -496,7 +698,13 @@ def _roll_up(data: MISData, masters: dict) -> None:
     for f in data.expense_facts:
         line_for(f["cost_centre_id"]).direct_expense += f["amount"]
     for f in data.labour_facts:
-        line_for(f["cost_centre_id"]).labour += f["amount"]
+        # Overhead facts (incl. the negative Office offset) live in the
+        # Allocated Overhead column; pure salary stays in Salary Cost.
+        # Mirrors the workbook's Type="Salary"/"Overhead" SUMIFS split.
+        if f.get("is_overhead"):
+            line_for(f["cost_centre_id"]).allocated_overhead += f["amount"]
+        else:
+            line_for(f["cost_centre_id"]).labour += f["amount"]
     # Reimbursement costs roll into Direct Expense on the partner P&L.
     # They behave like any other operating expense: when
     # client_reimbursable=YES the matching revenue line comes through
@@ -523,43 +731,14 @@ def _roll_up(data: MISData, masters: dict) -> None:
                     total += float(row["target_amount"]) / 12.0 * months
             line.target = total
 
-    # Overhead allocation.
-    _allocate_overhead(lines, office_id, options.overhead_mode)
-
+    # Office overhead is already allocated per active employee via the
+    # is_overhead labour facts (with the negative offset on Office) — the
+    # old mode-based allocator (separate / revenue / equal) is gone.
     data.cost_centres = sorted(
         lines.values(),
         key=lambda l: (l.is_office, l.cost_centre_id is not None and 0 or 1,
                        -l.revenue))
     _roll_up_dimensions(data, masters)
-
-
-def _allocate_overhead(lines: dict, office_id, mode: str) -> None:
-    office = lines.get(office_id)
-    if office is None or mode == OVERHEAD_SEPARATE:
-        return
-    pool = office.total_cost - office.revenue
-    if pool <= 0:
-        return
-    partners = [l for cid, l in lines.items()
-                if cid is not None and not l.is_office]
-    if not partners:
-        return
-    if mode == OVERHEAD_EQUAL:
-        share = pool / len(partners)
-        for l in partners:
-            l.allocated_overhead += share
-    else:  # by revenue
-        total_rev = sum(l.revenue for l in partners)
-        if total_rev <= 0:
-            share = pool / len(partners)
-            for l in partners:
-                l.allocated_overhead += share
-        else:
-            for l in partners:
-                l.allocated_overhead += pool * l.revenue / total_rev
-    # Office's own cost is now carried by the partners.
-    office.direct_expense = 0.0
-    office.labour = 0.0
 
 
 def _roll_up_dimensions(data: MISData, masters: dict) -> None:

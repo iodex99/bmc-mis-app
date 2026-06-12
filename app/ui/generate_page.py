@@ -9,7 +9,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -25,20 +24,8 @@ from PySide6.QtWidgets import (
 from .. import config
 from ..services import vouchers as vsvc
 from ..util import fmt_inr
-from ..services.calc import (
-    MISOptions,
-    OVERHEAD_EQUAL,
-    OVERHEAD_REVENUE,
-    OVERHEAD_SEPARATE,
-    compute,
-)
+from ..services.calc import MISOptions, compute
 from ..services.report import generate
-
-_OVERHEAD_CHOICES = [
-    ("Show Office separately (no allocation)", OVERHEAD_SEPARATE),
-    ("Allocate Office to partners by revenue share", OVERHEAD_REVENUE),
-    ("Allocate Office to partners equally", OVERHEAD_EQUAL),
-]
 
 
 class GeneratePage(QWidget):
@@ -96,11 +83,13 @@ class GeneratePage(QWidget):
         self.reimb_check = QCheckBox("Include reimbursements in the MIS")
         self.reimb_check.setChecked(True)
         ov.addWidget(self.reimb_check)
-        ov.addWidget(QLabel("Office / shared expenses:"))
-        self.overhead_combo = QComboBox()
-        for label, key in _OVERHEAD_CHOICES:
-            self.overhead_combo.addItem(label, key)
-        ov.addWidget(self.overhead_combo)
+        overhead_note = QLabel(
+            "Office overhead: indirect expenses on the Office cost centre "
+            "÷ active employees (from the timesheet), charged to each "
+            "employee's home cost centre — see the Employee Register "
+            "sheet in the generated workbook.")
+        overhead_note.setWordWrap(True)
+        ov.addWidget(overhead_note)
         ov.addStretch(1)
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
@@ -175,8 +164,7 @@ class GeneratePage(QWidget):
             return None
         return MISOptions(
             periods=periods,
-            include_reimbursement=self.reimb_check.isChecked(),
-            overhead_mode=self.overhead_combo.currentData())
+            include_reimbursement=self.reimb_check.isChecked())
 
     # -- actions -------------------------------------------------------------
     def _preview(self) -> None:
@@ -189,8 +177,7 @@ class GeneratePage(QWidget):
         if compare_periods:
             compare_data = compute(MISOptions(
                 periods=compare_periods,
-                include_reimbursement=opts.include_reimbursement,
-                overhead_mode=opts.overhead_mode))
+                include_reimbursement=opts.include_reimbursement))
 
         def block(label: str, periods: list[str], d) -> str:
             n_rev = len(d.revenue_facts)
@@ -231,8 +218,7 @@ class GeneratePage(QWidget):
             if compare_periods:
                 compare_data = compute(MISOptions(
                     periods=compare_periods,
-                    include_reimbursement=opts.include_reimbursement,
-                    overhead_mode=opts.overhead_mode))
+                    include_reimbursement=opts.include_reimbursement))
             out = generate(data, path, compare_data)
         except Exception as exc:
             QMessageBox.critical(self, "Generation failed", str(exc))

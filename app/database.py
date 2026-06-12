@@ -399,6 +399,16 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_reimb_period ON reimbursements(period);
     """),
+    (12, """
+        -- Invoice number from the register's "New Ref" sub-row (the
+        -- bill reference Tally records against the party ledger; for a
+        -- purchase voucher it's the vendor's invoice number). Captured
+        -- by the voucher-dump parser from the detailed register export;
+        -- shown on the generated MIS's Expenses sheet next to the
+        -- voucher number. NULL for vouchers imported from exports that
+        -- don't include bill allocations.
+        ALTER TABLE vouchers ADD COLUMN invoice_no TEXT;
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

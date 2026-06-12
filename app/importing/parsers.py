@@ -100,6 +100,32 @@ def _vch_side_and_sign(vch_type: str, file_kind: str) -> tuple[str, int]:
     return "dr", +1
 
 
+_REF_LABELS = ("new ref", "agst ref")
+
+
+def _ref_value(row: list[Any], p_i: int | None) -> str:
+    """Pull the reference number off a "New Ref" / "Agst Ref" sub-row.
+
+    The ref text sits in the first non-blank cell to the right of the
+    Particulars column (e.g. ``| New Ref | 001/26-27 |  | 336960 | Cr``).
+    Stops at the Dr/Cr marker so a ref-less row can't pick up stray
+    text. Integer refs (Tally writes ``3`` as a number) are rendered
+    without a trailing ``.0``.
+    """
+    start = (p_i if p_i is not None else 0) + 1
+    for idx in range(start, len(row)):
+        c = row[idx]
+        if c in (None, ""):
+            continue
+        t = clean(c)
+        if t.lower() in ("dr", "cr"):
+            return ""
+        if isinstance(c, float) and c.is_integer():
+            return str(int(c))
+        return t
+    return ""
+
+
 def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
                 kind: str) -> ParseResult:
     """Parse a Tally voucher-dump register into vouchers with per-line splits.
@@ -108,8 +134,17 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
     either ledger lines (service name + amount on Debit/Credit) or indented
     Dr/Cr cost-centre tags. Each ledger line is followed by zero or more
     matching-side Dr/Cr sub-rows naming the cost centre(s) the amount is
-    attributed to. Tax / GST / round-off lines are detected by keyword and
-    aggregated into the voucher's ``tax_amount`` rather than becoming splits.
+    attributed to. A ledger line with SEVERAL cost-centre tags is a
+    multi-partner allocation — it becomes one split per tag, each carrying
+    the tag's own amount (e.g. "PROFESSIONAL FEES 3,60,000" tagged
+    "Shreyans 1,60,000" + "Vishal 2,00,000" produces two splits). Tax /
+    GST / round-off lines are detected by keyword and aggregated into the
+    voucher's ``tax_amount`` rather than becoming splits.
+
+    "New Ref" / "Agst Ref" sub-rows (the party-ledger bill allocations,
+    which live on the OPPOSITE marker side) carry the invoice number —
+    captured into ``voucher.invoice_no`` ("New Ref" preferred, "Agst Ref"
+    as fallback).
 
     The same parser handles every register variant — Sales, Sales-D
     (Delhi suffix), Credit Note, Credit Note-D, Purchase, Debit Note —
@@ -133,13 +168,68 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
 
     current: ParsedVoucher | None = None
     pending_line: VoucherLine | None = None
+    # Signed (cc_name, amount|None) pairs collected for the in-flight
+    # ledger line. Amounts are sign-adjusted at capture time because the
+    # flush can happen after the NEXT voucher header has already changed
+    # ``cur_sign``.
+    pending_tags: list[tuple[str | None, float | None]] = []
+    cur_new_refs: list[str] = []
+    cur_agst_refs: list[str] = []
 
     def flush_pending():
-        """Commit the in-flight ledger line to the current voucher."""
-        nonlocal pending_line
-        if current is not None and pending_line is not None:
-            current.line_splits.append(pending_line)
-        pending_line = None
+        """Commit the in-flight ledger line (+ its CC tags) to the voucher."""
+        nonlocal pending_line, pending_tags
+        line, tags = pending_line, pending_tags
+        pending_line, pending_tags = None, []
+        if current is None or line is None:
+            return
+        if not tags:
+            current.line_splits.append(line)
+            return
+        if len(tags) == 1 and (
+                tags[0][1] is None or line.amount == 0
+                or abs(tags[0][1] - line.amount) <= 0.5):
+            # Single full-amount tag — the common case. The ledger-line
+            # amount stays authoritative; the tag contributes the CC name
+            # (and the amount only when the ledger cell was empty).
+            cc, amt = tags[0]
+            line.cost_centre = cc
+            if line.amount == 0 and amt is not None:
+                line.amount = amt
+            current.line_splits.append(line)
+            return
+        # Multi-tag (or single PARTIAL tag) — one split per tag with the
+        # tag's own amount. Any unallocated remainder becomes an
+        # unassigned split so the voucher's net still equals the ledger
+        # line (operator sees it in Review as "needs fix").
+        allocated = 0.0
+        emitted = 0
+        for cc, amt in tags:
+            if amt is None:
+                continue
+            current.line_splits.append(VoucherLine(
+                service=line.service, cost_centre=cc,
+                amount=amt, is_tax=line.is_tax))
+            allocated += amt
+            emitted += 1
+        if emitted == 0:
+            # No tag had a readable amount — keep the ledger line whole.
+            line.cost_centre = tags[0][0]
+            current.line_splits.append(line)
+            return
+        remainder = line.amount - allocated
+        if line.amount and abs(remainder) > 0.5:
+            current.line_splits.append(VoucherLine(
+                service=line.service, cost_centre=None,
+                amount=round(remainder, 2), is_tax=line.is_tax))
+
+    def finalize_refs():
+        """Stamp the collected bill references onto the closing voucher."""
+        nonlocal cur_new_refs, cur_agst_refs
+        if current is not None:
+            refs = cur_new_refs or cur_agst_refs
+            current.invoice_no = ", ".join(refs)
+        cur_new_refs, cur_agst_refs = [], []
 
     for row in grid[data_start:]:
         if _is_blank(row):
@@ -148,6 +238,17 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
 
         if date is not None:                       # ---- voucher header ----
             flush_pending()
+            finalize_refs()
+            # Cancelled invoices render with "(cancelled)" in place of the
+            # party and carry no amounts — skip the whole block (the flat
+            # sales parser has always done the same). Without this they
+            # imported as ₹0 vouchers and, with the party-name fallback on
+            # the Client columns, would surface as a "(cancelled)" row in
+            # Client Billing.
+            party_name = clean(_cell(row, p_i))
+            if any(k in party_name.lower() for k in _CANCELLED_KEYWORDS):
+                current = None
+                continue
             credit = to_number(_cell(row, cr_i)) or 0.0
             debit = to_number(_cell(row, dr_i)) or 0.0
             # For sales/purchase the customer/vendor is debited/credited
@@ -165,7 +266,7 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
                 period=period_of(date),
                 vch_type=vch_type,
                 vch_no=clean(_cell(row, vn_i)),
-                party_name=clean(_cell(row, p_i)),
+                party_name=party_name,
                 kind=kind,
                 gross_amount=gross,
             )
@@ -177,14 +278,24 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
 
         side = _marker_side(row)
         if side is not None:
-            # Indented Dr/Cr cost-centre tag. Attribute only when the
-            # marker matches the current voucher's ledger-line side.
             if side == cur_side and pending_line is not None:
-                pending_line.cost_centre = clean(_cell(row, p_i)) or None
+                # Indented Dr/Cr cost-centre tag on the ledger-line side.
+                # Collect — do NOT flush yet; more tags may follow for the
+                # same ledger line (multi-partner allocation).
                 tag_amt = _first_number(row)
-                if tag_amt is not None and pending_line.amount == 0:
-                    pending_line.amount = float(tag_amt) * cur_sign
-                flush_pending()
+                pending_tags.append((
+                    clean(_cell(row, p_i)) or None,
+                    float(tag_amt) * cur_sign if tag_amt is not None else None,
+                ))
+            elif side != cur_side:
+                # Party-side sub-row: "New Ref" / "Agst Ref" bill
+                # allocations carry the invoice number.
+                head_l = clean(_cell(row, p_i)).lower()
+                if head_l in _REF_LABELS:
+                    ref = _ref_value(row, p_i)
+                    if ref:
+                        (cur_new_refs if head_l == "new ref"
+                         else cur_agst_refs).append(ref)
             continue
 
         # Plain ledger line (no Dr/Cr marker).
@@ -203,6 +314,7 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
         )
 
     flush_pending()
+    finalize_refs()
 
     # Aggregate net / tax + pick the dominant non-tax CC for backward compat.
     for v in result.vouchers:

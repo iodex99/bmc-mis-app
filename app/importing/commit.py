@@ -242,11 +242,13 @@ def commit_result(result: ParseResult, entity_id: int | None,
             cc_id = cc_lookup(v.raw_cost_centre)
             vid = conn.execute(
                 "INSERT INTO vouchers (batch_id, entity_id, txn_date, period, "
-                "vch_type, vch_no, party_name, gross_amount, tax_amount, "
-                "net_amount, description, ledger_head, raw_cost_centre, kind) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "vch_type, vch_no, invoice_no, party_name, gross_amount, "
+                "tax_amount, net_amount, description, ledger_head, "
+                "raw_cost_centre, kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, entity_id, v.date.isoformat() if v.date else None,
-                 v.period, v.vch_type, v.vch_no, v.party_name, v.gross_amount,
+                 v.period, v.vch_type, v.vch_no, v.invoice_no or None,
+                 v.party_name, v.gross_amount,
                  v.tax_amount, v.net_amount, v.description,
                  "; ".join(v.ledger_heads), v.raw_cost_centre, v.kind),
             ).lastrowid

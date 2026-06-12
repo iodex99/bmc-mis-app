@@ -832,7 +832,11 @@ class VoucherTab(QWidget):
             rows_body.append([
                 v["txn_date"] or "",
                 v["vch_no"], v["party_name"],
-                v["client_name"] or "—",
+                # Client mirrors the party for EVERY register (sales,
+                # purchase, …): the master canonical name once resolved,
+                # the raw party text until then. Unresolved parties still
+                # queue in the Clients tab for mapping.
+                v["client_name"] or v["party_name"] or "—",
                 v["kind"].capitalize(),
                 fmt_inr(v["net_amount"], 0),
                 (f"⚠ {v['n_unassigned']} unassigned"
