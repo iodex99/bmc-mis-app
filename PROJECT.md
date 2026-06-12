@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.69** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.70** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.69)
+## 16. Post-launch iterations (v0.2.0 → v0.3.70)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,59 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.70 — Updater: no more stray terminals, no more random app-close
+
+Operator report: "when the app starts, or even when I click check
+updates, it sometimes closes automatically… when I click install
+update it starts this terminal, then I have to press Ctrl+C, then
+another terminal opens and runs a script, then the app gets updated."
+Screenshots showed a console window titled ``find "4080"`` (the PID
+wait) and a second one running robocopy. Three distinct bugs:
+
+**1. Random app-close on check = the QThread crash class, again.**
+Both the launch-time silent check (``main_window``) and the Settings
+page's check/download used ``QThread`` + ``moveToThread`` +
+cross-thread signals — the exact pattern that intermittently killed
+the app during import commits on the operator's machine (fought
+v0.3.61→63, eliminated v0.3.64). The updater never got the same
+treatment. Both paths now use a plain ``threading.Thread`` that only
+puts plain tuples on a ``queue.Queue``; a ``QTimer`` polls the queue
+ON the UI thread and does all widget work there (progress ticks
+included). No Qt object is ever touched off the UI thread, so the
+PySide6 signal-delivery crash can't fire.
+
+**2. Visible terminals + the Ctrl+C wedge = DETACHED_PROCESS.**
+``apply_update`` launched the helper with ``CREATE_NO_WINDOW |
+DETACHED_PROCESS``. A detached cmd has NO console at all, so every
+console-subsystem child (tasklist, find, robocopy) allocated its own
+VISIBLE window — those were the operator's two terminals — and the
+wait loop wedged until Ctrl+C. Helper now launches with
+``CREATE_NO_WINDOW`` only: cmd gets a real but invisible console all
+children inherit. Zero windows, pipes work.
+
+**3. Helper script hardening** (``build_helper_script``, now a pure
+function for testability):
+
+* External tools fully qualified to ``%SystemRoot%\System32`` —
+  a bare ``find`` resolves through PATH, and Git-for-Windows' GNU
+  find shadows the Windows one (caught live in testing: the PID
+  wait exited instantly because GNU find can't parse the syntax).
+* ``timeout /t`` → ``ping -n`` sleeps. ``timeout`` exits immediately
+  ("Input redirection is not supported") when stdin is redirected —
+  which it always is for a hidden helper.
+* The PID wait is BOUNDED (~120 s) — logs "gave up" and proceeds
+  instead of spinning forever; robocopy's /R retries cover a
+  briefly-locked exe.
+* Handle-release pause trimmed 5 s → 2 s so the app reappears
+  faster after the silent install.
+
+Verified end-to-end with a real process stand-in: helper (launched
+hidden, exactly like production) waits the full lifetime of the fake
+app, mirrors the new build, purges stale files, reaches the relaunch
+step, logs all six phases — no interaction, no window. Headless Qt
+tests cover check (update / up-to-date / network-error), download
+progress ticks, and the launch-time auto-check pill.
 
 ### v0.3.69 — Multi-CC splits, invoice no, expense bifurcation, Employee Register, books-driven overhead
 

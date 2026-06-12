@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Qt, QSize, QThread, Signal
+import queue
+import threading
+
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -102,32 +105,45 @@ class MainWindow(QMainWindow):
             import_page.imported.connect(review_page.refresh)
 
         # Silent auto-check on launch (off the UI thread, fail-quietly).
-        self._auto_check_thread: QThread | None = None
-        self._auto_check_worker: QObject | None = None
+        self._auto_check_timer: QTimer | None = None
         if updater.auto_check_enabled():
             self._start_auto_check()
 
     def _start_auto_check(self) -> None:
-        worker = _SilentCheck()
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_silent_check)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        # Keep Python references alive until the thread emits finished
-        # (otherwise PySide6 may garbage-collect the worker and lose the
-        # signal silently).
-        self._auto_check_thread = thread
-        self._auto_check_worker = worker
-        thread.start()
+        """Launch-time update check on a plain Python thread.
 
-    def _on_silent_check(self, info) -> None:
-        self._auto_check_thread = None
-        self._auto_check_worker = None
-        if info is not None:
-            self._settings_page.offer_update(info)
+        No QThread / cross-thread signals — that pattern intermittently
+        crashed the app on the operator's machine ("opens then closes by
+        itself"), the same failure class v0.3.64 removed from the import
+        commit. The worker thread only puts the result on a queue; a
+        QTimer polls it on the UI thread, where all widget work happens.
+        """
+        q: queue.Queue = queue.Queue()
+
+        def work() -> None:
+            try:
+                q.put(updater.check_latest())
+            except Exception:
+                q.put(None)            # fail quietly — it's a silent check
+
+        timer = QTimer(self)
+        timer.setInterval(200)
+
+        def poll() -> None:
+            try:
+                info = q.get_nowait()
+            except queue.Empty:
+                return
+            timer.stop()
+            timer.deleteLater()
+            self._auto_check_timer = None
+            if info is not None:
+                self._settings_page.offer_update(info)
+
+        timer.timeout.connect(poll)
+        self._auto_check_timer = timer
+        threading.Thread(target=work, daemon=True).start()
+        timer.start()
 
     def _set_update_state(self, info) -> None:
         if info is None:
@@ -168,15 +184,3 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.nav, 1)
 
         return panel
-
-
-class _SilentCheck(QObject):
-    """Background worker that quietly asks GitHub for the latest version."""
-    finished = Signal(object)
-
-    def run(self) -> None:
-        try:
-            info = updater.check_latest()
-        except Exception:
-            info = None
-        self.finished.emit(info)
