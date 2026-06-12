@@ -197,12 +197,43 @@ def build_helper_script(new_dir: Path, install_dir: Path, pid: int) -> str:
       on — robocopy's own /R retries cover a briefly-locked exe. The
       old unbounded loop could spin forever, which the operator saw
       as a stuck console they had to Ctrl+C.
+    * **Purge is restricted to the app's own ``_internal`` payload.**
+      The user's database lives in ``%LOCALAPPDATA%\\BMC MIS`` and is
+      never touched at all — but pre-v0.3.71 the single ``/MIR`` over
+      the whole install folder would also have DELETED any stray file
+      the operator kept next to the exe (a saved MIS workbook, a
+      Tally export, notes…). Now only ``_internal`` is mirrored with
+      purge (it holds nothing but our own build output); the install
+      ROOT is copied with ``/E`` — overwrite ours, never delete
+      theirs.
     * Every phase appends to ``update.log`` in the install folder so
       failures are debuggable after the fact.
     """
     log_file = install_dir / "update.log"
     exe_path = install_dir / "BMC MIS.exe"
     sys32 = r"%SystemRoot%\System32"
+    rcopy = f'"{sys32}\\robocopy.exe"'
+    if (new_dir / "_internal").is_dir():
+        # PyInstaller 6 one-folder layout: exe at root + _internal payload.
+        copy_cmds = [
+            f'>> "{log_file}" echo Mirroring _internal (with purge)...',
+            f'{rcopy} "{new_dir}\\_internal" "{install_dir}\\_internal" '
+            f'/MIR /R:5 /W:2 >> "{log_file}" 2>&1',
+            f'>> "{log_file}" echo _internal mirror returned %ERRORLEVEL%',
+            f'>> "{log_file}" echo Copying root files (no purge)...',
+            f'{rcopy} "{new_dir}" "{install_dir}" /E /R:5 /W:2 '
+            f'/XD "{new_dir}\\_internal" /XF "{log_file.name}" '
+            f'>> "{log_file}" 2>&1',
+            f'>> "{log_file}" echo Root copy returned %ERRORLEVEL%',
+        ]
+    else:
+        # Unexpected build layout — copy everything, purge NOTHING.
+        copy_cmds = [
+            f'>> "{log_file}" echo No _internal in build; full copy, no purge',
+            f'{rcopy} "{new_dir}" "{install_dir}" /E /R:5 /W:2 '
+            f'/XF "{log_file.name}" >> "{log_file}" 2>&1',
+            f'>> "{log_file}" echo Full copy returned %ERRORLEVEL%',
+        ]
     lines = [
         '@echo off',
         f'> "{log_file}" echo === BMC MIS update helper ===',
@@ -222,10 +253,7 @@ def build_helper_script(new_dir: Path, install_dir: Path, pid: int) -> str:
         f'>> "{log_file}" echo App gone after %tries% tick(s); '
         'pausing 2s for handle release',
         f'"{sys32}\\ping.exe" -n 3 127.0.0.1 >NUL',
-        f'>> "{log_file}" echo Running robocopy...',
-        f'"{sys32}\\robocopy.exe" "{new_dir}" "{install_dir}" /MIR /R:5 /W:2 '
-        f'/XF "{log_file.name}" >> "{log_file}" 2>&1',
-        f'>> "{log_file}" echo Robocopy returned %ERRORLEVEL%',
+        *copy_cmds,
         f'>> "{log_file}" echo Relaunching "{exe_path}"',
         f'start "" "{exe_path}"',
         f'>> "{log_file}" echo Done at %DATE% %TIME%',

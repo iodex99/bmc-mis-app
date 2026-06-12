@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.70** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.71** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -243,7 +243,7 @@ Windows .exe with `python build.py`.
 
 ---
 
-## 16. Post-launch iterations (v0.2.0 → v0.3.70)
+## 16. Post-launch iterations (v0.2.0 → v0.3.71)
 
 Released privately to GitHub (`iodex99/bmc-mis-app`) and updated on the
 operator's PC via the in-app updater. Highlights of every release in order:
@@ -331,6 +331,34 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.71 — Update data-safety: purge restricted to the app's own payload
+
+Operator asked for explicit assurance that updates can never lose
+data. Audit of the whole chain:
+
+* **The database is structurally out of reach.** ``mis.db`` (every
+  master, mapping, voucher, timesheet, salary row) + ``exports/``
+  live in ``%LOCALAPPDATA%\BMC MIS`` — the updater only ever writes
+  inside the install folder. Verified by test: a stand-in data home
+  is bit-identical after a full helper run.
+* **Schema upgrades are additive-only.** Re-verified the migration
+  runner: a populated v11-schema DB upgraded by the new build keeps
+  every row (vouchers / splits / timesheet / salary / clients all
+  intact) while gaining the v12 ``invoice_no`` column.
+* **One real hole found and closed.** The helper's single
+  ``robocopy /MIR`` over the whole install folder PURGES anything
+  not in the new build — so a workbook the operator saved next to
+  the exe (or any stray Tally file / notes folder) would have been
+  silently deleted on the next update. The helper now mirrors-with-
+  purge ONLY the app's own ``_internal`` payload and copies the
+  install root with ``/E`` (overwrite ours, never delete theirs);
+  an unexpected build layout falls back to a full no-purge copy.
+
+Verified with a live helper run (hidden, production flags): exe +
+``_internal`` updated, stale payload purged, while the operator's
+``My MIS April.xlsx``, a notes folder, and even a paranoid
+``data\mis.db`` sitting beside the exe all survive untouched.
 
 ### v0.3.70 — Updater: no more stray terminals, no more random app-close
 
