@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.71** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.72** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,33 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.72 — Fix blank Direct Expense on Service MIS / Entity P&L; Headcount table beside the summary
+
+Two operator-reported issues:
+
+* **Direct Expense column came out blank on the Service MIS (and
+  Entity P&L) sheets.** Root cause: the v0.3.69 Expenses-sheet layout
+  inserted *Invoice No* (C) and *Type of Expense* (H), pushing the
+  *Amount* column from H to **J**. The Cost Centre P&L and Comparatives
+  SUMIFS were updated at the time, but ``_simple_summary`` — the shared
+  builder behind both the Service MIS and Entity P&L Direct-Expense
+  columns — was missed and kept summing column **H**, which is now the
+  *Type of Expense* TEXT column. Summing text returns 0, so every
+  Direct-Expense (and therefore Net) cell read blank. Now sums column J.
+  Revenue was unaffected (the Revenue sheet's Amount stayed at H). The
+  Net / TOTAL cells are formula-derived, so they self-correct.
+* **Employee Register — "Headcount by cost centre" now sits beside the
+  summary.** It was stacked at the very bottom of the sheet, below the
+  full roster; moved to the top-right (column I, aligned with the
+  summary header row) so the operator reads both summary tables without
+  scrolling past the roster. COUNTIFS retargeted to the table's new
+  Cost-Centre (I) and Period (J) columns.
+
+Verified by generating a workbook from synthetic facts: the Service MIS
+Direct-Expense SUMIFS now reproduces the expected ₹14,000 total, and the
+headcount title/header/body land at I3/I4/I5 with correct roster
+references.
 
 ### v0.3.71 — Update data-safety: purge restricted to the app's own payload
 

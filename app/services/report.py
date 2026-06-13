@@ -987,9 +987,12 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
     first = r
     for item in rows:
         _cell(ws, r, 1, item["name"], border=True)
+        # Revenue Amount = col H; Expenses Amount = col J (v0.3.69 layout —
+        # Invoice No + Type of Expense pushed Amount from H to J; col H is
+        # now the "Type of Expense" TEXT column, so summing it returns 0).
         _cell(ws, r, 2, f"=SUMIFS({rev}!$H:$H,{rev}!${sumcol_rev}:${sumcol_rev},$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 3, f"=SUMIFS({exp}!$H:$H,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
+        _cell(ws, r, 3, f"=SUMIFS({exp}!$J:$J,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 4, f"=B{r}-C{r}", fmt=INR, border=True)
         r += 1
@@ -1317,37 +1320,46 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
                   align=_CENTER if ci in (1, 3, 4, 5) else None)
 
     # ---- 3. Headcount by cost centre -------------------------------------
+    # Placed BESIDE the summary (top-right, starting at column I) rather
+    # than at the bottom of the sheet, so the operator reads both summary
+    # tables at a glance without scrolling past the full roster.
     cc_codes: list[str] = []
     for rr in roster_rows:
         if rr[2] not in cc_codes:
             cc_codes.append(rr[2])
     cc_codes.sort()
-    cc_hrow = roster_last + 3
     if cc_codes:
-        _cell(ws, cc_hrow - 1, 1, "Headcount by cost centre", font=_BOLD)
-        _header_row(ws, cc_hrow, [
-            "Cost Centre", "Period", "Active", "New Joiners", "Exits"])
-        row = cc_hrow + 1
+        hc_c0 = 9                                # column I (one gap after G)
+        ccL = get_column_letter(hc_c0)           # Cost Centre column
+        perL = get_column_letter(hc_c0 + 1)      # Period column
+        for off, w in enumerate((20, 12, 10, 13, 10)):
+            ws.column_dimensions[get_column_letter(hc_c0 + off)].width = w
+        _cell(ws, sum_hrow - 1, hc_c0, "Headcount by cost centre", font=_BOLD)
+        _header_row(ws, sum_hrow, [
+            "Cost Centre", "Period", "Active", "New Joiners", "Exits"],
+            start_col=hc_c0)
+        row = sum_hrow + 1
         for code in cc_codes:
             for r in reg:
-                _cell(ws, row, 1, code, border=True)
-                _cell(ws, row, 2, r["period"], border=True, align=_CENTER)
-                _cell(ws, row, 3,
-                      f'=COUNTIFS({rA},$B{row},{rC},$A{row},{rD},"Active")',
+                _cell(ws, row, hc_c0, code, border=True)
+                _cell(ws, row, hc_c0 + 1, r["period"], border=True,
+                      align=_CENTER)
+                _cell(ws, row, hc_c0 + 2,
+                      f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
+                      f'{rD},"Active")',
                       border=True, align=_CENTER)
-                _cell(ws, row, 4,
-                      f'=COUNTIFS({rA},$B{row},{rC},$A{row},'
+                _cell(ws, row, hc_c0 + 3,
+                      f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
                       f'{rE},"New Joiner")',
                       border=True, align=_CENTER)
-                _cell(ws, row, 5,
-                      f'=COUNTIFS({rA},$B{row},{rC},$A{row},{rE},"Exit")',
+                _cell(ws, row, hc_c0 + 4,
+                      f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
+                      f'{rE},"Exit")',
                       border=True, align=_CENTER)
                 row += 1
-    else:
-        row = cc_hrow
 
     for i, note in enumerate(notes):
-        _cell(ws, row + 1 + i, 1, "• " + note, font=_SUB)
+        _cell(ws, roster_last + 2 + i, 1, "• " + note, font=_SUB)
 
     ws.freeze_panes = f"A{sum_first}"
 
