@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.73** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.74** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,16 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.74 — Revenue sheet: "Voucher No" column relabelled "Invoice No"
+
+Operator ask: on the generated MIS's Revenue data sheet the second
+column (the sales voucher's number) reads more naturally as the
+**invoice number**, since a Sales Register row IS the firm's invoice.
+Header-only change — the column stays in position B, so every SUMIFS in
+the P&L sheets (which key on column letters / cell values, never the
+header text) is unaffected. The Expenses sheet keeps its own separate
+"Voucher No" / "Invoice No" columns unchanged.
 
 ### v0.3.73 — Annual targets read 0 in the MIS — financial-year format mismatch
 

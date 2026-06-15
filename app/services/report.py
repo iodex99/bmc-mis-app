@@ -1060,7 +1060,7 @@ def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
         ])
     _write_data_sheet(
         wb, "Revenue" + suffix,
-        ["Date", "Voucher No", "Entity", "CostCentre", "Manager",
+        ["Date", "Invoice No", "Entity", "CostCentre", "Manager",
          "Service", "Client", "Amount", "Category"],
         [12, 16, 24, 12, 12, 22, 28, 14, 14], rows)
 
