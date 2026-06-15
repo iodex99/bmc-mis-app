@@ -36,8 +36,14 @@ _CREDIT_SYNS = {"credit", "credit amount", "cr", "cr amount"}
 #   "Credit Note-D Register"   → sales       (Delhi sales returns)
 #   "Debit Note Register"      → sales       (SUPPLEMENTARY sales, +ve)
 #   "Debit Note-D Register"    → sales       (Delhi supplementary sales)
+#   "Other Income Register"    → sales       (other income, +ve)
 #   "Purchase Register"        → purchase    (expense, +ve)
 #   "Purchase-D Register"      → purchase
+#
+# Why Other Income routes to sales: Tally books "Other Income" vouchers
+# (e.g. MF commission on the Qualzen entity) exactly like a sale — the
+# party is debited and an income ledger credited, tagged to a partner
+# cost centre. It's revenue, so it adds to that partner's income line.
 #
 # Why Debit Notes route to sales: in this firm's accounting practice,
 # Debit Notes are issued BY the firm TO clients as supplementary
@@ -50,11 +56,13 @@ _CREDIT_SYNS = {"credit", "credit amount", "cr", "cr amount"}
 # Regex form so we tolerate any "-<branch>" suffix on the voucher type.
 # ``sales?`` matches both "Sales" and the singular "Sale" some entities
 # use — e.g. MASD Advisors exports a "New Sale Register" (voucher type
-# "New Sale") for its foreign-currency invoices. Without the optional 's'
-# that banner went undetected, so the file imported as kind=None and the
-# operator got no auto-mapping ("system not picking up data").
+# "New Sale") for its foreign-currency invoices. ``other\s*income`` picks
+# up the Qualzen "Other Income Register". Without these the banner went
+# undetected, the file imported as kind=None and the operator got no
+# auto-mapping ("system not picking up data").
 _BANNER_SALES_RE = re.compile(
-    r'\b(?:sales?|credit\s*note|debit\s*note)(?:[\s-][\w-]*)?\s+register\b',
+    r'\b(?:sales?|credit\s*note|debit\s*note|other\s*income)'
+    r'(?:[\s-][\w-]*)?\s+register\b',
     re.IGNORECASE)
 _BANNER_PURCHASE_RE = re.compile(
     r'\b(?:purchase)(?:[\s-][\w-]*)?\s+register\b',

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.75** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.76** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,34 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.76 — Support the "Other Income Register" (Qualzen MF commission)
+
+Operator's ``QZ OTHER INCOME.xlsx`` wasn't being picked up. It's a Tally
+*"Other Income Register"* (voucher type "Other Income") — the Qualzen
+entity's MF-commission income. Structurally it's identical to a Sales
+register: the party is debited, an income ledger is credited, and the
+amount is tagged to a partner cost centre (VK here). Only the banner went
+unrecognised, so ``detect_kind`` returned ``None`` and the importer
+offered no auto-mapping.
+
+* **Banner now recognised** — ``other\s*income`` added to the sales-side
+  banner regex, so "Other Income Register" detects as a revenue register,
+  auto-maps its columns (which sit further right than a normal sales
+  export) and auto-resolves the Qualzen entity (already in the masters).
+  Kept tight: a bare "Income Register" does NOT match, only "Other
+  Income".
+* **Routes to revenue** — "Other Income" vouchers default to the sales
+  side (credit, +ve), so the ₹3,76,000 lands in partner VK's income and
+  flows through every downstream view: Cost Centre P&L revenue,
+  Partner-Manager income line (category "Income"), Entity P&L (Qualzen),
+  and the Service MIS (as an "Other Income" service line).
+
+Notes: the import dialog labels it a "Sales register" (it shares the
+revenue code path — cosmetic only), and the booked party "Other Income
+( MF Comission )" shows as an unmapped client in Client Billing since
+it's income, not a client sale. Verified end-to-end: 5 vouchers, net
+₹3,76,000, and all 14 other reference registers parse unchanged.
 
 ### v0.3.75 — "New Sale" register undetected; harden Tally totals-row parsing
 
