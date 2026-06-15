@@ -48,8 +48,13 @@ _CREDIT_SYNS = {"credit", "credit amount", "cr", "cr amount"}
 # firm's books.
 #
 # Regex form so we tolerate any "-<branch>" suffix on the voucher type.
+# ``sales?`` matches both "Sales" and the singular "Sale" some entities
+# use — e.g. MASD Advisors exports a "New Sale Register" (voucher type
+# "New Sale") for its foreign-currency invoices. Without the optional 's'
+# that banner went undetected, so the file imported as kind=None and the
+# operator got no auto-mapping ("system not picking up data").
 _BANNER_SALES_RE = re.compile(
-    r'\b(?:sales|credit\s*note|debit\s*note)(?:[\s-][\w-]*)?\s+register\b',
+    r'\b(?:sales?|credit\s*note|debit\s*note)(?:[\s-][\w-]*)?\s+register\b',
     re.IGNORECASE)
 _BANNER_PURCHASE_RE = re.compile(
     r'\b(?:purchase)(?:[\s-][\w-]*)?\s+register\b',

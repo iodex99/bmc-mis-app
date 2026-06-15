@@ -53,6 +53,26 @@ def _first_number(row: list[Any]) -> float | None:
     return None
 
 
+def _is_total_row(row: list[Any], p_i: int | None) -> bool:
+    """True for a Tally 'Total' / 'Grand Total' summary row.
+
+    Tally closes a register with a totals row that still carries a Dr/Cr
+    marker and an amount (e.g. ``['', 'Total :', 'Dr', '10,932.35 Cr']``
+    or ``['Total:', None, …, 317892]``). Without this guard that row was
+    mistaken for a cost-centre tag on the last voucher's final ledger
+    line, attaching a bogus ``Total :`` cost centre. Harmless when it
+    landed on a tax line, but it would misattribute revenue if the last
+    line were a plain fee line — so skip these rows outright.
+    """
+    for idx in (0, p_i):
+        if idx is None:
+            continue
+        t = clean(_cell(row, idx)).lower().rstrip(" :")
+        if t in ("total", "grand total"):
+            return True
+    return False
+
+
 # --- Tally sales / purchase register ----------------------------------------
 
 def _marker_side(row: list[Any]) -> str | None:
@@ -274,6 +294,12 @@ def parse_tally(grid: list[list[Any]], colmap: ColMap, data_start: int,
             continue
 
         if current is None:
+            continue
+
+        if _is_total_row(row, p_i):
+            # End-of-register totals row — never data. The in-flight
+            # ledger line is committed by the flush_pending() after the
+            # loop, so we lose nothing by skipping here.
             continue
 
         side = _marker_side(row)

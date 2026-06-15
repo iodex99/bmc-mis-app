@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.74** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.75** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,40 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.75 — "New Sale" register undetected; harden Tally totals-row parsing
+
+Operator reported the foreign-currency ``Advisor new sale.xlsx`` (MASD
+Advisors) wasn't picked up. Investigation showed the foreign currency
+itself was never the problem — each FC voucher carries its converted INR
+value in the Debit/Credit Amount columns, and the FC detail sub-rows
+(``| 7963 | @ | 93.09 |``, i.e. amount × rate) have no value in the
+amount columns and no Dr/Cr marker, so the parser already skips them and
+keeps the INR figure. Verified across both FC files in the reference set
+(``Advisor new sale`` ₹7,41,275.67; ``ADVISOR CREDIT NOTE`` −₹10,932.35).
+
+Two real bugs found and fixed:
+
+* **Banner went undetected.** MASD exports a *"New Sale Register"*
+  (voucher type "New Sale") — singular "Sale". The sales banner regex
+  required "sales", so ``detect_kind`` returned ``None``; the importer
+  then skipped auto-mapping entirely and the operator saw no data. The
+  regex now accepts ``sales?`` (singular or plural), so "New Sale
+  Register" detects as sales, auto-maps its columns, and auto-resolves
+  the MASD entity. Word-boundary anchoring keeps "Wholesale"/"Resale"
+  from false-matching.
+* **Trailing "Total" row mis-parsed.** Tally closes each register with a
+  ``Total :`` row that still carries a Dr/Cr marker + amount. The parser
+  treated it as a cost-centre tag on the last voucher's final ledger
+  line, attaching a bogus ``Total :`` cost centre (seen in 5 of the
+  reference registers). It happened to land on a tax line every time, so
+  revenue attribution was unaffected — but it would have misattributed a
+  plain fee line. A new ``_is_total_row`` guard skips these rows; the
+  in-flight ledger line is still committed by the end-of-loop flush.
+
+Confirmed across all 14 reference registers (sales, sales-D/BR, credit
+note, debit note, purchase): every net total is identical to before, and
+no bogus cost centres remain.
 
 ### v0.3.74 — Revenue sheet: "Voucher No" column relabelled "Invoice No"
 
