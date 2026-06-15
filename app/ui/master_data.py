@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from .. import repository as repo
 from ..importing import excel_reader
 from ..services import resolution
+from ..services.calc import normalize_fy
 from ..util import fmt_inr
 from .widgets import debounced, fill_table_with_actions, setup_data_table
 
@@ -361,11 +362,19 @@ class RecordTab(QWidget):
         return str(value)
 
     # -- actions -------------------------------------------------------------
+    def _normalize_values(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Canonicalise operator input before persisting. Currently the
+        Targets master's loosely-typed financial year ('2026 - 27' →
+        '2026-27') so it matches the form the MIS computes from periods."""
+        if self.spec.table == "targets" and "financial_year" in values:
+            values["financial_year"] = normalize_fy(values["financial_year"])
+        return values
+
     def _add(self) -> None:
         dlg = RecordDialog(self.spec, None, self)
         if dlg.exec() == QDialog.Accepted:
             try:
-                values = dlg.values()
+                values = self._normalize_values(dlg.values())
                 new_id = repo.insert(self.spec.table, values)
             except Exception as exc:  # e.g. UNIQUE violation
                 QMessageBox.critical(self, "Could not add", str(exc))
@@ -494,7 +503,7 @@ class RecordTab(QWidget):
         dlg = RecordDialog(self.spec, record, self)
         if dlg.exec() == QDialog.Accepted:
             try:
-                values = dlg.values()
+                values = self._normalize_values(dlg.values())
                 repo.update(self.spec.table, record["id"], values)
             except Exception as exc:
                 QMessageBox.critical(self, "Could not save", str(exc))

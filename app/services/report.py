@@ -24,6 +24,7 @@ from .calc import (
     MISData,
     expense_type,
     financial_year,
+    normalize_fy,
 )
 from .resolution import norm
 
@@ -330,16 +331,21 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
             f"  AND cc.cc_type = 'partner' "
             f"GROUP BY cc.code, v.period",
             months).fetchall()
+        # Match on the NORMALISED financial year so loosely-typed master
+        # values ('2026 - 27', '2026/27', …) still resolve to this FY —
+        # an exact match left the Annual Budget column reading 0.
         budget_rows = conn.execute(
-            "SELECT cc.code AS code, t.target_amount AS amount "
+            "SELECT cc.code AS code, t.financial_year AS fy, "
+            "       t.target_amount AS amount "
             "FROM targets t "
-            "JOIN cost_centres cc ON cc.id = t.cost_centre_id "
-            "WHERE t.financial_year = ?", (fy,)).fetchall()
+            "JOIN cost_centres cc ON cc.id = t.cost_centre_id").fetchall()
 
     monthly: dict[str, dict[str, float]] = {}
     for row in sales_rows:
         monthly.setdefault(row["code"], {})[row["period"]] = row["amount"]
-    budgets = {row["code"]: row["amount"] for row in budget_rows}
+    fy_norm = normalize_fy(fy)
+    budgets = {row["code"]: row["amount"] for row in budget_rows
+               if normalize_fy(row["fy"]) == fy_norm}
 
     ws = wb.create_sheet("Budget vs Monthly Sales")
     ws.sheet_view.showGridLines = False

@@ -142,6 +142,28 @@ def financial_year(period: str) -> str:
     return f"{start}-{str(start + 1)[-2:]}"
 
 
+def normalize_fy(value) -> str:
+    """Canonicalise an operator-typed financial year to ``YYYY-YY``.
+
+    Operators type these loosely in the Targets master — ``2026 - 27``,
+    ``2026-2027``, ``2026/27`` — but :func:`financial_year` produces the
+    tight ``YYYY-YY`` form, and target lookups did an exact string match.
+    A stray space therefore made the MIS Target column (and the
+    Budget-vs-Sales sheet) silently read 0. Normalising both sides before
+    comparing fixes that. Returns the whitespace-stripped input unchanged
+    when it doesn't look like a financial year (so unexpected values still
+    match themselves rather than collapsing together).
+    """
+    s = re.sub(r"\s+", "", str(value or ""))
+    m = re.match(r"^(\d{4})[-/](\d{2,4})$", s)
+    if not m:
+        return s
+    start, end = m.group(1), m.group(2)
+    if len(end) == 4:           # '2026-2027' -> '2026-27'
+        end = end[-2:]
+    return f"{start}-{end}"
+
+
 # --- main entry point --------------------------------------------------------
 
 def compute(options: MISOptions) -> MISData:
@@ -715,20 +737,26 @@ def _roll_up(data: MISData, masters: dict) -> None:
         line_for(f["cost_centre_id"]).direct_expense += f["amount"]
 
     # Targets (annual, pro-rated to the number of months selected).
+    # Match on the NORMALISED financial year — the operator may have typed
+    # '2026 - 27' etc. in the master, which never equalled the tight
+    # '2026-27' financial_year() emits, so targets silently read 0.
     fys = {financial_year(p) for p in options.periods}
     months = len(options.periods)
     with transaction() as conn:
+        stored: dict[tuple[str, int], float] = {}
+        for row in conn.execute(
+                "SELECT financial_year, cost_centre_id, target_amount "
+                "FROM targets"):
+            stored[(normalize_fy(row["financial_year"]),
+                    row["cost_centre_id"])] = float(row["target_amount"])
         for cc_id, line in lines.items():
             if cc_id is None:
                 continue
             total = 0.0
             for fy in fys:
-                row = conn.execute(
-                    "SELECT target_amount FROM targets "
-                    "WHERE financial_year = ? AND cost_centre_id = ?",
-                    (fy, cc_id)).fetchone()
-                if row:
-                    total += float(row["target_amount"]) / 12.0 * months
+                amt = stored.get((normalize_fy(fy), cc_id))
+                if amt is not None:
+                    total += amt / 12.0 * months
             line.target = total
 
     # Office overhead is already allocated per active employee via the

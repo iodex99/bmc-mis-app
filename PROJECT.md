@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.72** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.73** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,34 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.73 — Annual targets read 0 in the MIS — financial-year format mismatch
+
+Operator entered annual targets per cost centre in the Targets master,
+but the generated MIS showed **0** in the Target column (and the
+Budget-vs-Sales sheet's Annual Budget). Root cause: the operator typed
+the financial year as ``2026 - 27`` (spaces around the hyphen), while
+``financial_year()`` derives the tight ``2026-27`` from the selected
+periods — and both target lookups did an **exact string match**, so a
+stray space silently zeroed the target.
+
+* **New ``normalize_fy()`` helper** canonicalises loosely-typed years
+  (``2026 - 27``, ``2026-2027``, ``2026/27`` → ``2026-27``).
+* **Both readers fixed** to match on the normalised year: the Cost
+  Centre P&L Target column (via ``calc``) *and* the Budget-vs-Sales
+  sheet's Annual Budget (``report``). This in turn corrects the
+  **Variance** column (Revenue − Target) on the Cost Centre P&L and the
+  budget-variance column on the Budget sheet, which were both computed
+  off the zeroed target.
+* **Input is normalised on save** in the Targets master, so new/edited
+  entries are stored canonically.
+* **Migration 13** rewrites existing rows (``2026 - 27`` → ``2026-27``),
+  de-duping first so the strip can't trip the UNIQUE constraint — the
+  operator's already-entered targets resolve without re-typing.
+
+Verified end-to-end against a copy of the operator's database: migration
+canonicalises all 7 rows with amounts intact, and a 3-month MIS resolves
+CC1's ₹4.5cr annual target to the expected ₹1.125cr pro-rated figure.
 
 ### v0.3.72 — Fix blank Direct Expense on Service MIS / Entity P&L; Headcount table beside the summary
 

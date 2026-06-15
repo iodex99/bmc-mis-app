@@ -409,6 +409,23 @@ MIGRATIONS: list[tuple[int, str]] = [
         -- don't include bill allocations.
         ALTER TABLE vouchers ADD COLUMN invoice_no TEXT;
     """),
+    (13, """
+        -- Canonicalise operator-typed financial years on the Targets
+        -- master. Values like '2026 - 27' (spaces around the hyphen)
+        -- never equalled the tight '2026-27' the MIS computes from the
+        -- selected periods, so the Target column and the Budget-vs-Sales
+        -- sheet silently read 0. Strip whitespace so stored values match.
+        --
+        -- Dedupe first (keep the highest id per CC + normalised FY) so
+        -- the whitespace-strip can't trip the UNIQUE(financial_year,
+        -- cost_centre_id) constraint when a clean row already exists.
+        DELETE FROM targets
+         WHERE id NOT IN (
+           SELECT MAX(id) FROM targets
+           GROUP BY REPLACE(financial_year, ' ', ''), cost_centre_id
+         );
+        UPDATE targets SET financial_year = REPLACE(financial_year, ' ', '');
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
