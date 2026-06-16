@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.77** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.78** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,14 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.78 — Annual Targets FY dropdown extends further forward
+
+The v0.3.77 financial-year dropdown only reached current FY + 3
+(2029-30). Widened the forward window to current FY + 30 (now through
+~2056-57) so the list keeps going for years ahead. Still 3 years back,
+still an editable combo for anything beyond the window, still merges any
+FY already in use.
 
 ### v0.3.77 — Budget run-rate column, FY dropdown for targets, voucher totals
 

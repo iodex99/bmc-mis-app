@@ -44,14 +44,16 @@ from ..services.calc import financial_year, normalize_fy
 def _fy_choices() -> list[str]:
     """Financial years to offer in the Annual Targets dropdown.
 
-    A window around the current FY (3 back → 3 forward) merged with any FY
-    already stored on a target row, newest first. Lets the operator pick
-    instead of re-typing '2026-27' (and mistyping it as '2026 - 27', the
-    bug behind targets silently reading 0 pre-v0.3.73)."""
+    A window around the current FY (3 back → 30 forward) merged with any
+    FY already stored on a target row, newest first. Lets the operator
+    pick instead of re-typing '2026-27' (and mistyping it as '2026 - 27',
+    the bug behind targets silently reading 0 pre-v0.3.73). It's still an
+    editable combo, so a year beyond the window can be typed if ever
+    needed."""
     today = _dt.date.today()
     cur = financial_year(f"{today.year:04d}-{today.month:02d}")
     start = int(cur.split("-")[0])
-    years = {f"{y}-{str(y + 1)[-2:]}" for y in range(start - 3, start + 4)}
+    years = {f"{y}-{str(y + 1)[-2:]}" for y in range(start - 3, start + 31)}
     try:
         for row in repo.fetch_all("targets"):
             fy = normalize_fy(row.get("financial_year"))
