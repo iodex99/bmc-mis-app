@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.76** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.77** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,29 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.77 — Budget run-rate column, FY dropdown for targets, voucher totals
+
+Three operator asks:
+
+* **Budget vs Monthly Sales — last column is now a required run-rate.**
+  The old "Avg / Active Month" (YTD ÷ months-with-sales) is replaced by
+  "Avg / Remaining Month": **Variance vs Budget ÷ months left in the FY**
+  — i.e. the average monthly sales each partner must still book to hit
+  the annual budget. The header shows the remaining-month count
+  (e.g. "Avg / Remaining Month (10)"); a full-FY run (0 left) shows 0.
+* **Annual Targets — financial year is a dropdown.** No more typing
+  "2026-27" by hand (the source of the "2026 - 27" mismatch fixed in
+  v0.3.73). The Targets master now offers a dropdown of financial years
+  (current ± 3, plus any already in use, newest first); still editable
+  for an out-of-range year, and normalised on save. Targets stay annual,
+  one row per (cost centre, FY).
+* **Review & Map → Vouchers: a live Totals bar.** Under the existing
+  Entity / Period / Kind / Status / Search filters, a totals line now
+  sums the filtered vouchers — Sales (net), Expenses (net), Gross and
+  Tax — so the operator can reconcile the preview against Tally's
+  register totals BEFORE generating the Excel MIS. Recomputes on every
+  filter / search change.
 
 ### v0.3.76 — Support the "Other Income Register" (Qualzen MF commission)
 

@@ -33,10 +33,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import datetime as _dt
+
 from .. import repository as repo
 from ..importing import excel_reader
 from ..services import resolution
-from ..services.calc import normalize_fy
+from ..services.calc import financial_year, normalize_fy
+
+
+def _fy_choices() -> list[str]:
+    """Financial years to offer in the Annual Targets dropdown.
+
+    A window around the current FY (3 back → 3 forward) merged with any FY
+    already stored on a target row, newest first. Lets the operator pick
+    instead of re-typing '2026-27' (and mistyping it as '2026 - 27', the
+    bug behind targets silently reading 0 pre-v0.3.73)."""
+    today = _dt.date.today()
+    cur = financial_year(f"{today.year:04d}-{today.month:02d}")
+    start = int(cur.split("-")[0])
+    years = {f"{y}-{str(y + 1)[-2:]}" for y in range(start - 3, start + 4)}
+    try:
+        for row in repo.fetch_all("targets"):
+            fy = normalize_fy(row.get("financial_year"))
+            if fy:
+                years.add(fy)
+    except Exception:                                   # pragma: no cover
+        pass
+    return sorted(years, reverse=True)
 from ..util import fmt_inr
 from .widgets import debounced, fill_table_with_actions, setup_data_table
 
@@ -101,7 +124,7 @@ SPECS: list[TableSpec] = [
         Field("name", "Service name"),
     ], order_by="name"),
     TableSpec("targets", "Annual Targets", [
-        Field("financial_year", "Financial year (e.g. 2025-26)"),
+        Field("financial_year", "Financial year", "fy"),
         Field("cost_centre_id", "Cost centre", "fk", fk_table="cost_centres"),
         Field("target_amount", "Target amount", "float"),
     ], soft_delete=False),
@@ -158,6 +181,22 @@ class RecordDialog(QDialog):
             w.addItems(f.choices)
             if current in f.choices:
                 w.setCurrentText(current)
+            return w
+        if f.kind == "fy":
+            # Financial-year picker: a dropdown of FYs (current ± a few,
+            # plus any already in use). Editable so an out-of-range year
+            # can still be typed; the value is normalised on save.
+            w = QComboBox()
+            w.setEditable(True)
+            choices = _fy_choices()
+            cur = normalize_fy(current) if current else ""
+            if cur and cur not in choices:
+                choices.insert(0, cur)
+            w.addItems(choices)
+            today = _dt.date.today()
+            default = cur or financial_year(
+                f"{today.year:04d}-{today.month:02d}")
+            w.setCurrentText(default)
             return w
         if f.kind == "fk":
             w = QComboBox()

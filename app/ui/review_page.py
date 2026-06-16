@@ -738,6 +738,13 @@ class VoucherTab(QWidget):
         bar2.addWidget(self.search, 1)
         layout.addLayout(bar2)
 
+        # --- totals bar: live sum over whatever the filters show, so the
+        # operator can cross-check against Tally BEFORE generating the MIS.
+        self.totals = QLabel("")
+        self.totals.setObjectName("sectionTitle")
+        self.totals.setTextFormat(Qt.RichText)
+        layout.addWidget(self.totals)
+
         self.table = QTableWidget()
         setup_data_table(self.table)
         self.table.doubleClicked.connect(
@@ -821,6 +828,7 @@ class VoucherTab(QWidget):
             parts.append(
                 f"<span style='color:#B91C1C;'>{unassigned} unassigned</span>")
         self.summary.setText("  ·  ".join(parts))
+        self._update_totals()
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
         if n == 0:
@@ -860,6 +868,33 @@ class VoucherTab(QWidget):
             status_for_row=status_for,
             stretch_col=2,
         )
+
+    def _update_totals(self) -> None:
+        """Sum amounts over the currently-filtered vouchers so the operator
+        can tally the preview against Tally's register totals before
+        generating the MIS. Net = taxable value booked to the P&L; Gross
+        = net + tax (the figure Tally's 'Total' row shows); Tax = GST etc.
+        Sales and expenses are summed separately since they net out."""
+        if not self._rows:
+            self.totals.setText("")
+            return
+        def _sum(key, kind=None):
+            return sum(float(v.get(key) or 0.0) for v in self._rows
+                       if kind is None or v.get("kind") == kind)
+        sales_net = _sum("net_amount", config.VCH_SALES)
+        exp_net = _sum("net_amount", config.VCH_EXPENSE)
+        gross = _sum("gross_amount")
+        tax = _sum("tax_amount")
+        has_sales = any(v.get("kind") == config.VCH_SALES for v in self._rows)
+        has_exp = any(v.get("kind") == config.VCH_EXPENSE for v in self._rows)
+        parts = ["<b>Totals</b>"]
+        if has_sales:
+            parts.append(f"Sales (net) <b>{fmt_inr(sales_net, 0)}</b>")
+        if has_exp:
+            parts.append(f"Expenses (net) <b>{fmt_inr(exp_net, 0)}</b>")
+        parts.append(f"Gross <b>{fmt_inr(gross, 0)}</b>")
+        parts.append(f"Tax <b>{fmt_inr(tax, 0)}</b>")
+        self.totals.setText("&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts))
 
     def _edit_row(self, idx: int) -> None:
         if not (0 <= idx < len(self._rows)):

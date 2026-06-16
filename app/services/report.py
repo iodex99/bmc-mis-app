@@ -363,11 +363,20 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     _cell(ws, 1, 1, f"Budget vs Monthly Sales  —  FY {fy}", font=_TITLE)
     _cell(ws, 2, 1, "Year-to-date sales by partner cost centre. Annual budget "
-                    "is read from the Targets master.", font=_SUB)
+                    "is read from the Targets master. The last column is the "
+                    "average monthly sales still needed to hit budget "
+                    "(Variance vs Budget ÷ months left in the FY).",
+          font=_SUB)
 
+    # Months still to run in this FY (Apr–Mar = 12). The last column shows
+    # the average monthly sales each partner must still book to close the
+    # gap to budget: Variance vs Budget ÷ remaining months.
+    remaining_months = max(0, 12 - len(months))
+    avg_header = (f"Avg / Remaining Month ({remaining_months})"
+                  if remaining_months else "Avg / Remaining Month")
     headers = (["Code", "Cost Centre", "Annual Budget"]
                + [_month_short(m) for m in months]
-               + ["YTD Total", "Variance vs Budget", "Avg / Active Month"])
+               + ["YTD Total", "Variance vs Budget", avg_header])
     hrow = 4
     _header_row(ws, hrow, headers)
 
@@ -376,6 +385,15 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
     first_m = get_column_letter(4)
     last_m = get_column_letter(4 + len(months) - 1)
     ytd_L = get_column_letter(ytd_col)
+    var_L = get_column_letter(var_col)
+
+    def avg_formula(row: int) -> str | float:
+        # Variance vs Budget spread over the months left in the FY — the
+        # run-rate needed to still hit the annual budget. No months left
+        # (full FY generated) → nothing to spread, so 0.
+        if remaining_months <= 0:
+            return 0
+        return f"={var_L}{row}/{remaining_months}"
 
     for partner in partners:
         code = partner["code"]
@@ -390,9 +408,7 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, r, ytd_col, f"=SUM({first_m}{r}:{last_m}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
         _cell(ws, r, var_col, f"=C{r}-{ytd_L}{r}", fmt=INR, border=True)
-        _cell(ws, r, avg_col,
-              f'=IFERROR({ytd_L}{r}/COUNTIF({first_m}{r}:{last_m}{r},'
-              f'">0"),0)', fmt=INR, border=True)
+        _cell(ws, r, avg_col, avg_formula(r), fmt=INR, border=True)
         r += 1
 
     last_body = r - 1
@@ -401,8 +417,7 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
     for col in range(3, avg_col + 1):
         L = get_column_letter(col)
         if col == avg_col:
-            formula = (f'=IFERROR({ytd_L}{r}/COUNTIF({first_m}{r}:{last_m}{r},'
-                       f'">0"),0)')
+            formula = avg_formula(r)
         else:
             formula = f"=SUM({L}{body_start}:{L}{last_body})"
         _cell(ws, r, col, formula, font=_BOLD, fill=_TOTAL_FILL,
