@@ -301,23 +301,24 @@ def _month_short(period: str) -> str:
         return period
 
 
-def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
-    """Year-to-date monthly sales per partner cost centre, vs annual budget.
+def budget_monthly_data(data: MISData, lbl: dict) -> dict | None:
+    """FY-to-date monthly partner sales + annual budgets — the single
+    source of truth behind both the Excel 'Budget vs Monthly Sales' sheet
+    and the HTML dashboard's budget section, so the two never disagree.
 
-    Independent of the selected MIS period: always shows the full FY-to-date
-    picture so the board sees trend context alongside the headline P&L.
-    Monthly cells are values (read from DB) since the Revenue data sheet only
-    contains the selected periods; totals/variance/average are formulas so
-    edits still recalculate.
+    Returns ``None`` when there's nothing to show (no period / no partner).
+    Otherwise a dict: ``fy``, ``months`` (FY-to-date), ``partners`` (the
+    active partner rows), ``monthly`` (code → {period: sales}), ``budgets``
+    (code → annual target), ``remaining_months`` (months left in the FY).
     """
     if not data.options.periods:
-        return
+        return None
     latest = max(data.options.periods)
     fy = financial_year(latest)
     months = _fy_months_through(fy, latest)
     partners = [c for c in lbl["cc_active"] if c["cc_type"] == "partner"]
     if not months or not partners:
-        return
+        return None
 
     placeholders = ','.join('?' * len(months))
     with transaction() as conn:
@@ -346,6 +347,30 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
     fy_norm = normalize_fy(fy)
     budgets = {row["code"]: row["amount"] for row in budget_rows
                if normalize_fy(row["fy"]) == fy_norm}
+    return {
+        "fy": fy, "months": months, "partners": partners,
+        "monthly": monthly, "budgets": budgets,
+        "remaining_months": max(0, 12 - len(months)),
+    }
+
+
+def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
+    """Year-to-date monthly sales per partner cost centre, vs annual budget.
+
+    Independent of the selected MIS period: always shows the full FY-to-date
+    picture so the board sees trend context alongside the headline P&L.
+    Monthly cells are values (read from DB) since the Revenue data sheet only
+    contains the selected periods; totals/variance/average are formulas so
+    edits still recalculate.
+    """
+    bm = budget_monthly_data(data, lbl)
+    if bm is None:
+        return
+    fy = bm["fy"]
+    months = bm["months"]
+    partners = bm["partners"]
+    monthly = bm["monthly"]
+    budgets = bm["budgets"]
 
     ws = wb.create_sheet("Budget vs Monthly Sales")
     ws.sheet_view.showGridLines = False

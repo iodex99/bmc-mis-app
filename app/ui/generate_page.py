@@ -26,6 +26,7 @@ from ..services import vouchers as vsvc
 from ..util import fmt_inr
 from ..services.calc import MISOptions, compute
 from ..services.report import generate
+from ..services.dashboard import generate_dashboard
 
 
 class GeneratePage(QWidget):
@@ -223,12 +224,29 @@ class GeneratePage(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Generation failed", str(exc))
             return
-        self.summary.setText(f"Saved: {out}")
-        if QMessageBox.question(
-                self, "MIS generated",
-                f"Workbook saved to:\n{out}\n\nOpen it now?") == QMessageBox.Yes:
+        # Interactive HTML dashboard alongside the workbook (same computed
+        # dataset, so the figures tie out). A dashboard failure must not
+        # lose the workbook the operator already has.
+        dash_path = Path(out).with_name(Path(out).stem + "_Dashboard.html")
+        dash_ok = True
+        try:
+            generate_dashboard(data, dash_path, compare_data)
+        except Exception:                                   # noqa: BLE001
+            dash_ok = False
+        if dash_ok:
+            self.summary.setText(f"Saved:\n{out}\n{dash_path}")
+            prompt = (f"Workbook saved to:\n{out}\n\n"
+                      f"Interactive dashboard saved to:\n{dash_path}\n\n"
+                      "Open them now?")
+        else:
+            self.summary.setText(f"Saved: {out}\n(Dashboard could not be "
+                                 "generated — workbook is unaffected.)")
+            prompt = f"Workbook saved to:\n{out}\n\nOpen it now?"
+        if QMessageBox.question(self, "MIS generated", prompt) == QMessageBox.Yes:
             try:
                 os.startfile(out)  # noqa: S606 (Windows)
+                if dash_ok:
+                    os.startfile(dash_path)  # opens in the default browser
             except Exception:
                 pass
 

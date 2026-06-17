@@ -38,6 +38,17 @@ DATA_DIR = _data_dir()
 DB_PATH = DATA_DIR / "mis.db"
 EXPORT_DIR = DATA_DIR / "exports"
 
+
+def resource_path(*parts: str) -> Path:
+    """Absolute path to a bundled read-only asset (dev or frozen).
+
+    Data files added via the PyInstaller spec land under ``sys._MEIPASS``
+    in a packaged build; in development they sit beside the source tree.
+    Used e.g. for the vendored Chart.js inlined into the HTML dashboard.
+    """
+    base = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
+    return base.joinpath(*parts)
+
 # --- Shared vocabulary -------------------------------------------------------
 
 # Kinds of files the operator uploads.

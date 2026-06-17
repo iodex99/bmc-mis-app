@@ -62,7 +62,13 @@ def main() -> int:
         "--clean",
         "--noupx",
     ]
-    icon = ROOT / "app" / "assets" / "icon.ico"
+    # Bundle read-only assets (the vendored Chart.js the HTML dashboard
+    # inlines, plus the icon). Resolved at runtime via config.resource_path
+    # (sys._MEIPASS). PyInstaller wants SRC<os.pathsep>DEST.
+    assets = ROOT / "app" / "assets"
+    if assets.exists():
+        args += ["--add-data", f"{assets}{os.pathsep}app/assets"]
+    icon = assets / "icon.ico"
     if icon.exists():
         args += ["--icon", str(icon)]
 

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.78** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.79** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,40 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.79 — Interactive HTML dashboard generated alongside the Excel MIS
+
+Operator asked for a board-room-ready visual dashboard, downloaded with
+the workbook, covering everything the Excel does, with the figures
+guaranteed not to drift from the workbook.
+
+* **New module `app/services/dashboard.py`.** Renders a self-contained
+  ``<name>_Dashboard.html`` next to the saved ``.xlsx`` (wired into the
+  Generate page; a dashboard failure can't lose the workbook). The
+  Generate dialog offers to open both.
+* **Same numbers, one calculation path.** It renders from the SAME
+  :class:`MISData` the workbook is built from — there is no second
+  aggregation. The FY-to-date budget view shares a new
+  ``report.budget_monthly_data`` helper with the Excel "Budget vs Monthly
+  Sales" sheet, and money uses the same ``fmt_inr`` Indian grouping. So
+  every figure ties to the workbook by construction.
+* **Coverage.** KPI cards (Revenue, Cost, Net Profit, Margin, Target,
+  Variance) + sections for Cost Centre P&L (revenue/cost/profit bars,
+  revenue-share donut, stacked cost composition, full table), Budget vs
+  Monthly Sales (budget-vs-YTD bars, monthly trend, FY-to-date table),
+  Entity P&L, Service MIS, Partner–Manager, Client Billing (top-15 bar +
+  full table), and Employee Register (headcount movement, headcount by
+  cost centre, office-overhead trend). Sticky section nav + a Print/PDF
+  button; clean navy/blue board-room styling.
+* **Offline by default.** Chart.js is vendored under ``app/assets`` and
+  **inlined** into the HTML (CDN only as a fallback), so the file opens
+  anywhere with no internet and nothing to install. ``build.py`` bundles
+  the asset via ``--add-data``; ``config.resource_path`` resolves it in
+  both dev and the frozen exe (``sys._MEIPASS``).
+
+Verified end-to-end: generated the workbook and dashboard from one
+dataset and confirmed the KPI / cost-centre figures match, and
+rendered the HTML headless to confirm the charts and layout.
 
 ### v0.3.78 — Annual Targets FY dropdown extends further forward
 
