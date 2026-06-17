@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.80** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.81** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,24 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.81 — Dashboard tables: click-to-sort + filter box
+
+Every dashboard table (Full P&L, budget detail, entity, service,
+partner–manager, client billing, employee register) is now interactive:
+
+* **Click any column header to sort.** Numeric columns sort by value —
+  parsed from the formatted cell ("₹-9,77,331" → −977331, "63.7%" →
+  63.7), with blanks ("—") pushed to the end — text columns sort
+  alphabetically. Direction toggles on each click with a ▲/▼ indicator,
+  and the **TOTAL row stays pinned** at the bottom.
+* **Filter box on long tables** (auto for >10 rows, e.g. Client
+  Billing): type to show only matching rows; the TOTAL stays visible.
+
+Pure client-side over the rendered cells — no figures recomputed, so the
+table still ties to the workbook. Sort arrows and filter boxes are hidden
+when printing. Verified the parsing/sort logic and confirmed the wired
+markup (7 sortable tables, filter box) in the rendered DOM.
 
 ### v0.3.80 — Dashboard: fix horizontal-bar tooltips + per-chart Sort / Top-N
 

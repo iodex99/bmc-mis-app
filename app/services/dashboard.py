@@ -54,8 +54,20 @@ def _kpi_card(label: str, value: str, accent: str, sub: str = "") -> str:
             f"<div class='kpi-value'>{value}</div>{sub_html}</div>")
 
 
+_table_seq = 0
+
+
 def _table(headers: list[str], rows: list[list[str]], right_cols: set[int],
-           total_row: list[str] | None = None) -> str:
+           total_row: list[str] | None = None,
+           searchable: bool | None = None) -> str:
+    """Sortable table. Click a header to sort (numeric columns sort by
+    value, parsed from the formatted text; the TOTAL row stays pinned).
+    Long tables (or ``searchable=True``) also get a filter box."""
+    global _table_seq
+    _table_seq += 1
+    tid = f"tbl{_table_seq}"
+    if searchable is None:
+        searchable = len(rows) > 10
     th = "".join(
         f"<th class='{'num' if i in right_cols else ''}'>{_esc(h)}</th>"
         for i, h in enumerate(headers))
@@ -70,8 +82,12 @@ def _table(headers: list[str], rows: list[list[str]], right_cols: set[int],
             f"<td class='{'num' if i in right_cols else ''}'>{c}</td>"
             for i, c in enumerate(total_row))
         body.append(f"<tr class='total'>{tds}</tr>")
-    return (f"<table><thead><tr>{th}</tr></thead>"
-            f"<tbody>{''.join(body)}</tbody></table>")
+    search = (f"<input class='tbl-search' data-target='{tid}' "
+              f"oninput='filterTable(this)' placeholder='Filter rows…'>"
+              if searchable else "")
+    return (f"{search}<div class='table-wrap'>"
+            f"<table id='{tid}' class='sortable'><thead><tr>{th}</tr></thead>"
+            f"<tbody>{''.join(body)}</tbody></table></div>")
 
 
 class _Charts:
@@ -537,6 +553,14 @@ th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;
 th{color:var(--muted);font-weight:600;text-transform:uppercase;
  font-size:11px;letter-spacing:.03em;}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
+th.th-sort{cursor:pointer;user-select:none;}
+th.th-sort:hover{color:var(--blue);}
+th.th-sort::after{content:'⇅';opacity:.3;margin-left:5px;font-size:9px;}
+th.sorted-asc::after{content:'▲';opacity:.85;}
+th.sorted-desc::after{content:'▼';opacity:.85;}
+.tbl-search{margin:0 0 10px;padding:6px 10px;border:1px solid var(--line);
+ border-radius:6px;font-size:12.5px;width:240px;max-width:100%;}
+.tbl-search:focus{outline:none;border-color:var(--blue);}
 tbody tr:nth-child(even){background:#F8FAFC;}
 tr.total td{font-weight:700;color:var(--navy);border-top:2px solid var(--navy);
  background:#EEF4FF;}
@@ -546,7 +570,8 @@ footer{color:var(--muted);font-size:12px;padding:24px 40px;text-align:center;
 .warn{background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:
  10px 14px;font-size:12.5px;color:#92400E;margin-bottom:16px;}
 @media print{nav{position:static;}.card,.kpi{box-shadow:none;
- border:1px solid var(--line);}}
+ border:1px solid var(--line);}.tbl-search{display:none;}
+ th.th-sort::after{content:'';}}
 """
 
 _JS_HELPERS = r"""
@@ -648,10 +673,53 @@ function applyControls(id){var o=REG[id];if(!o)return;
  ch.update();}
 """
 
+_JS_TABLES = r"""
+// Numeric value parsed from a formatted cell ("₹-9,77,331" -> -977331,
+// "63.7%" -> 63.7, "—"/"" -> null so blanks sort to the end).
+function numVal(t){t=String(t).replace(/[₹,%\s]/g,'');
+ if(t===''||t==='—'||t==='-')return null;
+ var n=parseFloat(t);return isNaN(n)?null:n;}
+function sortTable(tid,col){var table=document.getElementById(tid);
+ if(!table||!table.tHead)return;
+ var th=table.tHead.rows[0].cells[col];
+ var asc=th.getAttribute('data-asc')!=='1';
+ Array.prototype.forEach.call(table.tHead.rows[0].cells,function(c){
+   c.removeAttribute('data-asc');c.classList.remove('sorted-asc','sorted-desc');});
+ th.setAttribute('data-asc',asc?'1':'0');
+ th.classList.add(asc?'sorted-asc':'sorted-desc');
+ var numeric=th.classList.contains('num');
+ var tb=table.tBodies[0];
+ var rows=Array.prototype.slice.call(tb.querySelectorAll('tr:not(.total)'));
+ var total=tb.querySelector('tr.total');
+ rows.sort(function(a,b){
+   var x=a.cells[col].textContent.trim(),y=b.cells[col].textContent.trim(),r;
+   if(numeric){var nx=numVal(x),ny=numVal(y);
+     if(nx===null&&ny===null)r=0;else if(nx===null)r=1;
+     else if(ny===null)r=-1;else r=nx-ny;}
+   else r=x.localeCompare(y);
+   return asc?r:-r;});
+ rows.forEach(function(r){tb.appendChild(r);});
+ if(total)tb.appendChild(total);}
+function filterTable(input){
+ var table=document.getElementById(input.getAttribute('data-target'));
+ if(!table)return;var q=input.value.trim().toLowerCase();
+ Array.prototype.forEach.call(table.tBodies[0].querySelectorAll('tr:not(.total)'),
+   function(r){r.style.display=(!q||r.textContent.toLowerCase().indexOf(q)>=0)
+     ?'':'none';});}
+function setupTables(){
+ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'),
+  function(table){var tid=table.id;if(!table.tHead)return;
+   Array.prototype.forEach.call(table.tHead.rows[0].cells,function(th,i){
+     th.classList.add('th-sort');th.title='Click to sort';
+     th.addEventListener('click',function(){sortTable(tid,i);});});});}
+"""
+
 
 def generate_dashboard(data: MISData, path: str | Path,
                        compare: MISData | None = None) -> Path:
     """Write the interactive HTML dashboard for *data* to *path*."""
+    global _table_seq
+    _table_seq = 0
     lbl = report._labels()
     ch = _Charts()
 
@@ -711,7 +779,8 @@ def generate_dashboard(data: MISData, path: str | Path,
         warn = f"<div class='warn'><b>Notes</b>{items}</div>"
 
     gen_on = _dt.date.today().strftime("%d %b %Y")
-    helpers = _JS_HELPERS.replace("__PALETTE__", json.dumps(_PALETTE))
+    helpers = (_JS_HELPERS.replace("__PALETTE__", json.dumps(_PALETTE))
+               + _JS_TABLES)
 
     doc = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -734,6 +803,7 @@ def generate_dashboard(data: MISData, path: str | Path,
  Generated by {_esc(config.APP_SHORT)}.</footer>
 <script>{helpers}</script>
 <script>
+setupTables();
 try{{
 {ch.script()}
 }}catch(e){{console.error(e);
