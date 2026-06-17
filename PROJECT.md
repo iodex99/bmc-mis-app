@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.79** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.80** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,27 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.80 — Dashboard: fix horizontal-bar tooltips + per-chart Sort / Top-N
+
+Two dashboard follow-ups:
+
+* **Tooltips on horizontal bars showed the wrong value** ("₹0", "₹1").
+  Chart.js puts the value on the axis OPPOSITE the category (index) axis,
+  so a horizontal bar (``indexAxis:'y'``) carries its value on
+  ``parsed.x`` — the old callback read ``parsed.y``, which is the category
+  INDEX (0, 1, …). New ``valueOf()`` picks the axis from the chart's
+  ``indexAxis`` (and treats doughnut ``parsed`` as the value). Verified for
+  horizontal bar, vertical bar, doughnut and count charts.
+* **Per-chart Sort + Top-N controls.** Every ranking chart (Cost Centre
+  P&L, Budget vs YTD, Entity, Service, Partner–Manager, Client Billing,
+  and the revenue donuts) now has a small Sort (Default / Value ↓↑ /
+  Name A–Z, Z–A) and Show (All / Top 5–30) toolbar. It re-derives the
+  view client-side from the chart's stored original data — no figures
+  recomputed. Client Billing now feeds the full client list with a
+  Top-15 default. Time-series charts (monthly trend, headcount by period,
+  overhead trend) keep their natural order and have no controls. Controls
+  are hidden when printing.
 
 ### v0.3.79 — Interactive HTML dashboard generated alongside the Excel MIS
 

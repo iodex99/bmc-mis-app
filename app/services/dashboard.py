@@ -81,25 +81,58 @@ class _Charts:
         self._js: list[str] = []
         self._n = 0
 
-    def _canvas(self, height: int = 340) -> str:
+    def _canvas(self, height: int = 340):
         self._n += 1
         cid = f"chart{self._n}"
         return cid, (f"<div class='chart-box' style='height:{height}px'>"
                      f"<canvas id='{cid}'></canvas></div>")
 
+    @staticmethod
+    def _toolbar(cid: str, default_top: str = "all",
+                 default_sort: str = "default") -> str:
+        """Sort + Top-N controls bound to one chart (wired to applyControls)."""
+        def opt(value, text, current):
+            sel = " selected" if value == current else ""
+            return f"<option value='{value}'{sel}>{text}</option>"
+        sort_opts = "".join([
+            opt("default", "Default", default_sort),
+            opt("valDesc", "Value ↓", default_sort),
+            opt("valAsc", "Value ↑", default_sort),
+            opt("nameAsc", "Name A–Z", default_sort),
+            opt("nameDesc", "Name Z–A", default_sort)])
+        top_opts = "".join([
+            opt("all", "All", default_top), opt("5", "Top 5", default_top),
+            opt("10", "Top 10", default_top), opt("15", "Top 15", default_top),
+            opt("20", "Top 20", default_top), opt("30", "Top 30", default_top)])
+        return (
+            f"<div class='chart-tools'>"
+            f"<label>Sort <select data-ctrl='sort' data-target='{cid}' "
+            f"onchange=\"applyControls('{cid}')\">{sort_opts}</select></label>"
+            f"<label>Show <select data-ctrl='top' data-target='{cid}' "
+            f"onchange=\"applyControls('{cid}')\">{top_opts}</select></label>"
+            f"</div>")
+
     def grouped_bar(self, labels, datasets, unit="money", height=340,
-                    horizontal=False, stacked=False) -> str:
+                    horizontal=False, stacked=False, controls=False,
+                    default_top="all") -> str:
         cid, box = self._canvas(height)
         self._js.append(
             f"groupedBar('{cid}', {json.dumps(labels)}, "
             f"{json.dumps(datasets)}, '{unit}', {str(horizontal).lower()}, "
             f"{str(stacked).lower()});")
+        if controls:
+            self._js.append(f"applyControls('{cid}');")
+            return self._toolbar(cid, default_top) + box
         return box
 
-    def donut(self, labels, values, height=340) -> str:
+    def donut(self, labels, values, height=340, controls=False,
+              default_top="all") -> str:
         cid, box = self._canvas(height)
         self._js.append(
             f"donut('{cid}', {json.dumps(labels)}, {json.dumps(values)});")
+        if controls:
+            self._js.append(f"applyControls('{cid}');")
+            return self._toolbar(cid, default_top) + box
         return box
 
     def line(self, labels, datasets, unit="money", height=340) -> str:
@@ -142,12 +175,13 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
         p_labels,
         [{"label": "Revenue", "data": rev},
          {"label": "Total Cost", "data": cost},
-         {"label": "Profit", "data": profit}])
+         {"label": "Profit", "data": profit}],
+        controls=True)
 
     rev_partners = [(c.code, round(c.revenue, 2)) for c in partners
                     if c.revenue > 0]
     donut = ch.donut([c for c, _ in rev_partners],
-                     [v for _, v in rev_partners])
+                     [v for _, v in rev_partners], controls=True)
 
     # Cost composition (Direct / Salary / Overhead), all cost centres incl Office.
     comp_labels = [c.code for c in ccs]
@@ -210,7 +244,8 @@ def _budget_section(data: MISData, lbl: dict, ch: _Charts) -> str:
     ba_bar = ch.grouped_bar(
         codes,
         [{"label": "Annual Budget", "data": budget_vals},
-         {"label": "YTD Sales", "data": ytd_vals}])
+         {"label": "YTD Sales", "data": ytd_vals}],
+        controls=True)
 
     # Monthly sales trend — one line per partner + a firm total line.
     line_ds = []
@@ -265,13 +300,14 @@ def _entity_section(data: MISData, ch: _Charts) -> str:
         return ""
     labels = [e["name"] for e in ents]
     donut = ch.donut([e["name"] for e in ents if e["revenue"] > 0],
-                     [round(e["revenue"], 2) for e in ents if e["revenue"] > 0])
+                     [round(e["revenue"], 2) for e in ents if e["revenue"] > 0],
+                     controls=True)
     bar = ch.grouped_bar(
         labels,
         [{"label": "Revenue", "data": [round(e["revenue"], 2) for e in ents]},
          {"label": "Direct Expense", "data": [round(e["direct_expense"], 2) for e in ents]},
          {"label": "Net", "data": [round(e["revenue"] - e["direct_expense"], 2) for e in ents]}],
-        horizontal=True, height=max(240, 60 + 38 * len(ents)))
+        horizontal=True, height=max(240, 60 + 38 * len(ents)), controls=True)
     headers = ["Entity", "Revenue", "Direct Expense", "Net"]
     rows = [[_esc(e["name"]), _money(e["revenue"]),
              _money(e["direct_expense"]),
@@ -293,7 +329,7 @@ def _service_section(data: MISData, ch: _Charts) -> str:
     rev_svcs = sorted([s for s in svcs if s["revenue"] > 0],
                       key=lambda s: -s["revenue"])
     donut = ch.donut([s["name"] for s in rev_svcs],
-                     [round(s["revenue"], 2) for s in rev_svcs])
+                     [round(s["revenue"], 2) for s in rev_svcs], controls=True)
     headers = ["Service", "Revenue", "Direct Expense", "Net"]
     rows = [[_esc(s["name"]), _money(s["revenue"]),
              _money(s["direct_expense"]),
@@ -305,7 +341,7 @@ def _service_section(data: MISData, ch: _Charts) -> str:
     bar = ch.grouped_bar(
         [s["name"] for s in rev_svcs],
         [{"label": "Revenue", "data": [round(s["revenue"], 2) for s in rev_svcs]}],
-        horizontal=True, height=max(240, 60 + 34 * len(rev_svcs)))
+        horizontal=True, height=max(240, 60 + 34 * len(rev_svcs)), controls=True)
     return _section(
         "Service MIS", "service",
         _grid(_card("<h3>Revenue share by service</h3>", donut),
@@ -322,7 +358,7 @@ def _partner_manager_section(data: MISData, ch: _Charts) -> str:
         [d["label"] for d in pm_sorted],
         [{"label": "Revenue", "data": [round(d["revenue"], 2) for d in pm_sorted]},
          {"label": "Direct Expense", "data": [round(d["direct_expense"], 2) for d in pm_sorted]}],
-        horizontal=True, height=max(240, 60 + 30 * len(pm_sorted)))
+        horizontal=True, height=max(240, 60 + 30 * len(pm_sorted)), controls=True)
     headers = ["Partner – Manager", "Revenue", "Direct Expense", "Net"]
     rows = [[_esc(d["label"]), _money(d["revenue"]),
              _money(d["direct_expense"]),
@@ -359,11 +395,14 @@ def _client_section(data: MISData, lbl: dict, ch: _Charts) -> str:
         rows_data.append((names[key], round(sum(amounts), 2), amounts))
     rows_data.sort(key=lambda r: -r[1])
 
-    top = rows_data[:15]
+    # Pass ALL clients to the chart (already value-desc); the Top-N control
+    # defaults to 15 so it opens compact but the user can expand / re-sort.
+    shown = min(len(rows_data), 20)
     bar = ch.grouped_bar(
-        [r[0] for r in top],
-        [{"label": "Billing", "data": [r[1] for r in top]}],
-        horizontal=True, height=max(240, 60 + 30 * len(top)))
+        [r[0] for r in rows_data],
+        [{"label": "Billing", "data": [r[1] for r in rows_data]}],
+        horizontal=True, height=max(240, 60 + 30 * shown),
+        controls=True, default_top="15")
 
     headers = ["Client", "Grand Total"] + [report._month_short(p) for p in periods]
     right = set(range(1, 2 + len(periods)))
@@ -372,11 +411,12 @@ def _client_section(data: MISData, lbl: dict, ch: _Charts) -> str:
     col_tot = [sum(r[2][i] for r in rows_data) for i in range(len(periods))]
     grand = sum(r[1] for r in rows_data)
     total = ["TOTAL", _money(grand)] + [_money(v) for v in col_tot]
-    note = ("Top 15 clients shown in the chart; the table lists all."
+    note = ("Chart shows the top 15 by default — use “Show” to see more; "
+            "the table below lists every client."
             if len(rows_data) > 15 else "")
     return _section(
         "Client Billing", "clients",
-        _card("<h3>Top clients by billing</h3>", bar),
+        _card("<h3>Clients by billing</h3>", bar),
         _card("<h3>All clients</h3>", _table(headers, rows, right, total)),
         intro=note)
 
@@ -482,6 +522,14 @@ section h2{font-size:19px;color:var(--navy);margin:0 0 4px;
 .card{background:var(--card);border-radius:12px;padding:16px 18px;
  box-shadow:0 1px 3px rgba(15,23,42,.08);margin-bottom:18px;}
 .card h3{margin:0 0 12px;font-size:14px;color:var(--navy);font-weight:600;}
+.chart-tools{display:flex;gap:14px;justify-content:flex-end;flex-wrap:wrap;
+ margin:-4px 0 10px;}
+.chart-tools label{font-size:11px;color:var(--muted);font-weight:600;
+ display:flex;align-items:center;gap:5px;}
+.chart-tools select{font-size:12px;padding:3px 6px;border:1px solid var(--line);
+ border-radius:6px;background:#fff;color:var(--ink);cursor:pointer;}
+.chart-tools select:hover{border-color:var(--blue);}
+@media print{.chart-tools{display:none;}}
 .chart-box{position:relative;width:100%;}
 table{width:100%;border-collapse:collapse;font-size:12.5px;}
 th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;
@@ -502,6 +550,7 @@ footer{color:var(--muted);font-size:12px;padding:24px 40px;text-align:center;
 """
 
 _JS_HELPERS = r"""
+var REG={};
 function fmtINR(n){n=Math.round(Number(n)||0);var neg=n<0;n=Math.abs(n);
  var s=String(n);var last3=s.length>3?s.slice(-3):s;
  var rest=s.length>3?s.slice(0,-3):'';
@@ -517,10 +566,15 @@ Chart.defaults.font.family="'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 Chart.defaults.color="#475569";
 Chart.defaults.plugins.legend.labels.usePointStyle=true;
 Chart.defaults.plugins.legend.labels.boxWidth=8;
-function tipLabel(c){var l=c.dataset.label||c.label||'';
- var raw=(c.parsed&&c.parsed.y!==undefined&&c.parsed.y!==null)?c.parsed.y:
-   ((c.parsed&&c.parsed.x!==undefined)?c.parsed.x:c.parsed);
- if(c.chart.config.type==='doughnut'){raw=c.parsed;}
+// The VALUE lives on the axis opposite the category (indexAxis) axis:
+// a horizontal bar (indexAxis='y') carries its value on parsed.x — reading
+// parsed.y there returned the category INDEX (0,1,2…), the "₹0 / ₹1" bug.
+function valueOf(c){var t=c.chart.config.type;
+ if(t==='doughnut'||t==='pie')return c.parsed;
+ var ax=(c.chart.options.indexAxis==='y')?'x':'y';
+ return (c.parsed&&c.parsed[ax]!==undefined&&c.parsed[ax]!==null)
+   ?c.parsed[ax]:c.parsed;}
+function tipLabel(c){var l=c.dataset.label||'';var raw=valueOf(c);
  if(c.dataset.unit==='count')return (l?l+': ':'')+raw;
  return (l?l+': ':'')+fmtINR(raw);}
 function axisOpts(unit,horizontal,stacked){
@@ -529,29 +583,37 @@ function axisOpts(unit,horizontal,stacked){
    grid:{color:'#EEF2F7'}};
  var catAxis={stacked:stacked,grid:{display:false}};
  return horizontal?{x:valAxis,y:catAxis}:{x:catAxis,y:valAxis};}
+// Remember a chart's ORIGINAL data so the Sort / Top-N controls can
+// re-derive the view without recomputing anything server-side.
+function reg(id,type,labels,datasets,bg,chart){
+ REG[id]={type:type,labels:labels.slice(),
+  data:datasets.map(function(d){return d.data.slice();}),bg:bg,chart:chart};}
 function groupedBar(id,labels,datasets,unit,horizontal,stacked){
  var el=document.getElementById(id);if(!el)return;
  var single=datasets.length===1;
- datasets.forEach(function(d,i){d.unit=unit;
-   if(single){d.backgroundColor=labels.map(function(_,j){return col(j);});}
-   else{d.backgroundColor=col(i);}
+ var bg=datasets.map(function(d,i){
+   return single?labels.map(function(_,j){return col(j);}):col(i);});
+ datasets.forEach(function(d,i){d.unit=unit;d.backgroundColor=bg[i];
    d.borderRadius=4;d.maxBarThickness=46;});
- new Chart(el,{type:'bar',data:{labels:labels,datasets:datasets},
+ var ch=new Chart(el,{type:'bar',
+  data:{labels:labels.slice(),datasets:datasets},
   options:{indexAxis:horizontal?'y':'x',responsive:true,
    maintainAspectRatio:false,
    plugins:{legend:{display:!single,position:'top'},
      tooltip:{callbacks:{label:tipLabel}}},
-   scales:axisOpts(unit,horizontal,stacked)}});}
+   scales:axisOpts(unit,horizontal,stacked)}});
+ reg(id,'bar',labels,datasets,bg,ch);}
 function donut(id,labels,values){var el=document.getElementById(id);if(!el)return;
- new Chart(el,{type:'doughnut',
-  data:{labels:labels,datasets:[{data:values,
-    backgroundColor:labels.map(function(_,i){return col(i);}),
-    borderColor:'#fff',borderWidth:2}]},
+ var bg=labels.map(function(_,i){return col(i);});
+ var ds=[{data:values.slice(),backgroundColor:bg,borderColor:'#fff',
+   borderWidth:2}];
+ var ch=new Chart(el,{type:'doughnut',data:{labels:labels.slice(),datasets:ds},
   options:{responsive:true,maintainAspectRatio:false,cutout:'58%',
    plugins:{legend:{position:'right'},tooltip:{callbacks:{label:function(c){
-     var t=c.dataset.data.reduce(function(a,b){return a+b;},0);
+     var t=c.dataset.data.reduce(function(a,b){return a+(Number(b)||0);},0);
      var p=t?(c.parsed/t*100).toFixed(1):0;
-     return c.label+': '+fmtINR(c.parsed)+' ('+p+'%)';}}}}}});}
+     return c.label+': '+fmtINR(c.parsed)+' ('+p+'%)';}}}}}});
+ reg(id,'doughnut',labels,ds,[bg],ch);}
 function lineChart(id,labels,datasets,unit){var el=document.getElementById(id);
  if(!el)return;
  datasets.forEach(function(d,i){d.unit=unit;d.borderColor=col(i);
@@ -561,6 +623,29 @@ function lineChart(id,labels,datasets,unit){var el=document.getElementById(id);
   options:{responsive:true,maintainAspectRatio:false,
    plugins:{legend:{position:'top'},tooltip:{callbacks:{label:tipLabel}}},
    scales:axisOpts(unit,false,false)}});}
+function sortOrder(o,mode){
+ var idx=o.labels.map(function(_,i){return i;});
+ var v=function(i){return Math.abs(Number(o.data[0][i])||0);};
+ if(mode==='valDesc')idx.sort(function(a,b){return v(b)-v(a);});
+ else if(mode==='valAsc')idx.sort(function(a,b){return v(a)-v(b);});
+ else if(mode==='nameAsc')idx.sort(function(a,b){
+   return String(o.labels[a]).localeCompare(String(o.labels[b]));});
+ else if(mode==='nameDesc')idx.sort(function(a,b){
+   return String(o.labels[b]).localeCompare(String(o.labels[a]));});
+ return idx;}
+function applyControls(id){var o=REG[id];if(!o)return;
+ var ss=document.querySelector("select[data-ctrl='sort'][data-target='"+id+"']");
+ var ts=document.querySelector("select[data-ctrl='top'][data-target='"+id+"']");
+ var mode=ss?ss.value:'default';var top=ts?ts.value:'all';
+ var order=sortOrder(o,mode);
+ if(top!=='all')order=order.slice(0,parseInt(top,10));
+ var ch=o.chart;
+ ch.data.labels=order.map(function(i){return o.labels[i];});
+ ch.data.datasets.forEach(function(ds,di){
+   ds.data=order.map(function(i){return o.data[di][i];});
+   if(Array.isArray(o.bg[di]))
+     ds.backgroundColor=order.map(function(i){return o.bg[di][i];});});
+ ch.update();}
 """
 
 
