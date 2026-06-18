@@ -23,6 +23,7 @@ from ..services import updater
 from .dashboard_page import DashboardPage
 from .generate_page import GeneratePage
 from .import_page import ImportPage
+from .manual_entry_page import ManualEntryPage
 from .master_data import MasterDataPage
 from .records_page import RecordsPage
 from .review_page import ReviewPage
@@ -33,6 +34,7 @@ from .settings_page import SettingsPage
 NAV_ITEMS = [
     ("Dashboard", DashboardPage),
     ("Import Files", ImportPage),
+    ("Manual Entry", ManualEntryPage),
     ("Review & Map", ReviewPage),
     ("Records", RecordsPage),
     ("Master Data", MasterDataPage),
@@ -103,6 +105,15 @@ class MainWindow(QMainWindow):
         review_page = self.stack.widget(NAV_ITEMS_INDEX["Review & Map"])
         if hasattr(import_page, "imported") and hasattr(review_page, "refresh"):
             import_page.imported.connect(review_page.refresh)
+
+        # Manual entries also feed Review & Map (a typed-in employee/client
+        # surfaces there) and the Records counts.
+        manual_page = self.stack.widget(NAV_ITEMS_INDEX["Manual Entry"])
+        if hasattr(manual_page, "saved") and hasattr(review_page, "refresh"):
+            manual_page.saved.connect(review_page.refresh)
+        records_page = self.stack.widget(NAV_ITEMS_INDEX["Records"])
+        if hasattr(manual_page, "saved") and hasattr(records_page, "reload"):
+            manual_page.saved.connect(records_page.reload)
 
         # Silent auto-check on launch (off the UI thread, fail-quietly).
         self._auto_check_timer: QTimer | None = None

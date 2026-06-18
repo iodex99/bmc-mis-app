@@ -814,19 +814,26 @@ def suggest_cc_for_raw_client(raw: str) -> int | None:
 # --- "delete unmapped rows" helpers used by the Review page ---------------
 
 def delete_unmapped_client_rows(raw: str) -> int:
-    """Permanently delete every sales voucher + timesheet line whose raw
-    name matches *raw* (whitespace-insensitive). Use when an unmapped client
+    """Permanently delete every source row whose unmapped client name
+    matches *raw* (whitespace-insensitive). Use when an unmapped client
     name is bogus / shouldn't be in the MIS at all.
+
+    Covers EVERY table :func:`unresolved_clients` surfaces — sales AND
+    purchase vouchers (party_name), timesheet lines and reimbursement rows
+    (client_raw). Pre-v0.3.84 it only deleted sales vouchers + timesheet,
+    so a purchase-register party or a reimbursement row clicked "Delete"
+    in the Review queue removed nothing and silently reappeared on reload.
+    Voucher deletes cascade to their splits (FK ON DELETE CASCADE).
 
     Returns the number of source rows deleted.
     """
     key = norm(raw)
     deleted = 0
     with transaction() as conn:
+        # Sales AND purchase vouchers (drop the kind filter).
         rows = conn.execute(
             "SELECT id, party_name FROM vouchers "
-            "WHERE kind = 'sales' AND client_id IS NULL "
-            "AND party_name <> ''").fetchall()
+            "WHERE client_id IS NULL AND party_name <> ''").fetchall()
         v_ids = [r["id"] for r in rows if norm(r["party_name"]) == key]
         if v_ids:
             ph = ",".join("?" * len(v_ids))
@@ -841,6 +848,15 @@ def delete_unmapped_client_rows(raw: str) -> int:
             conn.execute(
                 f"DELETE FROM timesheet_entries WHERE id IN ({ph})", t_ids)
             deleted += len(t_ids)
+        rows = conn.execute(
+            "SELECT id, client_raw FROM reimbursements "
+            "WHERE client_id IS NULL AND client_raw <> ''").fetchall()
+        rb_ids = [r["id"] for r in rows if norm(r["client_raw"]) == key]
+        if rb_ids:
+            ph = ",".join("?" * len(rb_ids))
+            conn.execute(
+                f"DELETE FROM reimbursements WHERE id IN ({ph})", rb_ids)
+            deleted += len(rb_ids)
     return deleted
 
 

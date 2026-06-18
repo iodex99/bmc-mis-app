@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.83** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.84** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,37 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.84 — Manual Entry page; fix Clients-tab delete
+
+**Manual Entry (new page + ``manual_entry`` service).** For the one-off
+row where uploading a file is overkill, the operator can now add a single
+voucher, salary row or reimbursement by hand. Entries land in the SAME
+tables the importer writes (``vouchers``/``voucher_splits``,
+``salary_entries``, ``reimbursements``) under a "(manual entry)" batch, so
+the MIS / dashboard pick them up with no special handling, and masters are
+chosen from dropdowns so the rows are already resolved (no Review step).
+
+Fields (\* = required):
+* **Voucher** — Type (Sales/Expense)\*, Date\*, Cost centre\*, Amount
+  (net)\*; optional Tax, Type-of-Expense (for expense), Party, Client,
+  Manager, Service, Voucher no (auto-generated if blank), Description.
+* **Salary** — Month\*, Year\*, Employee\*, Cost centre\*, Salary paid\*;
+  optional Entity, Category, Reimbursement.
+* **Reimbursement** — Month\*, Year\*, Employee\*, Amount\*; optional
+  Client, "Client reimbursable" flag.
+
+Saving refreshes Review & Map and Records. (Timesheet stays
+upload-only — single daily-log rows aren't a useful manual case.)
+
+**Fix — Review & Map ▸ Clients ▸ Delete did nothing for some names.**
+``delete_unmapped_client_rows`` only removed sales vouchers + timesheet
+lines, but the Clients queue also surfaces names from **purchase
+vouchers** and **reimbursements**. Deleting such a name removed zero rows
+so it silently reappeared on reload. Delete now covers all four sources
+(sales + purchase vouchers, timesheet, reimbursements); voucher deletes
+cascade to their splits. Verified a purchase/reimbursement party now
+deletes cleanly with no orphans.
 
 ### v0.3.83 — Provision dialogs: separate Month + Year dropdowns
 

@@ -396,6 +396,10 @@ class RecordsPage(QWidget):
         # when timesheet had thousands of rows.
         self._refresh(self.tabs.currentIndex())
 
+    def reload(self) -> None:
+        """Reload the visible tab (e.g. after a manual entry is added)."""
+        self._refresh(self.tabs.currentIndex())
+
     def _refresh(self, index: int) -> None:
         w = self.tabs.widget(index)
         if hasattr(w, "reload"):

@@ -199,9 +199,9 @@ class ClientTab(QWidget):
         if QMessageBox.warning(
                 self, "Delete this name?",
                 f"This permanently deletes all <b>{n_rows} source row(s)</b> "
-                f"for <b>{r['raw']}</b> (sales vouchers and / or timesheet "
-                "lines).<br><br>The MIS will no longer include any data for "
-                "this name. This cannot be undone.",
+                f"for <b>{r['raw']}</b> (sales / purchase vouchers, timesheet "
+                "or reimbursement rows).<br><br>The MIS will no longer include "
+                "any data for this name. This cannot be undone.",
                 QMessageBox.Cancel | QMessageBox.Yes,
                 QMessageBox.Cancel) != QMessageBox.Yes:
             return
