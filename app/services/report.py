@@ -719,15 +719,17 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         return sumifs(exp, "J", cc_code, mgr_filter,
                       extra=[("H", type_label)], cc_col="E", mgr_col="F")
 
-    def labour_sumifs(cc_code, billable=None):
-        # Labour (salary) facts don't carry a manager, so cells under
-        # a manager column just read the partner-level salary cost.
-        # Attributed to the partner's "Self" (first) column only.
-        # Filter by Type="Salary" so the Overhead facts (v0.3.67) don't
-        # double-count here — they have their own dedicated row.
-        # ``billable`` ("Yes"/"No") splits client-billable labour from
-        # non-billable / office-booked time (v0.3.82, Salary sheet col K).
+    def labour_sumifs(cc_code, billable=None, mgr_filter=None):
+        # Labour now carries the employee's manager (Salary sheet col L,
+        # v0.3.85), so salary breaks down by manager just like revenue /
+        # expenses. Filter by Type="Salary" so the Overhead facts don't
+        # double-count (they have their own row). ``billable`` ("Yes"/"No",
+        # col K) splits client-billable from non-billable / office time;
+        # ``mgr_filter`` (manager code, or "(unassigned)" for the partner's
+        # own column) places the cost in the right manager sub-column.
         extra = f',{lab}!$K:$K,"{billable}"' if billable is not None else ""
+        if mgr_filter is not None:
+            extra += f',{lab}!$L:$L,"{mgr_filter}"'
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
                 f'{lab}!$J:$J,"Salary"{extra})')
 
@@ -846,17 +848,11 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     formula = (f"={get_column_letter(col)}{sales_r}+"
                                f"{get_column_letter(col)}{reimb_r}")
                 elif kind == "salary":
-                    # Billable labour — partner-level; attribute to "Self" col.
-                    if offset == 0:
-                        formula = labour_sumifs(cc_code, "Yes")
-                    else:
-                        formula = 0
+                    # Billable labour, broken down by the employee's manager.
+                    formula = labour_sumifs(cc_code, "Yes", mgr_filter)
                 elif kind == "salary_nonbill":
-                    # Non-billable / office-booked labour on the home CC.
-                    if offset == 0:
-                        formula = labour_sumifs(cc_code, "No")
-                    else:
-                        formula = 0
+                    # Non-billable / office-booked labour, by manager.
+                    formula = labour_sumifs(cc_code, "No", mgr_filter)
                 elif kind == "expense":
                     # Professional fees bought in — the partner's DIRECT
                     # expense (operator ask v0.3.69; was "all expenses").
@@ -1326,13 +1322,14 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
              _cc_label(f.get("home_cost_centre_id")),
              round(f["hours"], 2), _amount(f, i + 2),
              "Overhead" if f.get("is_overhead") else "Salary",
-             _billable(f)]
+             _billable(f),
+             lbl["mgr"].get(f.get("manager_id"), "(unassigned)")]
             for i, f in enumerate(data.labour_facts)]
     _write_data_sheet(wb, "Salary" + suffix,
                       ["Period", "Date", "Charged To", "Employee", "Client",
                        "Client CC", "Home CC", "Hours", "Amount", "Type",
-                       "Billable"],
-                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12, 10], rows)
+                       "Billable", "Manager"],
+                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12, 10, 16], rows)
 
 
 # --- Employee Register --------------------------------------------------------

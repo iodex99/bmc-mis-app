@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.84** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.85** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,28 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.85 — Partner-Manager P&L: salary now breaks down by manager
+
+The salary rows in the Partner-Manager P&L only ever filled the partner's
+"Self" column — labour facts didn't carry a manager, so salary couldn't
+break down by manager even after employees were mapped to managers +
+cost centres in the masters.
+
+Now each labour fact carries the **employee's manager** (from the master),
+guarded so a manager only appears under their own partner block — the
+manager's home cost centre must equal the cost centre the labour is
+charged to; cross-partner billable work still falls to that partner's
+Self column. The Salary sheet gained a **Manager** column (L), and the
+Partner-Manager P&L's Salary (billable) / Salary (non-billable) rows now
+SUMIFS by cost centre **+ manager** per cell, so each manager sub-column
+shows its team's labour cost and the partner Total sums them. Employees
+with no manager assigned fall under the partner's Self column.
+
+Office overhead stays partner-level (unchanged). Verified end-to-end:
+a manager's employees' billable/non-billable salary lands under that
+manager's column, an unassigned employee under Self, totals tie to the
+Cost Centre P&L, and the comparison-period sheet still builds.
 
 ### v0.3.84 — Manual Entry page; fix Clients-tab delete
 

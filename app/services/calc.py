@@ -479,7 +479,23 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
     clients = masters["clients"]
     emp_index = masters["emp_index"]
     employees = masters["employees"]
+    managers = masters["managers"]
     ph = _placeholders(options.periods)
+
+    def manager_for(emp_lookup_key, charged_cc):
+        """The employee's assigned manager — but only when that manager
+        belongs to the cost centre the cost is charged to, so a manager
+        only ever appears under their own partner block in the
+        Partner-Manager P&L. Cross-partner billable work (charged to a
+        different partner) falls to that partner's 'Self' column."""
+        if not isinstance(emp_lookup_key, int):
+            return None
+        m = (employees.get(emp_lookup_key) or {}).get("manager_id")
+        if m is None:
+            return None
+        if (managers.get(m) or {}).get("cost_centre_id") == charged_cc:
+            return m
+        return None
 
     with transaction() as conn:
         salary_rows = conn.execute(
@@ -576,6 +592,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "period": period,
                     "txn_date": t["txn_date"],
                     "cost_centre_id": cc,
+                    "manager_id": manager_for(emp_lookup_key, cc),
                     "home_cost_centre_id": home_cc,
                     "client_cost_centre_id": client_cc if billable else None,
                     "employee_name": rec["name"],
@@ -592,6 +609,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "period": period,
                     "txn_date": None,
                     "cost_centre_id": home_cc,
+                    "manager_id": manager_for(emp_lookup_key, home_cc),
                     "home_cost_centre_id": home_cc,
                     "client_cost_centre_id": None,
                     "employee_name": rec["name"],
@@ -607,6 +625,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "period": period,
                 "txn_date": None,
                 "cost_centre_id": home_cc,
+                "manager_id": manager_for(emp_lookup_key, home_cc),
                 "home_cost_centre_id": home_cc,
                 "client_cost_centre_id": None,
                 "employee_name": rec["name"],
