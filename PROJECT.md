@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.81** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.82** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,55 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.82 — Bare-manager CC strings, Provision Costs, labour reattribution
+
+Three operator requests, all wired through calc → Excel → HTML dashboard.
+
+**1. Bare manager-name CC strings now resolve the manager.** Tally tags
+some invoices with just the manager ("Rajesh Malhotra") rather than
+"partner – manager". The matcher only tried partners, so it fuzzily (and
+coincidentally) landed the right partner but left the manager blank. Now
+a bare CC string is also matched against managers; a confident manager
+match adopts that manager AND their home partner cost centre (a 100%
+manager match beats a weak fuzzy partner match). ``auto_match`` /
+``apply_known_cc_string_mappings`` also back-fill the manager on
+already-resolved splits/mappings **only when the manager's partner equals
+the saved partner**, so existing data upgrades with zero risk of moving a
+cost centre. Fixes the blank Manager on the Sales sheet; corrects sales
+*and* purchase splits everywhere.
+
+**2. Provision Costs** — a new master tab. A provision is a direct cost a
+cost centre EXPECTS to incur for a client but hasn't yet (fields: month,
+entity, client, amount). It shows as a direct cost in the MIS and is
+**carried forward at its remaining value** in every month from its booked
+month onward until cleared. "Adjust provision" records an actual amount +
+the month it landed in; the remaining = amount − adjustments up to the
+reporting month. New ``provisions`` / ``provision_adjustments`` tables
+(migration 14), a ``provisions`` service, calc ``_build_provision_facts``,
+a Provisions sheet, and the cost folded into the Cost Centre / Entity /
+Partner-Manager P&L direct expense plus a dashboard Provisions section.
+
+**3. Labour reattribution + non-billable split.**
+* A partner-team employee's office-booked / non-billable time (client CC
+  = Office, or non-billable, or unlogged) now lands on their **home
+  partner cost centre**, not Office.
+* The Partner-Manager P&L splits salary into **Salary (billable)**
+  (client-attributed) and **Salary (non-billable)** via a new Billable
+  column on the Salary sheet; the dashboard's cost-composition chart
+  splits the same way.
+* Employees whose **home CC is Office** are pure overhead: their salary
+  joins the overhead pool (office indirect + office-staff salary), which
+  is divided across the **partner-team** active employees only (office
+  staff are the source, not recipients) and charged to their partner CCs;
+  a negative offset on Office keeps the firm total honest. The Employee
+  Register summary gained Office Staff Salary / Overhead Recipients /
+  Pool columns; the Salary sheet's live overhead formulas chain to them.
+
+Verified end-to-end on synthetic scenarios: bare-manager resolution
+(fresh + existing data), provision carry-forward + adjustment across
+months, and the labour split — firm totals tie exactly and overhead nets
+to zero in every case.
 
 ### v0.3.81 — Dashboard tables: click-to-sort + filter box
 

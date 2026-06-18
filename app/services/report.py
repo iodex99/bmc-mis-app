@@ -168,6 +168,7 @@ def generate(data: MISData, path: str | Path,
     _sheet_expenses(wb, data, lbl)
     _sheet_salary(wb, data, lbl)
     _sheet_reimbursements(wb, data, lbl)
+    _sheet_provisions(wb, data, lbl)
     if compare is not None:
         _sheet_revenue(wb, compare, lbl, CMP)
         _sheet_expenses(wb, compare, lbl, CMP)
@@ -479,6 +480,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     exp = _q("Expenses")
     lab = _q("Salary")
     reimb = _q("Reimbursements")
+    prov = _q("Provisions")
     first = hrow + 1
     n_partners = len(partners)
     # Row order: partners, then Office, then (optional) Unassigned.
@@ -493,11 +495,13 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})",
               fmt=INR, border=True)
         # Direct Expense: voucher-driven expenses + reimbursement rows
-        # (the latter booked to the client's CC). Expenses layout
+        # (the latter booked to the client's CC) + outstanding provisions
+        # (Provisions sheet Remaining=G by CostCentre=C). Expenses layout
         # v0.3.69: Amount=J, CostCentre=E.
         _cell(ws, r, 4,
               f"=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r})"
-              f"+SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})",
+              f"+SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})"
+              f"+SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
               fmt=INR, border=True)
         # Salary Cost: ONLY the Salary-type rows of the Salary sheet
         # (Type column = "Salary"). Office overhead is broken out
@@ -578,11 +582,12 @@ def _build_pm_matrix(data: MISData, lbl: dict):
     cc_active_map = {c["id"]: c for c in lbl["cc_active"]}
 
     pairs: set[tuple[int, int | None]] = set()
-    for f in data.revenue_facts + data.expense_facts + data.labour_facts:
+    for f in (data.revenue_facts + data.expense_facts + data.labour_facts
+              + data.provision_facts):
         cc_id = f.get("cost_centre_id")
         if cc_id is None:
             continue
-        mgr_id = f.get("manager_id")  # labour facts have no manager — fine
+        mgr_id = f.get("manager_id")  # labour / provision facts have none
         pairs.add((cc_id, mgr_id))
 
     by_partner: dict[int, list] = {}
@@ -714,14 +719,17 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         return sumifs(exp, "J", cc_code, mgr_filter,
                       extra=[("H", type_label)], cc_col="E", mgr_col="F")
 
-    def labour_sumifs(cc_code):
+    def labour_sumifs(cc_code, billable=None):
         # Labour (salary) facts don't carry a manager, so cells under
         # a manager column just read the partner-level salary cost.
         # Attributed to the partner's "Self" (first) column only.
         # Filter by Type="Salary" so the Overhead facts (v0.3.67) don't
         # double-count here — they have their own dedicated row.
+        # ``billable`` ("Yes"/"No") splits client-billable labour from
+        # non-billable / office-booked time (v0.3.82, Salary sheet col K).
+        extra = f',{lab}!$K:$K,"{billable}"' if billable is not None else ""
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Salary")')
+                f'{lab}!$J:$J,"Salary"{extra})')
 
     # Row layout. Each entry: (label, kind)
     # kinds:
@@ -746,9 +754,11 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         ("Reimbursement & OPE", "reimb"),
         ("Total Income", "income_sum"),
         ("", "blank"),
-        ("Salary (labour cost)", "salary"),
+        ("Salary (billable)", "salary"),
+        ("Salary (non-billable)", "salary_nonbill"),
         ("Professional Fees", "expense"),
         ("Reimbursement Expenses", "reimb_exp"),
+        ("Provisions", "provisions"),
         ("Total Direct Costs", "cost_sum"),
         ("", "blank"),
         ("Gross Profit", "gross"),
@@ -836,9 +846,15 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     formula = (f"={get_column_letter(col)}{sales_r}+"
                                f"{get_column_letter(col)}{reimb_r}")
                 elif kind == "salary":
-                    # Labour cost is partner-level; attribute to "Self" col.
+                    # Billable labour — partner-level; attribute to "Self" col.
                     if offset == 0:
-                        formula = labour_sumifs(cc_code)
+                        formula = labour_sumifs(cc_code, "Yes")
+                    else:
+                        formula = 0
+                elif kind == "salary_nonbill":
+                    # Non-billable / office-booked labour on the home CC.
+                    if offset == 0:
+                        formula = labour_sumifs(cc_code, "No")
                     else:
                         formula = 0
                 elif kind == "expense":
@@ -859,12 +875,24 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                                    f'{reimb}!$C:$C,"{cc_code}")')
                     else:
                         formula = 0
+                elif kind == "provisions":
+                    # Outstanding provisions — CC-level (no manager), so the
+                    # partner's "Self" column only. Provisions sheet:
+                    # Remaining=G by CostCentre=C.
+                    if offset == 0:
+                        formula = (f'=SUMIFS({_q("Provisions")}!$G:$G,'
+                                   f'{_q("Provisions")}!$C:$C,"{cc_code}")')
+                    else:
+                        formula = 0
                 elif kind == "cost_sum":
                     sal_r = rows_by_kind["salary"]
+                    snb_r = rows_by_kind["salary_nonbill"]
                     exp_r = rows_by_kind["expense"]
                     rexp_r = rows_by_kind["reimb_exp"]
+                    prov_r = rows_by_kind["provisions"]
                     L = get_column_letter(col)
-                    formula = f"={L}{sal_r}+{L}{exp_r}+{L}{rexp_r}"
+                    formula = (f"={L}{sal_r}+{L}{snb_r}+{L}{exp_r}"
+                               f"+{L}{rexp_r}+{L}{prov_r}")
                 elif kind == "gross":
                     inc_r = rows_by_kind["income_sum"]
                     cost_r = rows_by_kind["cost_sum"]
@@ -906,12 +934,14 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     ws.freeze_panes = f"B{body_start}"
     _cell(ws, r + 1, 1,
-          "Salary cost is allocated to partners via timesheet hours, not "
-          "split by manager. Professional Fees / Indirect Expenses follow "
-          "the Cost Center on the voucher split and the Type of Expense "
-          "column on the Expenses sheet. Office Overhead = office indirect "
-          "expenses ÷ active employees, charged to each active employee's "
-          "home cost centre (see Employee Register).",
+          "Salary (billable) = labour booked to this partner's clients; "
+          "Salary (non-billable) = the partner's own staff time that isn't "
+          "client-billable (office-booked / admin / unlogged), charged to "
+          "their home cost centre. Office Overhead = (office indirect "
+          "expenses + office-home staff salaries) ÷ partner-team employees, "
+          "charged to each one's home cost centre (see Employee Register). "
+          "Professional Fees / Indirect Expenses follow the Cost Center on "
+          "the voucher split and the Type of Expense column.",
           font=_SUB)
 
 
@@ -921,7 +951,7 @@ def _sheet_entity(wb: Workbook, data: MISData, lbl: dict) -> None:
     # Entity is column C on Revenue, D on Expenses (v0.3.69 layout).
     _simple_summary(wb, "Entity P&L", "Entity-wise Profitability",
                     "Entity", data.entities, "ent", lbl, key="name",
-                    sumcol_rev="C", sumcol_exp="D")
+                    sumcol_rev="C", sumcol_exp="D", prov_col="B")
 
 
 def _sheet_service(wb: Workbook, data: MISData, lbl: dict) -> None:
@@ -1017,8 +1047,13 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
 
 
 def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
-                    sumcol_rev, sumcol_exp):
-    """Entity / Service style summary: name, revenue, expense, net."""
+                    sumcol_rev, sumcol_exp, prov_col=None):
+    """Entity / Service style summary: name, revenue, expense, net.
+
+    ``prov_col``, when given, names the Provisions-sheet column to match
+    this dimension on (Entity = B); outstanding provisions then add into
+    the Direct Expense. Service passes ``None`` (provisions carry no
+    service dimension)."""
     ws = wb.create_sheet(sheet)
     ws.sheet_view.showGridLines = False
     headers = [label, "Revenue", "Direct Expense", "Net"]
@@ -1028,7 +1063,7 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
     hrow = 3
     _header_row(ws, hrow, headers)
 
-    rev, exp = _q("Revenue"), _q("Expenses")
+    rev, exp, prov = _q("Revenue"), _q("Expenses"), _q("Provisions")
     r = hrow + 1
     first = r
     for item in rows:
@@ -1038,8 +1073,10 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
         # now the "Type of Expense" TEXT column, so summing it returns 0).
         _cell(ws, r, 2, f"=SUMIFS({rev}!$H:$H,{rev}!${sumcol_rev}:${sumcol_rev},$A{r})",
               fmt=INR, border=True)
-        _cell(ws, r, 3, f"=SUMIFS({exp}!$J:$J,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})",
-              fmt=INR, border=True)
+        exp_f = f"=SUMIFS({exp}!$J:$J,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})"
+        if prov_col:
+            exp_f += f"+SUMIFS({prov}!$G:$G,{prov}!${prov_col}:${prov_col},$A{r})"
+        _cell(ws, r, 3, exp_f, fmt=INR, border=True)
         _cell(ws, r, 4, f"=B{r}-C{r}", fmt=INR, border=True)
         r += 1
     if r > first:
@@ -1137,6 +1174,32 @@ def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
                        "CostCentre", "Manager", "Service", "Type of Expense",
                        "Client", "Amount", "Description", "Period"],
                       [12, 14, 16, 24, 12, 12, 20, 17, 28, 14, 30, 10], rows)
+
+
+def _sheet_provisions(wb, data: MISData, lbl: dict) -> None:
+    """Outstanding provision costs carried into the reporting month.
+
+    Always created (even with no rows) so the Cost Centre / Entity /
+    Partner-Manager P&L SUMIFS over the Remaining column resolve to 0
+    rather than #REF. ``CostCentre`` holds the partner code and ``Entity``
+    the entity name, matching the criteria those P&L sheets use.
+    """
+    rows = []
+    for f in data.provision_facts:
+        rows.append([
+            f.get("provision_period") or "",
+            f.get("entity_name") or "(unspecified)",
+            lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+            f.get("client_name") or "(unmapped)",
+            round(f.get("original", 0.0), 2),
+            round(f.get("adjusted", 0.0), 2),
+            round(f["amount"], 2),
+        ])
+    _write_data_sheet(
+        wb, "Provisions",
+        ["Period", "Entity", "CostCentre", "Client",
+         "Original", "Adjusted", "Remaining"],
+        [12, 24, 14, 28, 16, 16, 16], rows)
 
 
 def _fmt_date(raw):
@@ -1238,14 +1301,23 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     live = (suffix == "")
 
     def _amount(f, r):
+        # Overhead amounts chain LIVE to the Employee Register: per-employee
+        # share = pool ÷ recipients (col J), offset = −(share × recipients)
+        # (col H). Office indirect stays a SUMIFS so editing an office
+        # expense still recomputes the cascade.
         if live and f.get("is_overhead_offset"):
-            # −(per-employee share × active count) — backs the allocated
-            # pool out of Office.
-            return (f"=-SUMIFS({er}!$G:$G,{er}!$A:$A,$A{r})"
-                    f"*SUMIFS({er}!$C:$C,{er}!$A:$A,$A{r})")
+            return (f"=-SUMIFS({er}!$J:$J,{er}!$A:$A,$A{r})"
+                    f"*SUMIFS({er}!$H:$H,{er}!$A:$A,$A{r})")
         if live and f.get("is_overhead"):
-            return f"=SUMIFS({er}!$G:$G,{er}!$A:$A,$A{r})"
+            return f"=SUMIFS({er}!$J:$J,{er}!$A:$A,$A{r})"
         return round(f["amount"], 2)
+
+    def _billable(f):
+        # Blank for overhead rows; Yes/No for salary so the Partner-Manager
+        # P&L can split billable vs non-billable labour.
+        if f.get("is_overhead"):
+            return ""
+        return "Yes" if f.get("billable") else "No"
 
     rows = [[f["period"], _fmt_date(f.get("txn_date")),
              _cc_label(f["cost_centre_id"]) or "Unassigned",
@@ -1253,12 +1325,14 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
              _cc_label(f.get("client_cost_centre_id")),
              _cc_label(f.get("home_cost_centre_id")),
              round(f["hours"], 2), _amount(f, i + 2),
-             "Overhead" if f.get("is_overhead") else "Salary"]
+             "Overhead" if f.get("is_overhead") else "Salary",
+             _billable(f)]
             for i, f in enumerate(data.labour_facts)]
     _write_data_sheet(wb, "Salary" + suffix,
                       ["Period", "Date", "Charged To", "Employee", "Client",
-                       "Client CC", "Home CC", "Hours", "Amount", "Type"],
-                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12], rows)
+                       "Client CC", "Home CC", "Hours", "Amount", "Type",
+                       "Billable"],
+                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12, 10], rows)
 
 
 # --- Employee Register --------------------------------------------------------
@@ -1297,10 +1371,11 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     _cell(ws, 1, 1, "Employee Register", font=_TITLE)
     _cell(ws, 2, 1,
           "Active = filed timesheet hours in the period (21st → 20th "
-          "cycle). Movement compares against the previous month's "
-          "timesheet. Office overhead = Office-cost-centre indirect "
-          "expenses ÷ active employees — the Salary sheet's Overhead "
-          "rows read the per-employee figure from column G.", font=_SUB)
+          "cycle). Overhead pool = Office indirect expenses + office-home "
+          "staff salaries; it is spread over the partner-team employees "
+          "(Recipients) and charged to their cost centres. The Salary "
+          "sheet's Overhead rows read the per-employee figure (column J).",
+          font=_SUB)
 
     # ---- Pre-compute the roster rows so the summary COUNTIFS know
     # their range before being written.
@@ -1326,9 +1401,12 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     rE = f"$E${roster_first}:$E${roster_last}"
 
     # ---- 1. Summary -----------------------------------------------------
+    for col, w in (("F", 18), ("G", 20), ("H", 16), ("I", 16), ("J", 20)):
+        ws.column_dimensions[col].width = w
     _header_row(ws, sum_hrow, [
         "Period", "Prev Month", "Active Employees", "New Joiners", "Exits",
-        "Office Indirect (₹)", "Overhead / Employee (₹)"])
+        "Office Indirect (₹)", "Office Staff Salary (₹)",
+        "Overhead Recipients", "Overhead Pool (₹)", "Overhead / Employee (₹)"])
     notes = []
     for i, r in enumerate(reg):
         row = sum_first + i
@@ -1344,12 +1422,22 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, row, 5,
               f'=COUNTIFS({rA},$A{row},{rE},"Exit")',
               border=True, align=_CENTER)
+        # Office indirect — live SUMIFS so editing an office expense
+        # recomputes the cascade.
         _cell(ws, row, 6,
               f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{office_code}",'
               f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}",{exp}!$L:$L,$A{row})',
               fmt=INR, border=True)
-        _cell(ws, row, 7,
-              f"=IF(C{row}=0,0,IF(F{row}<=0,0,ROUND(F{row}/C{row},2)))",
+        # Office-home staff salary + recipient count are computed values.
+        _cell(ws, row, 7, round(r.get("office_salary", 0.0), 2),
+              fmt=INR, border=True)
+        _cell(ws, row, 8, r.get("recipients_count", 0),
+              border=True, align=_CENTER)
+        # Pool = office indirect + office staff salary.
+        _cell(ws, row, 9, f"=F{row}+G{row}", fmt=INR, border=True)
+        # Per-employee overhead = pool ÷ recipients.
+        _cell(ws, row, 10,
+              f"=IF(H{row}=0,0,IF(I{row}<=0,0,ROUND(I{row}/H{row},2)))",
               font=_BOLD, fmt=INR, border=True)
         if not r["has_prev_data"]:
             notes.append(
@@ -1366,16 +1454,17 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
                   align=_CENTER if ci in (1, 3, 4, 5) else None)
 
     # ---- 3. Headcount by cost centre -------------------------------------
-    # Placed BESIDE the summary (top-right, starting at column I) rather
-    # than at the bottom of the sheet, so the operator reads both summary
-    # tables at a glance without scrolling past the full roster.
+    # Placed BESIDE the summary (top-right) rather than at the bottom of
+    # the sheet, so the operator reads both summary tables at a glance
+    # without scrolling past the full roster. Starts at column L — one gap
+    # after the summary's overhead columns (which now run through J).
     cc_codes: list[str] = []
     for rr in roster_rows:
         if rr[2] not in cc_codes:
             cc_codes.append(rr[2])
     cc_codes.sort()
     if cc_codes:
-        hc_c0 = 9                                # column I (one gap after G)
+        hc_c0 = 12                               # column L (one gap after J)
         ccL = get_column_letter(hc_c0)           # Cost Centre column
         perL = get_column_letter(hc_c0 + 1)      # Period column
         for off, w in enumerate((20, 12, 10, 13, 10)):

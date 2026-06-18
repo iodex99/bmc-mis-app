@@ -199,12 +199,23 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
     donut = ch.donut([c for c, _ in rev_partners],
                      [v for _, v in rev_partners], controls=True)
 
-    # Cost composition (Direct / Salary / Overhead), all cost centres incl Office.
+    # Cost composition (Direct / Salary billable / Salary non-billable /
+    # Overhead) for every cost centre incl Office. Salary is split the same
+    # way the Partner-Manager P&L splits it (v0.3.82).
+    bill: dict = {}
+    nonbill: dict = {}
+    for f in data.labour_facts:
+        if f.get("is_overhead"):
+            continue
+        cc_id = f["cost_centre_id"]
+        bucket = bill if f.get("billable") else nonbill
+        bucket[cc_id] = bucket.get(cc_id, 0.0) + f["amount"]
     comp_labels = [c.code for c in ccs]
     comp = ch.grouped_bar(
         comp_labels,
         [{"label": "Direct Expense", "data": [round(c.direct_expense, 2) for c in ccs]},
-         {"label": "Salary", "data": [round(c.labour, 2) for c in ccs]},
+         {"label": "Salary (billable)", "data": [round(bill.get(c.cost_centre_id, 0.0), 2) for c in ccs]},
+         {"label": "Salary (non-billable)", "data": [round(nonbill.get(c.cost_centre_id, 0.0), 2) for c in ccs]},
          {"label": "Allocated Overhead", "data": [round(c.allocated_overhead, 2) for c in ccs]}],
         stacked=True)
 
@@ -435,6 +446,37 @@ def _client_section(data: MISData, lbl: dict, ch: _Charts) -> str:
         _card("<h3>Clients by billing</h3>", bar),
         _card("<h3>All clients</h3>", _table(headers, rows, right, total)),
         intro=note)
+
+
+def _provision_section(data: MISData, lbl: dict, ch: _Charts) -> str:
+    pf = data.provision_facts
+    if not pf:
+        return ""
+    pf = sorted(pf, key=lambda f: -f["amount"])
+    bar = ch.grouped_bar(
+        [(f.get("client_name") or "(unmapped)") for f in pf],
+        [{"label": "Remaining", "data": [round(f["amount"], 2) for f in pf]}],
+        horizontal=True, height=max(240, 60 + 30 * min(len(pf), 20)),
+        controls=True)
+    headers = ["Booked", "Entity", "Cost Centre", "Client",
+               "Original", "Adjusted", "Remaining"]
+    rows = [[_esc(f.get("provision_period") or ""),
+             _esc(f.get("entity_name") or "(unspecified)"),
+             _esc(lbl["cc"].get(f["cost_centre_id"], "Unassigned")),
+             _esc(f.get("client_name") or "(unmapped)"),
+             _money(f.get("original", 0.0)), _money(f.get("adjusted", 0.0)),
+             _money(f["amount"])] for f in pf]
+    total = ["", "", "", "TOTAL",
+             _money(sum(f.get("original", 0.0) for f in pf)),
+             _money(sum(f.get("adjusted", 0.0) for f in pf)),
+             _money(sum(f["amount"] for f in pf))]
+    return _section(
+        "Provisions", "provisions",
+        _card("<h3>Outstanding provisions by client</h3>", bar),
+        _card("<h3>Provision detail</h3>",
+              _table(headers, rows, {4, 5, 6}, total)),
+        intro="Expected direct costs not yet incurred — carried forward at "
+              "their remaining value (original − adjustments) until cleared.")
 
 
 def _employee_section(data: MISData, ch: _Charts) -> str:
@@ -756,6 +798,7 @@ def generate_dashboard(data: MISData, path: str | Path,
         _service_section(data, ch),
         _partner_manager_section(data, ch),
         _client_section(data, lbl, ch),
+        _provision_section(data, lbl, ch),
         _employee_section(data, ch),
     ]
     sections = [s for s in sections if s]
@@ -763,7 +806,7 @@ def generate_dashboard(data: MISData, path: str | Path,
     nav_items = [("ccpl", "Cost Centre P&L"), ("budget", "Budget"),
                  ("entity", "Entity"), ("service", "Service"),
                  ("pm", "Partner–Manager"), ("clients", "Clients"),
-                 ("employees", "Employees")]
+                 ("provisions", "Provisions"), ("employees", "Employees")]
     present = {s.split("id='", 1)[1].split("'", 1)[0] for s in sections}
     nav = "".join(f"<a href='#{a}'>{_esc(t)}</a>"
                   for a, t in nav_items if a in present)

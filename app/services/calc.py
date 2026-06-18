@@ -109,6 +109,10 @@ class MISData:
     expense_facts: list[dict] = field(default_factory=list)
     labour_facts: list[dict] = field(default_factory=list)
     reimbursement_facts: list[dict] = field(default_factory=list)
+    # Remaining (unadjusted) provision costs, carried forward to the
+    # reporting month — direct costs the cost centre expects but hasn't
+    # yet incurred. See :func:`_build_provision_facts`.
+    provision_facts: list[dict] = field(default_factory=list)
     # One entry per selected period: active-employee roster (from the
     # timesheet), joiners/exits vs the previous month, and the office
     # overhead computation (indirect pool ÷ active headcount). Feeds the
@@ -198,6 +202,7 @@ def compute(options: MISOptions) -> MISData:
     _build_employee_register(data, options, masters)
     _build_labour_facts(data, options, masters)
     _build_reimbursement_facts(data, options, masters)
+    _build_provision_facts(data, options, masters)
     _roll_up(data, masters)
     return data
 
@@ -330,6 +335,13 @@ def _build_employee_register(data: MISData, options: MISOptions,
             f"SELECT period, employee_name, cost_centre_id FROM salary_entries "
             f"WHERE period IN ({ph}) AND cost_centre_id IS NOT NULL",
             all_periods).fetchall()
+        # Salary AMOUNTS for the selected periods — office-home employees'
+        # pay joins the overhead pool (v0.3.82), so we need it here where
+        # the pool is computed.
+        sal_amt_rows = conn.execute(
+            f"SELECT period, employee_name, salary_paid, reimbursement "
+            f"FROM salary_entries WHERE period IN ({_placeholders(periods)})",
+            periods).fetchall()
 
     def emp_key(name: str):
         return emp_index.get(norm(name), f"raw:{norm(name)}")
@@ -365,6 +377,23 @@ def _build_employee_register(data: MISData, options: MISOptions,
                 and f["period"] in pool_by_period):
             pool_by_period[f["period"]] += f["amount"]
 
+    # Office-home employees' salary also feeds the overhead pool (v0.3.82):
+    # staff whose home cost centre is Office are pure overhead, so their pay
+    # is spread across the partner teams rather than shown as their own
+    # salary line. Their pay still lands on Office as Salary in the labour
+    # facts; the pool + a negative offset on Office redistribute it.
+    office_salary_by_period: dict[str, float] = {p: 0.0 for p in periods}
+    for r in sal_amt_rows:
+        p = r["period"]
+        if p not in office_salary_by_period:
+            continue
+        if home_cc(p, emp_key(r["employee_name"])) != office_id:
+            continue
+        amt = float(r["salary_paid"] or 0.0)
+        if options.include_reimbursement:
+            amt += float(r["reimbursement"] or 0.0)
+        office_salary_by_period[p] += amt
+
     for p in periods:
         prev_p = prev_map[p]
         cur = roster.get(p, {})
@@ -392,8 +421,13 @@ def _build_employee_register(data: MISData, options: MISOptions,
                     "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
                 })
         n = len(active)
-        pool = round(pool_by_period.get(p, 0.0), 2)
-        per_emp = round(pool / n, 2) if n and pool > 0 else 0.0
+        # Overhead recipients = active employees whose home CC is a PARTNER.
+        # Office-home staff are the cost SOURCE, not recipients (v0.3.82).
+        recipients = sum(1 for a in active if a["cost_centre_id"] != office_id)
+        office_indirect = round(pool_by_period.get(p, 0.0), 2)
+        office_salary = round(office_salary_by_period.get(p, 0.0), 2)
+        pool = round(office_indirect + office_salary, 2)
+        per_emp = round(pool / recipients, 2) if recipients and pool > 0 else 0.0
         data.employee_register.append({
             "period": p,
             "prev_period": prev_p,
@@ -403,14 +437,16 @@ def _build_employee_register(data: MISData, options: MISOptions,
             "active_count": n,
             "new_count": sum(1 for a in active if a["is_new"]),
             "exit_count": len(exits),
+            "office_indirect": office_indirect,
+            "office_salary": office_salary,
+            "recipients_count": recipients,
             "pool": pool,
             "per_employee": per_emp,
         })
-        if pool > 0 and n == 0:
+        if pool > 0 and recipients == 0:
             data.warnings.append(
-                f"{p}: office indirect expenses of {pool:,.0f} could not be "
-                f"allocated — no timesheet rows found for the period, so the "
-                f"active-employee count is zero.")
+                f"{p}: office overhead pool of {pool:,.0f} could not be "
+                f"allocated — no active partner-team employees in the period.")
 
 
 # --- labour facts ------------------------------------------------------------
@@ -505,33 +541,49 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "default_cost_centre_id") or home_cc
         home_cc = home_cc or office_id
 
+        # Office-home employees are pure overhead (v0.3.82): ALL of their
+        # cost lands on Office regardless of which client they booked, and
+        # their pay is redistributed to the partner teams via the pool.
+        emp_is_office_home = (home_cc == office_id)
+
         if total_logged > 0:
             for t in rows:
                 h = float(t["hours"] or 0.0)
                 if not h:
                     continue
-                cc = _client_cost_centre(t, clients, office_id,
-                                          home_cc=home_cc)
-                # Client's own CC — only populated for billable rows
-                # whose client master row has a CC set. The Salary
-                # sheet's "Client CC" column displays this; rendered
-                # blank otherwise (residual, non-billable, overhead).
+                # Client's own CC — only for billable rows whose client
+                # master row has a real (non-Office) cost centre.
                 client_cc = None
                 if t["is_billable"] and t["client_id"] is not None:
                     client = clients.get(t["client_id"])
-                    if client and client["cost_centre_id"] is not None:
+                    if (client and client["cost_centre_id"] is not None
+                            and client["cost_centre_id"] != office_id):
                         client_cc = client["cost_centre_id"]
+                # Attribution + billable flag:
+                #  • office-home staff  → Office (non-billable)
+                #  • billable on a real client → that client's partner CC
+                #  • everything else (non-billable, office client, no CC)
+                #    → the employee's HOME partner CC, NON-billable. This
+                #    is the v0.3.82 fix: office-booked time by a partner's
+                #    employee now lands on their home CC, not Office.
+                if emp_is_office_home:
+                    cc, billable = office_id, False
+                elif client_cc is not None:
+                    cc, billable = client_cc, True
+                else:
+                    cc, billable = home_cc, False
                 data.labour_facts.append({
                     "period": period,
                     "txn_date": t["txn_date"],
                     "cost_centre_id": cc,
                     "home_cost_centre_id": home_cc,
-                    "client_cost_centre_id": client_cc,
+                    "client_cost_centre_id": client_cc if billable else None,
                     "employee_name": rec["name"],
                     "client_id": t["client_id"],
                     "client_raw": t["client_raw"],
                     "is_residual": False,
                     "is_overhead": False,
+                    "billable": billable,
                     "hours": h, "amount": h * salary_rate,
                 })
             residual = std_hours - total_logged
@@ -547,6 +599,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "client_raw": None,
                     "is_residual": True,
                     "is_overhead": False,
+                    "billable": False,
                     "hours": residual, "amount": residual * salary_rate,
                 })
         elif rec["amount"]:
@@ -561,6 +614,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "client_raw": None,
                 "is_residual": True,
                 "is_overhead": False,
+                "billable": False,
                 "hours": std_hours, "amount": rec["amount"],
             })
 
@@ -573,10 +627,15 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
     # appear twice in the firm total).
     for reg in data.employee_register:
         per_emp = reg["per_employee"]
-        if per_emp <= 0 or not reg["active"]:
+        recipients = reg["recipients_count"]
+        if per_emp <= 0 or recipients <= 0:
             continue
         period = reg["period"]
         for emp in reg["active"]:
+            # Only partner-team employees receive an overhead share; the
+            # office-home staff are the source of (part of) the pool.
+            if emp["cost_centre_id"] == office_id:
+                continue
             data.labour_facts.append({
                 "period": period,
                 "txn_date": None,
@@ -589,59 +648,28 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "is_residual": False,
                 "is_overhead": True,
                 "is_overhead_offset": False,
+                "billable": False,
                 "hours": 0.0, "amount": per_emp,
             })
+        # Negative offset on Office backs the whole pool (office indirect +
+        # office-home salary) out of the Office bucket — it's redistributed
+        # to the partner teams above.
         data.labour_facts.append({
             "period": period,
             "txn_date": None,
             "cost_centre_id": office_id,
             "home_cost_centre_id": office_id,
             "client_cost_centre_id": None,
-            "employee_name": "(Office indirect allocated to employees)",
+            "employee_name": "(Office overhead allocated to partner teams)",
             "client_id": None,
             "client_raw": None,
             "is_residual": False,
             "is_overhead": True,
             "is_overhead_offset": True,
+            "billable": False,
             "hours": 0.0,
-            "amount": -round(per_emp * reg["active_count"], 2),
+            "amount": -round(per_emp * recipients, 2),
         })
-
-
-def _client_cost_centre(ts_row, clients: dict, office_id: int | None,
-                         home_cc: int | None = None):
-    """Cost centre a timesheet line's labour belongs to.
-
-    Priority:
-
-    1. **Resolved client's cost centre** — explicit attribution. A
-       timesheet line booked to Client X (mapped to partner P)
-       contributes to P's labour cost.
-    2. **Employee's home cost centre** — the default for everything
-       else: non-billable time, billable time on an unresolved
-       client_raw, or billable time on a client whose master row has
-       no cost-centre set. Lines up with how the residual-row logic
-       already attributes leftover hours, so an employee's full
-       monthly salary cost lands on the partner they're assigned to
-       unless an explicit timesheet entry on someone else's client
-       overrides.
-    3. **Office** — last-resort fallback when the employee isn't in
-       the master and we have no other signal.
-
-    Pre-v0.3.60 this returned ``office_id`` for both #1's miss and
-    non-billable rows, which dumped every office-boy / receptionist
-    style time into Office regardless of which partner they reported
-    under. The fix routes them to ``home_cc`` so e.g. Bhavik (home
-    partner JV) sees ALL his time on JV, not 8h on JV + 200h on
-    Office.
-    """
-    default_cc = home_cc if home_cc is not None else office_id
-    if not ts_row["is_billable"]:
-        return default_cc
-    client = clients.get(ts_row["client_id"])
-    if client and client["cost_centre_id"] is not None:
-        return client["cost_centre_id"]
-    return default_cc
 
 
 def _build_reimbursement_facts(data: MISData, options: MISOptions,
@@ -696,6 +724,60 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
         })
 
 
+def _build_provision_facts(data: MISData, options: MISOptions,
+                            masters: dict) -> None:
+    """Build one fact per OUTSTANDING provision, carried forward to the
+    reporting month.
+
+    A provision booked in month P is an expected direct cost on its
+    client's cost centre. It shows in the MIS for every month from P
+    onward (``carry forward``) at its REMAINING value — original amount
+    minus the adjustments recorded up to and including the reporting
+    month — until that remaining reaches zero. The fact is stamped with
+    the latest selected period so it lands once in the current MIS,
+    regardless of how many months are selected.
+    """
+    if not options.periods:
+        return
+    clients = masters["clients"]
+    entities = masters["entities"]
+    max_p = max(options.periods)
+    with transaction() as conn:
+        provs = [dict(r) for r in conn.execute(
+            "SELECT * FROM provisions WHERE active = 1")]
+        adjs = conn.execute(
+            "SELECT provision_id, amount, adjusted_period "
+            "FROM provision_adjustments").fetchall()
+    adj_by: dict[int, list] = {}
+    for a in adjs:
+        adj_by.setdefault(a["provision_id"], []).append(a)
+    for p in provs:
+        # Not yet booked as of the reporting month (string compare is safe
+        # for 'YYYY-MM').
+        if (p["period"] or "") > max_p:
+            continue
+        adjusted = sum(
+            float(a["amount"] or 0.0) for a in adj_by.get(p["id"], [])
+            if (a["adjusted_period"] or "") <= max_p)
+        remaining = round(float(p["amount"] or 0.0) - adjusted, 2)
+        if remaining <= 0.005:
+            continue
+        client = clients.get(p["client_id"])
+        cc_id = client["cost_centre_id"] if client else None
+        data.provision_facts.append({
+            "period": max_p,
+            "provision_period": p["period"],
+            "cost_centre_id": cc_id,
+            "entity_id": p["entity_id"],
+            "client_id": p["client_id"],
+            "client_name": (client or {}).get("canonical_name"),
+            "entity_name": (entities.get(p["entity_id"]) or {}).get("name"),
+            "original": round(float(p["amount"] or 0.0), 2),
+            "adjusted": round(adjusted, 2),
+            "amount": remaining,
+        })
+
+
 # --- roll-ups ----------------------------------------------------------------
 
 def _roll_up(data: MISData, masters: dict) -> None:
@@ -734,6 +816,9 @@ def _roll_up(data: MISData, masters: dict) -> None:
     # partner's net is washed automatically; when NO the firm absorbs
     # the cost and the partner's profit drops by that amount.
     for f in data.reimbursement_facts:
+        line_for(f["cost_centre_id"]).direct_expense += f["amount"]
+    # Outstanding provisions are a direct cost on the client's cost centre.
+    for f in data.provision_facts:
         line_for(f["cost_centre_id"]).direct_expense += f["amount"]
 
     # Targets (annual, pro-rated to the number of months selected).
@@ -793,6 +878,9 @@ def _roll_up_dimensions(data: MISData, masters: dict) -> None:
         pm_line(f["cost_centre_id"], f["manager_id"])["revenue"] += f["amount"]
     for f in data.expense_facts:
         pm_line(f["cost_centre_id"], f["manager_id"])["direct_expense"] += f["amount"]
+    # Provisions carry no manager — attribute to the partner's "Self" column.
+    for f in data.provision_facts:
+        pm_line(f["cost_centre_id"], None)["direct_expense"] += f["amount"]
     data.partner_manager = sorted(pm.values(), key=lambda d: -d["revenue"])
 
     # Entity.
@@ -801,6 +889,9 @@ def _roll_up_dimensions(data: MISData, masters: dict) -> None:
         e = ent_agg.setdefault(f["entity_id"], {"revenue": 0.0, "direct_expense": 0.0})
         e["revenue"] += f["amount"]
     for f in data.expense_facts:
+        e = ent_agg.setdefault(f["entity_id"], {"revenue": 0.0, "direct_expense": 0.0})
+        e["direct_expense"] += f["amount"]
+    for f in data.provision_facts:
         e = ent_agg.setdefault(f["entity_id"], {"revenue": 0.0, "direct_expense": 0.0})
         e["direct_expense"] += f["amount"]
     data.entities = [

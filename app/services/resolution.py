@@ -1239,6 +1239,30 @@ def apply_known_cc_string_mappings() -> int:
                 f"WHERE id IN ({placeholders})",
                 (cc_id, mgr_id, *ids))
             updated += cur.rowcount
+
+        # Second pass: back-fill the MANAGER on splits that already have a
+        # cost centre but a blank manager (e.g. a bare "Rajesh Malhotra"
+        # resolved to a partner before the manager-matching fix). Only when
+        # the mapping's partner matches the split's, so a manager is added
+        # without ever moving the cost centre.
+        mgr_less = conn.execute(
+            "SELECT s.id, s.cost_centre_id AS cc, "
+            "       coalesce(s.raw_cost_centre, v.raw_cost_centre) AS raw "
+            "FROM voucher_splits s JOIN vouchers v ON v.id = s.voucher_id "
+            "WHERE s.manager_id IS NULL AND s.cost_centre_id IS NOT NULL "
+            "  AND coalesce(s.raw_cost_centre, v.raw_cost_centre) <> ''"
+        ).fetchall()
+        mgr_buckets: dict[tuple[int, int], list[int]] = {}
+        for s in mgr_less:
+            mapping = mappings.get(norm(s["raw"]))
+            if mapping and mapping[1] is not None and mapping[0] == s["cc"]:
+                mgr_buckets.setdefault((mapping[1], s["cc"]), []).append(s["id"])
+        for (mgr_id, _cc), ids in mgr_buckets.items():
+            placeholders = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"UPDATE voucher_splits SET manager_id = ? "
+                f"WHERE id IN ({placeholders})", (mgr_id, *ids))
+            updated += cur.rowcount
     return updated
 
 
@@ -1421,7 +1445,14 @@ def _build_partner_manager_lookups(
             "SELECT id, code, name FROM managers "
             "WHERE active = 1 AND cost_centre_id = ?",
             (cc_id,))
-    return partner_lookup, manager_lookup, managers_by_partner
+    # manager_id → home partner cost centre. Lets a bare manager-name CC
+    # string ("Rajesh Malhotra") resolve to BOTH the manager and that
+    # manager's partner cost centre.
+    manager_cc: dict[int, int | None] = {
+        r["id"]: r["cost_centre_id"]
+        for r in conn.execute(
+            "SELECT id, cost_centre_id FROM managers WHERE active = 1")}
+    return partner_lookup, manager_lookup, managers_by_partner, manager_cc
 
 
 def _build_lookup(conn, sql: str, params: tuple = ()) -> dict[str, int]:
@@ -1446,7 +1477,8 @@ def _build_lookup(conn, sql: str, params: tuple = ()) -> dict[str, int]:
 
 def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
                           managers_by_partner: dict[int, dict] | None = None,
-                          min_score: int = _MIN_SCORE
+                          min_score: int = _MIN_SCORE,
+                          manager_cc: dict[int, int | None] | None = None
                           ) -> tuple[int | None, int | None, int]:
     """Match a single CC string. Returns ``(cc_id, mgr_id, score)``.
 
@@ -1501,6 +1533,20 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
         id_w, score_w = _best_match(cleaned, partner_lookup)
         if score_w >= min_score:
             cc_id, best_score = id_w, score_w
+    # Bare manager name (Tally tagged the CC with just "Rajesh Malhotra",
+    # no "partner - manager"). If the whole string matches a MANAGER at
+    # least as well as any partner guess, adopt that manager AND their home
+    # partner cost centre. A strong, exact manager match (100) rightly beats
+    # a weak fuzzy partner match (e.g. 64) that only coincidentally lands on
+    # the right partner — and crucially it fills in the manager.
+    if manager_cc is not None and mgr_id is None:
+        m_id, m_score = _best_match(cleaned, manager_lookup)
+        if (m_id is not None and m_score >= min_score
+                and m_score >= best_score
+                and manager_cc.get(m_id) is not None):
+            cc_id = manager_cc[m_id]
+            mgr_id = m_id
+            best_score = m_score
     return cc_id, mgr_id, best_score
 
 
@@ -1529,7 +1575,7 @@ def export_cc_diagnostic(path: str) -> int:
             r["id"]: r["code"] for r in conn.execute(
                 "SELECT id, code FROM cost_centres "
                 "WHERE active = 1 AND cc_type = 'partner'")}
-        partner_lookup, manager_lookup, managers_by_partner = \
+        partner_lookup, manager_lookup, managers_by_partner, manager_cc = \
             _build_partner_manager_lookups(conn)
         saved = {norm(r["raw_text"]): r["cost_centre_id"]
                   for r in conn.execute(
@@ -1601,7 +1647,8 @@ def export_cc_diagnostic(path: str) -> int:
             tokens = sorted(_tokenize(cleaned))
             cc_id, mgr_id, score = _match_one_cc_string(
                 raw, partner_lookup, manager_lookup,
-                managers_by_partner=managers_by_partner, min_score=50)
+                managers_by_partner=managers_by_partner, min_score=50,
+                manager_cc=manager_cc)
             saved_cc_id = saved.get(norm(raw))
             saved_partner = partner_codes.get(saved_cc_id)
             suggested_partner = partner_codes.get(cc_id)
@@ -1706,11 +1753,12 @@ def suggest_for_raw_cc(raw: str, min_score: int = 80
             (raw.strip().lower(),)).fetchone()
         if row:
             return row["cost_centre_id"], row["manager_id"], 100
-        partner_lookup, manager_lookup, managers_by_partner = \
+        partner_lookup, manager_lookup, managers_by_partner, manager_cc = \
             _build_partner_manager_lookups(conn)
     return _match_one_cc_string(
         raw, partner_lookup, manager_lookup,
-        managers_by_partner=managers_by_partner, min_score=min_score)
+        managers_by_partner=managers_by_partner, min_score=min_score,
+        manager_cc=manager_cc)
 
 
 def auto_match_cc_strings() -> int:
@@ -1729,7 +1777,7 @@ def auto_match_cc_strings() -> int:
     overwritten only if the auto-match finds a better fit.
     """
     with transaction() as conn:
-        partner_lookup, manager_lookup, managers_by_partner = \
+        partner_lookup, manager_lookup, managers_by_partner, manager_cc = \
             _build_partner_manager_lookups(conn)
 
     if not partner_lookup:
@@ -1740,11 +1788,31 @@ def auto_match_cc_strings() -> int:
         raw = item["raw"]
         cc_id, mgr_id, _score = _match_one_cc_string(
             raw, partner_lookup, manager_lookup,
-            managers_by_partner=managers_by_partner, min_score=_MIN_SCORE)
+            managers_by_partner=managers_by_partner, min_score=_MIN_SCORE,
+            manager_cc=manager_cc)
         if cc_id is not None:
             new_mappings.append((raw, cc_id, mgr_id))
 
-    if not new_mappings:
+    # Back-fill the MANAGER on existing mappings that resolved a partner
+    # but left the manager blank — e.g. a bare "Rajesh Malhotra" mapped
+    # pre-fix. Only when the matched manager's home partner EQUALS the
+    # already-saved partner, so we add the manager without ever moving a
+    # cost centre (zero regression to existing partner assignments).
+    upgrades: list[tuple[str, int]] = []
+    with transaction() as conn:
+        manager_less = conn.execute(
+            "SELECT raw_text, cost_centre_id FROM cc_string_mappings "
+            "WHERE active = 1 AND manager_id IS NULL "
+            "AND cost_centre_id IS NOT NULL").fetchall()
+    for r in manager_less:
+        cc_id, mgr_id, _score = _match_one_cc_string(
+            r["raw_text"], partner_lookup, manager_lookup,
+            managers_by_partner=managers_by_partner, min_score=_MIN_SCORE,
+            manager_cc=manager_cc)
+        if mgr_id is not None and cc_id == r["cost_centre_id"]:
+            upgrades.append((r["raw_text"], mgr_id))
+
+    if not new_mappings and not upgrades:
         return 0
 
     with transaction() as conn:
@@ -1757,10 +1825,15 @@ def auto_match_cc_strings() -> int:
                 "  manager_id = excluded.manager_id, "
                 "  active = 1",
                 (raw, cc_id, mgr_id))
-    # Apply the new mappings to existing voucher splits.
+        for raw, mgr_id in upgrades:
+            conn.execute(
+                "UPDATE cc_string_mappings SET manager_id = ? "
+                "WHERE lower(trim(raw_text)) = ? AND manager_id IS NULL",
+                (mgr_id, raw.strip().lower()))
+    # Apply the new / upgraded mappings to existing voucher splits.
     apply_known_cc_string_mappings()
     infer_all_masters()
-    return len(new_mappings)
+    return len(new_mappings) + len(upgrades)
 
 
 def map_cc_string(raw: str, cost_centre_id: int | None,

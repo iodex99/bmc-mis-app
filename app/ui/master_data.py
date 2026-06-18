@@ -38,6 +38,7 @@ import datetime as _dt
 from .. import repository as repo
 from ..importing import excel_reader
 from ..services import resolution
+from ..services import provisions as prov_svc
 from ..services.calc import financial_year, normalize_fy
 
 
@@ -600,6 +601,256 @@ class RecordTab(QWidget):
             self.reload()
 
 
+# --- Provision Costs ---------------------------------------------------------
+
+def _month_choices() -> list[tuple[str, str]]:
+    """(label, 'YYYY-MM') for a window of months around now, newest first."""
+    today = _dt.date.today()
+    out: list[tuple[str, str]] = []
+    for y in range(today.year + 1, today.year - 3, -1):
+        for m in range(12, 0, -1):
+            out.append((_dt.date(y, m, 1).strftime("%b %Y"), f"{y:04d}-{m:02d}"))
+    return out
+
+
+def _fk_combo(table: str, current=None, allow_none=False) -> QComboBox:
+    w = QComboBox()
+    if allow_none:
+        w.addItem("(none)", None)
+    for fid, label in repo.fk_options(table):
+        w.addItem(label, fid)
+    if current is not None:
+        idx = w.findData(current)
+        if idx >= 0:
+            w.setCurrentIndex(idx)
+    return w
+
+
+def _month_combo(current: str | None = None) -> QComboBox:
+    w = QComboBox()
+    for label, value in _month_choices():
+        w.addItem(label, value)
+    today = _dt.date.today()
+    default = current or f"{today.year:04d}-{today.month:02d}"
+    idx = w.findData(default)
+    w.setCurrentIndex(idx if idx >= 0 else 0)
+    return w
+
+
+class ProvisionDialog(QDialog):
+    """Add / edit one provision: period, entity, client, amount."""
+
+    def __init__(self, record: dict | None, parent=None) -> None:
+        super().__init__(parent)
+        record = record or {}
+        self.setWindowTitle(f"{'Edit' if record else 'Add'} — Provision")
+        self.setMinimumWidth(380)
+        form = QFormLayout()
+        self.period = _month_combo(record.get("period"))
+        self.entity = _fk_combo("entities", record.get("entity_id"),
+                                allow_none=True)
+        self.client = _fk_combo("clients", record.get("client_id"),
+                                allow_none=True)
+        self.amount = QDoubleSpinBox()
+        self.amount.setRange(0, 1_000_000_000)
+        self.amount.setGroupSeparatorShown(True)
+        self.amount.setDecimals(2)
+        self.amount.setValue(float(record.get("amount") or 0))
+        form.addRow("Month:", self.period)
+        form.addRow("Entity:", self.entity)
+        form.addRow("Client:", self.client)
+        form.addRow("Provision amount:", self.amount)
+        hint = QLabel("The cost centre is taken from the client. Adjust the "
+                      "provision down as the actual expense is incurred.")
+        hint.setWordWrap(True)
+        hint.setObjectName("pageNote")
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(hint)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        if self.amount.value() <= 0:
+            QMessageBox.warning(self, "Amount required",
+                                "Enter a provision amount greater than zero.")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        return {"period": self.period.currentData(),
+                "entity_id": self.entity.currentData(),
+                "client_id": self.client.currentData(),
+                "amount": self.amount.value()}
+
+
+class AdjustProvisionDialog(QDialog):
+    """Record an adjustment (actual expense incurred) against a provision."""
+
+    def __init__(self, provision: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Adjust provision")
+        self.setMinimumWidth(380)
+        remaining = provision.get("remaining", 0.0)
+        form = QFormLayout()
+        info = QLabel(
+            f"<b>{_esc_html(provision.get('client_name') or '(no client)')}</b> "
+            f"· {_esc_html(provision.get('period') or '')}<br>"
+            f"Original {fmt_inr(provision.get('amount'))} · "
+            f"Remaining <b>{fmt_inr(remaining)}</b>")
+        info.setWordWrap(True)
+        self.amount = QDoubleSpinBox()
+        self.amount.setRange(0, 1_000_000_000)
+        self.amount.setGroupSeparatorShown(True)
+        self.amount.setDecimals(2)
+        self.amount.setValue(round(float(remaining), 2))
+        self.period = _month_combo(provision.get("period"))
+        form.addRow("Amount incurred:", self.amount)
+        form.addRow("Adjusted in month:", self.period)
+        hint = QLabel("Reduces the remaining provision. Any balance keeps "
+                      "showing in the MIS until it reaches zero.")
+        hint.setWordWrap(True)
+        hint.setObjectName("pageNote")
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(info)
+        layout.addLayout(form)
+        layout.addWidget(hint)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        if self.amount.value() <= 0:
+            QMessageBox.warning(self, "Amount required",
+                                "Enter an amount greater than zero.")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        return {"amount": self.amount.value(),
+                "adjusted_period": self.period.currentData()}
+
+
+def _esc_html(s) -> str:
+    import html
+    return html.escape(str(s if s is not None else ""))
+
+
+class ProvisionTab(QWidget):
+    """Provision Costs master: expected-but-not-yet-incurred direct costs."""
+
+    title = "Provision Costs"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: list[dict] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 8, 4, 4)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Direct costs a cost centre expects to incur (for a client) but "
+            "hasn't yet. Shown as a direct cost in the MIS and carried "
+            "forward at the remaining value until adjustments clear it.")
+        intro.setObjectName("pageNote")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        bar = QHBoxLayout()
+        self.summary = QLabel("")
+        self.summary.setObjectName("sectionTitle")
+        bar.addWidget(self.summary)
+        bar.addStretch(1)
+        add_btn = QPushButton("＋ Add provision")
+        add_btn.setObjectName("primary")
+        add_btn.clicked.connect(self._add)
+        bar.addWidget(add_btn)
+        layout.addLayout(bar)
+
+        self.table = QTableWidget()
+        setup_data_table(self.table)
+        self.table.doubleClicked.connect(lambda idx: self._edit(idx.row()))
+        layout.addWidget(self.table, 1)
+
+    def count_active(self) -> int:
+        return len(self._rows)
+
+    def reload(self) -> None:
+        self._rows = prov_svc.list_provisions()
+        outstanding = sum(r["remaining"] for r in self._rows)
+        self.summary.setText(
+            f"{len(self._rows)} provision(s) · "
+            f"{fmt_inr(outstanding)} outstanding")
+        rows = [[
+            r.get("period") or "",
+            r.get("entity_name") or "—",
+            r.get("client_name") or "(no client)",
+            fmt_inr(r.get("amount")),
+            fmt_inr(r.get("adjusted")),
+            fmt_inr(r.get("remaining")),
+        ] for r in self._rows]
+        fill_table_with_actions(
+            self.table,
+            ["Month", "Entity", "Client", "Amount", "Adjusted", "Remaining"],
+            rows,
+            action_label="Adjust →",
+            action_callback=self._adjust,
+            secondary_label="Delete",
+            secondary_callback=self._delete,
+            secondary_object_name="rowActionDanger",
+            stretch_col=2,
+        )
+
+    def _add(self) -> None:
+        dlg = ProvisionDialog(None, self)
+        if dlg.exec() == QDialog.Accepted:
+            v = dlg.values()
+            prov_svc.add_provision(v["period"], v["entity_id"],
+                                   v["client_id"], v["amount"])
+            self.reload()
+
+    def _edit(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        rec = self._rows[idx]
+        dlg = ProvisionDialog(rec, self)
+        if dlg.exec() == QDialog.Accepted:
+            v = dlg.values()
+            prov_svc.update_provision(rec["id"], v["period"], v["entity_id"],
+                                      v["client_id"], v["amount"])
+            self.reload()
+
+    def _adjust(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        rec = self._rows[idx]
+        dlg = AdjustProvisionDialog(rec, self)
+        if dlg.exec() == QDialog.Accepted:
+            v = dlg.values()
+            prov_svc.add_adjustment(rec["id"], v["amount"],
+                                    v["adjusted_period"])
+            self.reload()
+
+    def _delete(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        rec = self._rows[idx]
+        if QMessageBox.warning(
+                self, "Delete provision?",
+                f"Delete the provision for "
+                f"<b>{_esc_html(rec.get('client_name') or '(no client)')}</b> "
+                f"({rec.get('period')}) and all its adjustments?<br><br>"
+                "This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        prov_svc.delete_provision(rec["id"])
+        self.reload()
+
+
 # --- The page itself ---------------------------------------------------------
 
 class MasterDataPage(QWidget):
@@ -625,11 +876,15 @@ class MasterDataPage(QWidget):
         self.tabs.setUsesScrollButtons(True)
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setElideMode(Qt.ElideNone)
-        self._tabs: list[RecordTab] = []
+        self._tabs: list = []
         for spec in SPECS:
             tab = RecordTab(spec)
             self._tabs.append(tab)
             self.tabs.addTab(tab, spec.title)
+        # Provision Costs — a custom tab (Add / Edit / Adjust / Delete).
+        self.provision_tab = ProvisionTab()
+        self._tabs.append(self.provision_tab)
+        self.tabs.addTab(self.provision_tab, ProvisionTab.title)
         self.tabs.currentChanged.connect(self._refresh_current)
         layout.addWidget(self.tabs, 1)
         self._refresh_badges()
@@ -646,6 +901,8 @@ class MasterDataPage(QWidget):
 
     def _refresh_badges(self) -> None:
         for i, tab in enumerate(self._tabs):
-            base = tab.spec.title
+            spec = getattr(tab, "spec", None)
+            base = spec.title if spec is not None else getattr(
+                tab, "title", "")
             n = tab.count_active()
             self.tabs.setTabText(i, f"{base}  ({n})" if n else base)

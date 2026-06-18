@@ -426,6 +426,32 @@ MIGRATIONS: list[tuple[int, str]] = [
          );
         UPDATE targets SET financial_year = REPLACE(financial_year, ' ', '');
     """),
+    (14, """
+        -- Provision costs (v0.3.82): a direct cost a partner cost centre
+        -- EXPECTS to incur (tied to a client) but hasn't yet. Booked for a
+        -- month; shown as a direct cost in the MIS and carried forward
+        -- until adjustments bring the remaining to zero. Each adjustment
+        -- records an actual amount incurred + the month it landed in.
+        CREATE TABLE IF NOT EXISTS provisions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            period      TEXT NOT NULL,
+            entity_id   INTEGER REFERENCES entities(id),
+            client_id   INTEGER REFERENCES clients(id),
+            amount      REAL NOT NULL DEFAULT 0,
+            note        TEXT,
+            active      INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS provision_adjustments (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            provision_id    INTEGER NOT NULL REFERENCES provisions(id) ON DELETE CASCADE,
+            amount          REAL NOT NULL DEFAULT 0,
+            adjusted_period TEXT,
+            note            TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_prov_adj ON provision_adjustments(provision_id);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
