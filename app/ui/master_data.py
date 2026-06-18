@@ -603,16 +603,6 @@ class RecordTab(QWidget):
 
 # --- Provision Costs ---------------------------------------------------------
 
-def _month_choices() -> list[tuple[str, str]]:
-    """(label, 'YYYY-MM') for a window of months around now, newest first."""
-    today = _dt.date.today()
-    out: list[tuple[str, str]] = []
-    for y in range(today.year + 1, today.year - 3, -1):
-        for m in range(12, 0, -1):
-            out.append((_dt.date(y, m, 1).strftime("%b %Y"), f"{y:04d}-{m:02d}"))
-    return out
-
-
 def _fk_combo(table: str, current=None, allow_none=False) -> QComboBox:
     w = QComboBox()
     if allow_none:
@@ -626,15 +616,35 @@ def _fk_combo(table: str, current=None, allow_none=False) -> QComboBox:
     return w
 
 
-def _month_combo(current: str | None = None) -> QComboBox:
-    w = QComboBox()
-    for label, value in _month_choices():
-        w.addItem(label, value)
+def _month_year_combos(period: str | None = None):
+    """Separate Month + Year dropdowns (so the operator picks from two
+    short lists instead of one long month-year list). Returns the two
+    combos; pair them with :func:`_period_from` to read 'YYYY-MM'."""
     today = _dt.date.today()
-    default = current or f"{today.year:04d}-{today.month:02d}"
-    idx = w.findData(default)
-    w.setCurrentIndex(idx if idx >= 0 else 0)
-    return w
+    dy, dm = today.year, today.month
+    if period:
+        try:
+            dy, dm = int(period[:4]), int(period[5:7])
+        except (ValueError, IndexError):
+            pass
+    month = QComboBox()
+    for m in range(1, 13):
+        month.addItem(_dt.date(2000, m, 1).strftime("%B"), m)
+    mi = month.findData(dm)
+    month.setCurrentIndex(mi if mi >= 0 else 0)
+    year = QComboBox()
+    for y in range(today.year - 3, today.year + 6):
+        year.addItem(str(y), y)
+    yi = year.findData(dy)
+    if yi < 0:                       # keep an out-of-window year (old data)
+        year.insertItem(0, str(dy), dy)
+        yi = 0
+    year.setCurrentIndex(yi)
+    return month, year
+
+
+def _period_from(month: QComboBox, year: QComboBox) -> str:
+    return f"{year.currentData():04d}-{month.currentData():02d}"
 
 
 class ProvisionDialog(QDialog):
@@ -646,7 +656,7 @@ class ProvisionDialog(QDialog):
         self.setWindowTitle(f"{'Edit' if record else 'Add'} — Provision")
         self.setMinimumWidth(380)
         form = QFormLayout()
-        self.period = _month_combo(record.get("period"))
+        self.month, self.year = _month_year_combos(record.get("period"))
         self.entity = _fk_combo("entities", record.get("entity_id"),
                                 allow_none=True)
         self.client = _fk_combo("clients", record.get("client_id"),
@@ -656,7 +666,8 @@ class ProvisionDialog(QDialog):
         self.amount.setGroupSeparatorShown(True)
         self.amount.setDecimals(2)
         self.amount.setValue(float(record.get("amount") or 0))
-        form.addRow("Month:", self.period)
+        form.addRow("Month:", self.month)
+        form.addRow("Year:", self.year)
         form.addRow("Entity:", self.entity)
         form.addRow("Client:", self.client)
         form.addRow("Provision amount:", self.amount)
@@ -680,7 +691,7 @@ class ProvisionDialog(QDialog):
         self.accept()
 
     def values(self) -> dict:
-        return {"period": self.period.currentData(),
+        return {"period": _period_from(self.month, self.year),
                 "entity_id": self.entity.currentData(),
                 "client_id": self.client.currentData(),
                 "amount": self.amount.value()}
@@ -706,9 +717,10 @@ class AdjustProvisionDialog(QDialog):
         self.amount.setGroupSeparatorShown(True)
         self.amount.setDecimals(2)
         self.amount.setValue(round(float(remaining), 2))
-        self.period = _month_combo(provision.get("period"))
+        self.month, self.year = _month_year_combos(provision.get("period"))
         form.addRow("Amount incurred:", self.amount)
-        form.addRow("Adjusted in month:", self.period)
+        form.addRow("Adjusted in month:", self.month)
+        form.addRow("Adjusted in year:", self.year)
         hint = QLabel("Reduces the remaining provision. Any balance keeps "
                       "showing in the MIS until it reaches zero.")
         hint.setWordWrap(True)
@@ -731,7 +743,7 @@ class AdjustProvisionDialog(QDialog):
 
     def values(self) -> dict:
         return {"amount": self.amount.value(),
-                "adjusted_period": self.period.currentData()}
+                "adjusted_period": _period_from(self.month, self.year)}
 
 
 def _esc_html(s) -> str:

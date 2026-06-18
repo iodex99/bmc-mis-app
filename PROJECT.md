@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.82** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.83** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,14 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.83 — Provision dialogs: separate Month + Year dropdowns
+
+The single month-year list in the Add-provision and Adjust-provision
+dialogs is split into two short dropdowns — **Month** (Jan–Dec) and
+**Year** (current ±, with any out-of-window year preserved) — so the
+operator picks from two short lists instead of one long one. Stored value
+is unchanged ('YYYY-MM').
 
 ### v0.3.82 — Bare-manager CC strings, Provision Costs, labour reattribution
 
