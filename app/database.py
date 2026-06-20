@@ -452,6 +452,31 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_prov_adj ON provision_adjustments(provision_id);
     """),
+    (15, """
+        -- Fix manager/partner mismatches left by the pre-v0.3.86 global
+        -- manager fallback: a CC string like 'Jalpesh - Umesh' resolved
+        -- partner JV but then grabbed 'UV - AM' (a manager under AM) from
+        -- the global lookup, so 'UV - AM' wrongly appeared under JV in the
+        -- Partner-Manager P&L. A manager record is partner-specific, so
+        -- clear any manager that doesn't belong to the cost centre it is
+        -- paired with — on the saved CC-string mappings AND on the voucher
+        -- splits they were applied to. Re-matching (auto-match / next
+        -- import) reassigns correctly within the right partner.
+        UPDATE cc_string_mappings
+           SET manager_id = NULL
+         WHERE manager_id IS NOT NULL AND cost_centre_id IS NOT NULL
+           AND NOT EXISTS (
+                 SELECT 1 FROM managers m
+                  WHERE m.id = cc_string_mappings.manager_id
+                    AND m.cost_centre_id = cc_string_mappings.cost_centre_id);
+        UPDATE voucher_splits
+           SET manager_id = NULL
+         WHERE manager_id IS NOT NULL AND cost_centre_id IS NOT NULL
+           AND NOT EXISTS (
+                 SELECT 1 FROM managers m
+                  WHERE m.id = voucher_splits.manager_id
+                    AND m.cost_centre_id = voucher_splits.cost_centre_id);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

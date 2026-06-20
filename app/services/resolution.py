@@ -1504,11 +1504,12 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
     where the operator will confirm before saving.
 
     When ``managers_by_partner`` is given and the partner side has been
-    resolved, the manager side is matched against the partner-scoped
-    lookup FIRST. This disambiguates names like "Gaurav" that appear
-    in multiple partners' teams: "Kiran - Gaurav" → GS-KS (the only
-    Gaurav under Kiran), not GS-AM. If the partner-scoped match
-    misses, the global manager_lookup is the fallback.
+    resolved, the manager side is matched ONLY against that partner's
+    team. This disambiguates names like "Gaurav" that appear in multiple
+    partners' teams ("Kiran - Gaurav" → GS-KS, not GS-AM) and prevents a
+    manager from another partner being attached ("Jalpesh - Umesh" → JV
+    with NO manager, never "UV - AM"). The global lookup is used only when
+    no partner was resolved.
     """
     cleaned = norm(_HONORIFICS.sub("", (raw or "").strip()))
     if not cleaned:
@@ -1518,19 +1519,22 @@ def _match_one_cc_string(raw: str, partner_lookup: dict, manager_lookup: dict,
     best_score = 0
 
     def _match_mgr(text: str, partner_cc_id: int | None) -> int | None:
-        """Find a manager id for *text*, preferring the partner-scoped
-        lookup when we already know the partner."""
+        """Find a manager id for *text*, scoped to the resolved partner.
+
+        A manager record is partner-specific, so when the partner is known
+        the manager MUST come from that partner's team — we never fall back
+        to a global match that could pin a manager from a different partner
+        (e.g. "Jalpesh - Umesh" wrongly attaching "UV - AM" under JV). The
+        global lookup is only used when no partner was resolved at all.
+        """
         if (managers_by_partner is not None
                 and partner_cc_id is not None
                 and partner_cc_id in managers_by_partner):
             m_id, m_score = _best_match(
                 text, managers_by_partner[partner_cc_id])
-            if m_score >= min_score:
-                return m_id
+            return m_id if m_score >= min_score else None
         m_id, m_score = _best_match(text, manager_lookup)
-        if m_score >= min_score:
-            return m_id
-        return None
+        return m_id if m_score >= min_score else None
 
     # "X - Y" — try both as the partner side.
     parts = _NAME_SEP.split(cleaned, maxsplit=1)

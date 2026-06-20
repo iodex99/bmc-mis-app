@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.85** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.86** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,28 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.86 — Fix cross-partner manager (e.g. "UV - AM" showing under JV)
+
+A manager record is partner-specific, but a CC string like
+"Jalpesh - Umesh" was resolving partner JV and then — when no "Umesh"
+existed under JV — falling back to a GLOBAL manager match that grabbed
+"UV - AM" (Umesh under AM). That pinned "UV - AM" as a column under JV in
+the Partner-Manager P&L.
+
+* **Matcher** (``_match_mgr``): when the partner is resolved, the manager
+  is matched ONLY against that partner's team — no global fallback. So
+  "Jalpesh - Umesh" → JV with no manager; "Aakash - Umesh" → AM + UV-AM.
+  The per-partner "Gaurav" disambiguation is unchanged.
+* **Migration 15** cleans data already saved with the bug: any CC-string
+  mapping or voucher split whose manager doesn't belong to its cost
+  centre has the manager cleared (it drops to the partner's own column);
+  re-matching reassigns correctly within the right partner.
+
+Verified: cross-partner strings no longer attach a foreign manager,
+same-partner and ambiguous-name matches still resolve, the migration
+clears planted mismatches, and the PM matrix shows "UV - AM" only under
+AM.
 
 ### v0.3.85 — Partner-Manager P&L: salary now breaks down by manager
 
