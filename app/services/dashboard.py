@@ -529,6 +529,45 @@ def _employee_section(data: MISData, ch: _Charts) -> str:
               "per employee = Office indirect expenses ÷ active employees.")
 
 
+def _client_register_section(data: MISData, ch: _Charts) -> str:
+    reg = data.client_register
+    if not reg:
+        return ""
+    periods = [r["period"] for r in reg]
+    p_short = [report._month_short(p) for p in periods]
+
+    move_bar = ch.grouped_bar(
+        p_short,
+        [{"label": "Active", "data": [r["active_count"] for r in reg]},
+         {"label": "New", "data": [r["new_count"] for r in reg]},
+         {"label": "Lost", "data": [r["exit_count"] for r in reg]}],
+        unit="count", height=300)
+
+    # Active clients by cost centre, stacked per period.
+    cc_codes: list[str] = []
+    for r in reg:
+        for c in r["active"]:
+            if c["cc_code"] not in cc_codes:
+                cc_codes.append(c["cc_code"])
+    cc_codes.sort()
+    cc_ds = [{"label": code,
+              "data": [sum(1 for c in r["active"] if c["cc_code"] == code)
+                       for r in reg]} for code in cc_codes]
+    cc_bar = ch.grouped_bar(p_short, cc_ds, unit="count", stacked=True,
+                            height=300)
+
+    headers = ["Period", "Active Clients", "New", "Lost"]
+    rows = [[report._month_short(r["period"]), str(r["active_count"]),
+             str(r["new_count"]), str(r["exit_count"])] for r in reg]
+    return _section(
+        "Client Register", "clientreg",
+        _grid(_card("<h3>Client movement by period</h3>", move_bar),
+              _card("<h3>Active clients by cost centre</h3>", cc_bar)),
+        _card("<h3>By period</h3>", _table(headers, rows, {1, 2, 3})),
+        intro="Active = billed on a sales voucher in the period. New = first "
+              "billed this period; Lost = billed last month but not this.")
+
+
 # --- assets ------------------------------------------------------------------
 
 def _chartjs_tag() -> str:
@@ -800,13 +839,15 @@ def generate_dashboard(data: MISData, path: str | Path,
         _client_section(data, lbl, ch),
         _provision_section(data, lbl, ch),
         _employee_section(data, ch),
+        _client_register_section(data, ch),
     ]
     sections = [s for s in sections if s]
 
     nav_items = [("ccpl", "Cost Centre P&L"), ("budget", "Budget"),
                  ("entity", "Entity"), ("service", "Service"),
                  ("pm", "Partner–Manager"), ("clients", "Clients"),
-                 ("provisions", "Provisions"), ("employees", "Employees")]
+                 ("provisions", "Provisions"), ("employees", "Employees"),
+                 ("clientreg", "Client Register")]
     present = {s.split("id='", 1)[1].split("'", 1)[0] for s in sections}
     nav = "".join(f"<a href='#{a}'>{_esc(t)}</a>"
                   for a, t in nav_items if a in present)

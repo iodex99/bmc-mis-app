@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.86** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.87** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,28 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.87 — Client Register (Excel + dashboard)
+
+A client analogue of the Employee Register, in both views. Per period it
+shows the clients **billed** (appeared on a sales voucher), **new**
+clients (first billed this period vs the previous calendar month) and
+**lost** clients (billed last month, not this), grouped by the client's
+cost centre.
+
+* **calc** ``_build_client_register`` — distinct billed clients per
+  period; new/lost compare against the previous month read straight from
+  the DB (like the employee register's joiners/exits), so it works even
+  when last month isn't a selected period.
+* **Excel** "Client Register" sheet — summary (Active / New / Lost via
+  COUNTIFS over a per-(period, client) roster), the roster itself, and a
+  "Clients by cost centre" breakdown beside it.
+* **Dashboard** "Client Register" section — client movement by period,
+  active clients by cost centre (stacked), and a by-period table.
+
+Verified end-to-end on a churn scenario (a client billed last month but
+not this drops to Lost; a first-time client shows as New), with the
+cost-centre grouping correct in both views.
 
 ### v0.3.86 — Fix cross-partner manager (e.g. "UV - AM" showing under JV)
 

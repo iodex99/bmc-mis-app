@@ -162,6 +162,7 @@ def generate(data: MISData, path: str | Path,
     _sheet_service(wb, data, lbl)
     _sheet_client_billing(wb, data, lbl)
     _sheet_employee_register(wb, data, lbl)
+    _sheet_client_register(wb, data, lbl)
     if compare is not None:
         _sheet_comparatives(wb, data, compare, lbl, rows_pl)
     _sheet_revenue(wb, data, lbl)
@@ -1488,6 +1489,117 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
                       f'{rE},"Exit")',
                       border=True, align=_CENTER)
+                row += 1
+
+    for i, note in enumerate(notes):
+        _cell(ws, roster_last + 2 + i, 1, "• " + note, font=_SUB)
+
+    ws.freeze_panes = f"A{sum_first}"
+
+
+# --- Client Register ---------------------------------------------------------
+
+def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
+    """Clients billed per period, with new (first-billed) and lost (billed
+    last month, not this) clients — the client analogue of the Employee
+    Register. Summary COUNTIFS over a per-(period, client) roster, plus a
+    'Clients by cost centre' breakdown beside it."""
+    reg = data.client_register
+    if not reg:
+        return
+    ws = wb.create_sheet("Client Register")
+    ws.sheet_view.showGridLines = False
+    for col, w in (("A", 12), ("B", 32), ("C", 16), ("D", 12), ("E", 12)):
+        ws.column_dimensions[col].width = w
+
+    _cell(ws, 1, 1, "Client Register", font=_TITLE)
+    _cell(ws, 2, 1,
+          "Active = billed on a sales voucher in the period. New = first "
+          "billed this period (vs the previous month); Lost = billed last "
+          "month but not this. Grouped by the client's cost centre.",
+          font=_SUB)
+
+    # Pre-compute the roster so the summary COUNTIFS know their range.
+    roster_rows: list[list] = []
+    for r in reg:
+        for c in r["active"]:
+            roster_rows.append([
+                r["period"], c["name"], c["cc_code"], "Active",
+                "New" if c["is_new"] else ""])
+        for c in r["exits"]:
+            roster_rows.append([
+                r["period"], c["name"], c["cc_code"], "Lost", "Lost"])
+
+    sum_hrow = 4
+    sum_first = sum_hrow + 1
+    sum_last = sum_first + len(reg) - 1
+    roster_hrow = sum_last + 2
+    roster_first = roster_hrow + 1
+    roster_last = max(roster_first, roster_first + len(roster_rows) - 1)
+    rA = f"$A${roster_first}:$A${roster_last}"
+    rC = f"$C${roster_first}:$C${roster_last}"
+    rD = f"$D${roster_first}:$D${roster_last}"
+    rE = f"$E${roster_first}:$E${roster_last}"
+
+    # ---- 1. Summary -----------------------------------------------------
+    _header_row(ws, sum_hrow, [
+        "Period", "Prev Month", "Active Clients", "New Clients",
+        "Lost Clients"])
+    notes = []
+    for i, r in enumerate(reg):
+        row = sum_first + i
+        _cell(ws, row, 1, r["period"], border=True)
+        _cell(ws, row, 2, r["prev_period"]
+              + ("" if r["has_prev_data"] else "  (no data)"), border=True)
+        _cell(ws, row, 3, f'=COUNTIFS({rA},$A{row},{rD},"Active")',
+              font=_BOLD, border=True, align=_CENTER)
+        _cell(ws, row, 4, f'=COUNTIFS({rA},$A{row},{rE},"New")',
+              border=True, align=_CENTER)
+        _cell(ws, row, 5, f'=COUNTIFS({rA},$A{row},{rE},"Lost")',
+              border=True, align=_CENTER)
+        if not r["has_prev_data"]:
+            notes.append(
+                f"{r['period']}: no sales found for {r['prev_period']} — "
+                f"new/lost not computed for this period.")
+
+    # ---- 2. Roster -------------------------------------------------------
+    _header_row(ws, roster_hrow, [
+        "Period", "Client", "Cost Centre", "Status", "Movement"])
+    for i, row_vals in enumerate(roster_rows):
+        row = roster_first + i
+        for ci, val in enumerate(row_vals, start=1):
+            _cell(ws, row, ci, val, border=True,
+                  align=_CENTER if ci in (1, 4, 5) else None)
+
+    # ---- 3. Clients by cost centre (beside the summary) ------------------
+    cc_codes: list[str] = []
+    for rr in roster_rows:
+        if rr[2] not in cc_codes:
+            cc_codes.append(rr[2])
+    cc_codes.sort()
+    if cc_codes:
+        c0 = 7                                   # column G (one gap after E)
+        ccL = get_column_letter(c0)              # Cost Centre column
+        perL = get_column_letter(c0 + 1)         # Period column
+        for off, w in enumerate((16, 12, 10, 12, 10)):
+            ws.column_dimensions[get_column_letter(c0 + off)].width = w
+        _cell(ws, sum_hrow - 1, c0, "Clients by cost centre", font=_BOLD)
+        _header_row(ws, sum_hrow, [
+            "Cost Centre", "Period", "Active", "New", "Lost"], start_col=c0)
+        row = sum_hrow + 1
+        for code in cc_codes:
+            for r in reg:
+                _cell(ws, row, c0, code, border=True)
+                _cell(ws, row, c0 + 1, r["period"], border=True, align=_CENTER)
+                _cell(ws, row, c0 + 2,
+                      f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
+                      f'{rD},"Active")', border=True, align=_CENTER)
+                _cell(ws, row, c0 + 3,
+                      f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
+                      f'{rE},"New")', border=True, align=_CENTER)
+                _cell(ws, row, c0 + 4,
+                      f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
+                      f'{rE},"Lost")', border=True, align=_CENTER)
                 row += 1
 
     for i, note in enumerate(notes):

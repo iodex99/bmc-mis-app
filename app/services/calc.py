@@ -113,6 +113,11 @@ class MISData:
     # reporting month — direct costs the cost centre expects but hasn't
     # yet incurred. See :func:`_build_provision_facts`.
     provision_facts: list[dict] = field(default_factory=list)
+    # One entry per selected period: clients billed that period, with new
+    # (first-billed) and lost (billed last month, not this) clients, by
+    # cost centre. The client analogue of the employee register. See
+    # :func:`_build_client_register`.
+    client_register: list[dict] = field(default_factory=list)
     # One entry per selected period: active-employee roster (from the
     # timesheet), joiners/exits vs the previous month, and the office
     # overhead computation (indirect pool ÷ active headcount). Feeds the
@@ -203,6 +208,7 @@ def compute(options: MISOptions) -> MISData:
     _build_labour_facts(data, options, masters)
     _build_reimbursement_facts(data, options, masters)
     _build_provision_facts(data, options, masters)
+    _build_client_register(data, options, masters)
     _roll_up(data, masters)
     return data
 
@@ -447,6 +453,76 @@ def _build_employee_register(data: MISData, options: MISOptions,
             data.warnings.append(
                 f"{p}: office overhead pool of {pool:,.0f} could not be "
                 f"allocated — no active partner-team employees in the period.")
+
+
+def _build_client_register(data: MISData, options: MISOptions,
+                            masters: dict) -> None:
+    """Client analogue of the employee register: who was billed each period,
+    plus new (first-billed) and lost (billed last month, not this) clients,
+    grouped by cost centre.
+
+    "Billed" = the client appears on a sales voucher in the period (resolved
+    ``client_id``). New / lost compare against the PREVIOUS calendar month,
+    read straight from the DB so it doesn't have to be a selected period —
+    exactly how the employee register handles joiners / exits.
+    """
+    clients = masters["clients"]
+    cost_centres = masters["cost_centres"]
+
+    periods = sorted(options.periods)
+    prev_map = {p: _prev_period(p) for p in periods}
+    all_periods = sorted(set(periods) | set(prev_map.values()))
+    ph = _placeholders(all_periods)
+    with transaction() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT period, client_id FROM vouchers "
+            f"WHERE kind = 'sales' AND client_id IS NOT NULL "
+            f"AND period IN ({ph})",
+            all_periods).fetchall()
+
+    billed: dict[str, set] = {p: set() for p in all_periods}
+    for r in rows:
+        billed.setdefault(r["period"], set()).add(r["client_id"])
+
+    def cc_code(cc_id):
+        return (cost_centres.get(cc_id) or {}).get("code") or "—"
+
+    def info(cid):
+        cl = clients.get(cid) or {}
+        cc_id = cl.get("cost_centre_id")
+        return {"client_id": cid,
+                "name": cl.get("canonical_name") or f"Client #{cid}",
+                "cost_centre_id": cc_id, "cc_code": cc_code(cc_id)}
+
+    def name_key(cid):
+        return ((clients.get(cid) or {}).get("canonical_name") or "").lower()
+
+    for p in periods:
+        prev_p = prev_map[p]
+        cur = billed.get(p, set())
+        prev = billed.get(prev_p, set())
+        has_prev = bool(prev)
+        active = []
+        for cid in sorted(cur, key=name_key):
+            rec = info(cid)
+            # Only meaningful when we actually hold last month's billing —
+            # otherwise everyone would read as "new" on the first run.
+            rec["is_new"] = has_prev and cid not in prev
+            active.append(rec)
+        exits = []
+        if has_prev:
+            for cid in sorted(prev - cur, key=name_key):
+                exits.append(info(cid))
+        data.client_register.append({
+            "period": p,
+            "prev_period": prev_p,
+            "has_prev_data": has_prev,
+            "active": active,
+            "exits": exits,
+            "active_count": len(active),
+            "new_count": sum(1 for a in active if a["is_new"]),
+            "exit_count": len(exits),
+        })
 
 
 # --- labour facts ------------------------------------------------------------
