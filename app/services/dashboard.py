@@ -539,8 +539,7 @@ def _client_register_section(data: MISData, ch: _Charts) -> str:
     move_bar = ch.grouped_bar(
         p_short,
         [{"label": "Active", "data": [r["active_count"] for r in reg]},
-         {"label": "New", "data": [r["new_count"] for r in reg]},
-         {"label": "Lost", "data": [r["exit_count"] for r in reg]}],
+         {"label": "New", "data": [r["new_count"] for r in reg]}],
         unit="count", height=300)
 
     # Active clients by cost centre, stacked per period.
@@ -556,16 +555,17 @@ def _client_register_section(data: MISData, ch: _Charts) -> str:
     cc_bar = ch.grouped_bar(p_short, cc_ds, unit="count", stacked=True,
                             height=300)
 
-    headers = ["Period", "Active Clients", "New", "Lost"]
+    headers = ["Period", "Active Clients", "New Clients"]
     rows = [[report._month_short(r["period"]), str(r["active_count"]),
-             str(r["new_count"]), str(r["exit_count"])] for r in reg]
+             str(r["new_count"])] for r in reg]
     return _section(
         "Client Register", "clientreg",
-        _grid(_card("<h3>Client movement by period</h3>", move_bar),
+        _grid(_card("<h3>Active &amp; new clients by period</h3>", move_bar),
               _card("<h3>Active clients by cost centre</h3>", cc_bar)),
-        _card("<h3>By period</h3>", _table(headers, rows, {1, 2, 3})),
-        intro="Active = billed on a sales voucher in the period. New = first "
-              "billed this period; Lost = billed last month but not this.")
+        _card("<h3>By period</h3>", _table(headers, rows, {1, 2})),
+        intro="Active = billed on a sales voucher in the period. New = billed "
+              "for the first time ever (clients bill irregularly, so a "
+              "month's absence isn't treated as lost).")
 
 
 # --- assets ------------------------------------------------------------------

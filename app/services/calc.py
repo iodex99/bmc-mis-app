@@ -458,29 +458,36 @@ def _build_employee_register(data: MISData, options: MISOptions,
 def _build_client_register(data: MISData, options: MISOptions,
                             masters: dict) -> None:
     """Client analogue of the employee register: who was billed each period,
-    plus new (first-billed) and lost (billed last month, not this) clients,
-    grouped by cost centre.
+    and which clients are NEW (billed for the first time ever), grouped by
+    cost centre.
 
     "Billed" = the client appears on a sales voucher in the period (resolved
-    ``client_id``). New / lost compare against the PREVIOUS calendar month,
-    read straight from the DB so it doesn't have to be a selected period —
-    exactly how the employee register handles joiners / exits.
+    ``client_id``). A client is **new** only in the period of their
+    first-ever billing across ALL history the system holds — clients bill
+    irregularly, so a month's absence does NOT mean they're lost, and the
+    system keeps remembering every past client. There is therefore no
+    "lost" concept; only additions are flagged.
     """
     clients = masters["clients"]
     cost_centres = masters["cost_centres"]
 
     periods = sorted(options.periods)
-    prev_map = {p: _prev_period(p) for p in periods}
-    all_periods = sorted(set(periods) | set(prev_map.values()))
-    ph = _placeholders(all_periods)
+    ph = _placeholders(periods)
     with transaction() as conn:
         rows = conn.execute(
             f"SELECT DISTINCT period, client_id FROM vouchers "
             f"WHERE kind = 'sales' AND client_id IS NOT NULL "
             f"AND period IN ({ph})",
-            all_periods).fetchall()
+            periods).fetchall()
+        # First-ever billing month per client across ALL history (no period
+        # filter) — a client counts as "new" only in that month.
+        first_rows = conn.execute(
+            "SELECT client_id, MIN(period) AS first_period FROM vouchers "
+            "WHERE kind = 'sales' AND client_id IS NOT NULL AND period <> '' "
+            "GROUP BY client_id").fetchall()
+    first_billed = {r["client_id"]: r["first_period"] for r in first_rows}
 
-    billed: dict[str, set] = {p: set() for p in all_periods}
+    billed: dict[str, set] = {p: set() for p in periods}
     for r in rows:
         billed.setdefault(r["period"], set()).add(r["client_id"])
 
@@ -498,30 +505,16 @@ def _build_client_register(data: MISData, options: MISOptions,
         return ((clients.get(cid) or {}).get("canonical_name") or "").lower()
 
     for p in periods:
-        prev_p = prev_map[p]
-        cur = billed.get(p, set())
-        prev = billed.get(prev_p, set())
-        has_prev = bool(prev)
         active = []
-        for cid in sorted(cur, key=name_key):
+        for cid in sorted(billed.get(p, set()), key=name_key):
             rec = info(cid)
-            # Only meaningful when we actually hold last month's billing —
-            # otherwise everyone would read as "new" on the first run.
-            rec["is_new"] = has_prev and cid not in prev
+            rec["is_new"] = (first_billed.get(cid) == p)
             active.append(rec)
-        exits = []
-        if has_prev:
-            for cid in sorted(prev - cur, key=name_key):
-                exits.append(info(cid))
         data.client_register.append({
             "period": p,
-            "prev_period": prev_p,
-            "has_prev_data": has_prev,
             "active": active,
-            "exits": exits,
             "active_count": len(active),
             "new_count": sum(1 for a in active if a["is_new"]),
-            "exit_count": len(exits),
         })
 
 

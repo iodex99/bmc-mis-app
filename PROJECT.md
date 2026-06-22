@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.87** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.88** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,27 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.88 — Client Register: additions only, no "lost"
+
+Refined the v0.3.87 Client Register per operator feedback: clients bill
+irregularly, so a month's absence does NOT mean the client is lost. The
+"Lost" concept is removed everywhere. **New** now means billed for the
+**first time ever** (MIN billing month across ALL history the system
+holds), not just vs the previous month — so a returning client is never
+re-flagged, and there's no prev-month dependency.
+
+* **calc** — ``_build_client_register`` computes each client's first-ever
+  billing month from the full voucher history; a client is New only in
+  that month. No exits/lost.
+* **Excel** "Client Register" — columns now Period / Active / New (and
+  the by-cost-centre block Active / New); the roster drops Status/Lost.
+* **Dashboard** — the movement chart shows Active + New only; table drops
+  Lost.
+
+Verified: a client billed last month but not this simply doesn't appear
+in this month's list (never "lost"); a returning client isn't flagged
+New; first-time clients are. Single- and multi-period runs both correct.
 
 ### v0.3.87 — Client Register (Excel + dashboard)
 
