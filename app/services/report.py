@@ -452,6 +452,8 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, r, col, formula, font=_BOLD, fill=_TOTAL_FILL,
               fmt=INR, border=True)
 
+    _subtotal_filter(ws, hrow, body_start, last_body,
+                     list(range(3, avg_col + 1)), last_col=avg_col)
     ws.freeze_panes = f"D{body_start}"
 
 
@@ -462,11 +464,13 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     ws.sheet_view.showGridLines = False
     # v0.3.89: Revenue split into sales income + Reimbursements (OPE)
     # recovery; Direct Expense split into voucher expenses + Reimbursements
-    # outlays. Target / Variance columns removed.
+    # outlays. v0.3.92: explicit Total Income column (Revenue + Reimb OPE);
+    # Profit = Total Income − Total Cost; Profit % = Profit ÷ Revenue.
     headers = ["Code", "Cost Centre", "Revenue", "Reimbursements (OPE)",
-               "Direct Expense", "Reimbursements", "Salary Cost",
-               "Allocated Overhead", "Total Cost", "Profit", "Profit %"]
-    widths = [10, 26, 16, 18, 16, 16, 16, 18, 16, 16, 11]
+               "Total Income", "Direct Expense", "Reimbursements",
+               "Salary Cost", "Allocated Overhead", "Total Cost", "Profit",
+               "Profit %"]
+    widths = [10, 26, 16, 18, 16, 16, 16, 16, 18, 16, 16, 11]
     for i, w in enumerate(widths):
         ws.column_dimensions[get_column_letter(1 + i)].width = w
 
@@ -507,32 +511,34 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # Reimbursements (OPE) recovery above.
         _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})-D{r}",
               fmt=INR, border=True)
+        # Total Income = Revenue + Reimbursements (OPE).
+        _cell(ws, r, 5, f"=C{r}+D{r}", fmt=INR, border=True)
         # Direct Expense: voucher-driven expenses + outstanding provisions
         # (Provisions Remaining=G by CostCentre=C). Expenses Amount=J, CC=E.
-        _cell(ws, r, 5,
+        _cell(ws, r, 6,
               f"=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r})"
               f"+SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
               fmt=INR, border=True)
         # Reimbursements (cost): the reimbursement-sheet outlays booked to
-        # this CC (Reimbursements Amount=G, CC=C).
-        _cell(ws, r, 6, f"=SUMIFS({reimb}!$H:$H,{reimb}!$C:$C,$A{r})",
+        # this CC (Reimbursements Amount=H, CC=C).
+        _cell(ws, r, 7, f"=SUMIFS({reimb}!$H:$H,{reimb}!$C:$C,$A{r})",
               fmt=INR, border=True)
         # Salary Cost: Salary-type rows of the Salary sheet.
-        _cell(ws, r, 7,
+        _cell(ws, r, 8,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
               f'{lab}!$J:$J,"Salary")',
               fmt=INR, border=True)
         # Allocated Overhead: Overhead-type rows of the Salary sheet.
-        _cell(ws, r, 8,
+        _cell(ws, r, 9,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
               f'{lab}!$J:$J,"Overhead")',
               fmt=INR, border=True)
         # Total Cost = Direct + Reimbursements + Salary + Overhead.
-        _cell(ws, r, 9, f"=E{r}+F{r}+G{r}+H{r}", fmt=INR, border=True)
-        # Profit = total income (Revenue + Reimb OPE) − Total Cost.
-        _cell(ws, r, 10, f"=C{r}+D{r}-I{r}", fmt=INR, border=True)
-        # Profit % = Profit ÷ total income.
-        _cell(ws, r, 11, f"=IF((C{r}+D{r})=0,0,J{r}/(C{r}+D{r}))",
+        _cell(ws, r, 10, f"=F{r}+G{r}+H{r}+I{r}", fmt=INR, border=True)
+        # Profit = Total Income − Total Cost.
+        _cell(ws, r, 11, f"=E{r}-J{r}", fmt=INR, border=True)
+        # Profit % = Profit ÷ Revenue (sales income only, NOT reimbursements).
+        _cell(ws, r, 12, f"=IF(C{r}=0,0,K{r}/C{r})",
               fmt=PCT, border=True, align=_CENTER)
 
     row_of: dict[str, int] = {}
@@ -553,21 +559,25 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     # Total row.
     _cell(ws, total_row, 1, "", fill=_TOTAL_FILL)
     _cell(ws, total_row, 2, "TOTAL", font=_BOLD, fill=_TOTAL_FILL, border=True)
-    for col in range(3, 12):
+    for col in range(3, 13):
         L = get_column_letter(col)
-        fmt = PCT if col == 11 else INR
-        if col == 11:
-            formula = (f"=IF((C{total_row}+D{total_row})=0,0,"
-                       f"J{total_row}/(C{total_row}+D{total_row}))")
+        fmt = PCT if col == 12 else INR
+        if col == 12:
+            formula = (f"=IF(C{total_row}=0,0,"
+                       f"K{total_row}/C{total_row})")
         else:
             formula = f"=SUM({L}{first}:{L}{last})"
         _cell(ws, total_row, col, formula, font=_BOLD, fill=_TOTAL_FILL,
               fmt=fmt, border=True)
 
+    # Filtered-subtotal row on top + AutoFilter over the CC rows (cols 3–11
+    # are amounts; the Profit % column is excluded).
+    _subtotal_filter(ws, hrow, first, last, list(range(3, 12)), last_col=12)
     ws.freeze_panes = f"A{first}"
     return {"first": first, "last": last, "total_row": total_row,
-            "col_revenue": "C", "col_reimb_income": "D", "col_totalcost": "I",
-            "col_profit": "J", "col_margin": "K", "row_of": row_of}
+            "col_revenue": "C", "col_reimb_income": "D",
+            "col_total_income": "E", "col_totalcost": "J",
+            "col_profit": "K", "col_margin": "L", "row_of": row_of}
 
 
 # --- Partner – Manager P&L (matrix layout) ----------------------------------
@@ -796,8 +806,9 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                 cell_fmt = PCT if kind.endswith("_pct") else INR
                 if is_total_col and kind == "gross_pct":
                     # Recompute the ratio at the partner level — summing
-                    # percentages doesn't make sense.
-                    inc_r = rows_by_kind["income_sum"]
+                    # percentages doesn't make sense. Denominator is SALES
+                    # (income only), not Total Income (v0.3.92).
+                    inc_r = rows_by_kind["sales"]
                     gross_r = rows_by_kind["gross"]
                     L = get_column_letter(col)
                     formula = (f"=IF({L}{inc_r}=0,0,"
@@ -818,7 +829,8 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     formula = (f"={L}{gross_r}-{L}{overhead_r}"
                                f"-{L}{indirect_r}")
                 elif is_total_col and kind == "net_pct":
-                    inc_r = rows_by_kind["income_sum"]
+                    # Denominator is SALES (income only), not Total Income.
+                    inc_r = rows_by_kind["sales"]
                     net_r = rows_by_kind["net"]
                     L = get_column_letter(col)
                     formula = (f"=IF({L}{inc_r}=0,0,"
@@ -899,7 +911,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     formula = (f"={get_column_letter(col)}{inc_r}-"
                                f"{get_column_letter(col)}{cost_r}")
                 elif kind == "gross_pct":
-                    inc_r = rows_by_kind["income_sum"]
+                    inc_r = rows_by_kind["sales"]   # % on sales income only
                     gross_r = rows_by_kind["gross"]
                     L = get_column_letter(col)
                     formula = (f"=IF({L}{inc_r}=0,0,"
@@ -913,12 +925,12 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         # MIS Total column — sum across each partner's "Total" sub-column.
         L = get_column_letter(mis_total_col)
         if kind == "gross_pct":
-            inc_r = rows_by_kind["income_sum"]
+            inc_r = rows_by_kind["sales"]   # % on sales income only (v0.3.92)
             gross_r = rows_by_kind["gross"]
             mis_formula = (f"=IF({L}{inc_r}=0,0,"
                            f"{L}{gross_r}/{L}{inc_r})")
         elif kind == "net_pct":
-            inc_r = rows_by_kind["income_sum"]
+            inc_r = rows_by_kind["sales"]
             net_r = rows_by_kind["net"]
             mis_formula = (f"=IF({L}{inc_r}=0,0,"
                            f"{L}{net_r}/{L}{inc_r})")
@@ -1042,6 +1054,9 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
             _cell(ws, r, col,
                   f"=SUM({L}{body_start}:{L}{last_body})",
                   font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
+        _subtotal_filter(ws, hrow, body_start, last_body,
+                         list(range(2, 3 + len(periods))),
+                         last_col=2 + len(periods))
 
     ws.freeze_panes = f"C{body_start}"
 
@@ -1085,16 +1100,42 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
             L = get_column_letter(col)
             _cell(ws, r, col, f"=SUM({L}{first}:{L}{r - 1})", font=_BOLD,
                   fill=_TOTAL_FILL, fmt=INR, border=True)
+        _subtotal_filter(ws, hrow, first, r - 1, [2, 3, 4], last_col=4)
 
 
 # --- data sheets -------------------------------------------------------------
 
+# Data sheets carry a filtered-SUBTOTAL row on top (row 1), the header on
+# row 2, and data from row 3 — so applying a column filter shows the live
+# sum of the visible rows in the top cell. Full-column SUMIFS elsewhere are
+# unaffected: their criteria columns are text, so the subtotal/header rows
+# never match a criterion and are excluded from the sum.
+_DATA_FIRST_ROW = 3
+
+
 def _write_data_sheet(wb, name, headers, widths, rows):
     ws = wb.create_sheet(name)
-    _header_row(ws, 1, headers)
+    ncols = len(headers)
+    # Detect amount/numeric columns: a column whose data cells are all
+    # numbers or formula strings (no plain text). Those get a SUBTOTAL on top.
+    has_num = [False] * ncols
+    has_text = [False] * ncols
+    for row in rows:
+        for ci in range(ncols):
+            val = row[ci] if ci < len(row) else None
+            if val in (None, ""):
+                continue
+            if isinstance(val, (int, float)) or (
+                    isinstance(val, str) and val.startswith("=")):
+                has_num[ci] = True
+            else:
+                has_text[ci] = True
+    numeric = [has_num[i] and not has_text[i] for i in range(ncols)]
+
+    _header_row(ws, 2, headers)
     for i, w in enumerate(widths):
         ws.column_dimensions[get_column_letter(1 + i)].width = w
-    for ri, row in enumerate(rows, start=2):
+    for ri, row in enumerate(rows, start=_DATA_FIRST_ROW):
         for ci, val in enumerate(row, start=1):
             c = ws.cell(row=ri, column=ci, value=val)
             c.font = _NORMAL
@@ -1104,9 +1145,45 @@ def _write_data_sheet(wb, name, headers, widths, rows):
                 # Formula cells (e.g. the Salary sheet's live Overhead
                 # amounts) render with the money format.
                 c.number_format = INR
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
+
+    data_last = len(rows) + _DATA_FIRST_ROW - 1
+    if rows:
+        label_done = False
+        for ci in range(ncols):
+            L = get_column_letter(ci + 1)
+            if numeric[ci]:
+                cell = ws.cell(
+                    row=1, column=ci + 1,
+                    value=f"=SUBTOTAL(109,{L}{_DATA_FIRST_ROW}:{L}{data_last})")
+                cell.font = _BOLD
+                cell.fill = _TOTAL_FILL
+                cell.number_format = INR
+            elif not label_done:
+                _cell(ws, 1, ci + 1, "Subtotal (filtered) →", font=_BOLD)
+                label_done = True
+    ws.freeze_panes = f"A{_DATA_FIRST_ROW}"
+    ws.auto_filter.ref = f"A2:{get_column_letter(ncols)}{max(2, data_last)}"
     return ws
+
+
+def _subtotal_filter(ws, hrow, first_data, last_data, amount_cols, last_col,
+                     label_col=1):
+    """Add a filtered-SUBTOTAL row just above a summary table's header and
+    turn the header + body into an AutoFilter, so filtering the rows shows
+    the live sum of the visible rows in that top cell. ``amount_cols`` are
+    the 1-based columns to subtotal (percentage columns are skipped). The
+    table's own bottom TOTAL row stays a plain SUM (all rows)."""
+    if last_data < first_data:
+        return
+    srow = hrow - 1
+    _cell(ws, srow, label_col, "Subtotal (filtered) →", font=_BOLD)
+    for col in amount_cols:
+        L = get_column_letter(col)
+        _cell(ws, srow, col,
+              f"=SUBTOTAL(109,{L}{first_data}:{L}{last_data})",
+              font=_BOLD, fill=_TOTAL_FILL, fmt=INR)
+    ws.auto_filter.ref = (f"{get_column_letter(label_col)}{hrow}:"
+                          f"{get_column_letter(last_col)}{last_data}")
 
 
 def _client_or_party(lbl: dict, f: dict) -> str:
@@ -1325,7 +1402,7 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
              f["employee_name"], _client_label(f),
              _cc_label(f.get("client_cost_centre_id")),
              _cc_label(f.get("home_cost_centre_id")),
-             round(f["hours"], 2), _amount(f, i + 2),
+             round(f["hours"], 2), _amount(f, i + _DATA_FIRST_ROW),
              "Overhead" if f.get("is_overhead") else "Salary",
              _billable(f),
              lbl["mgr"].get(f.get("manager_id"), "(unassigned)")]
@@ -1629,13 +1706,15 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
         name_cell = f"{pl}!B{plrow}"
         _cell(ws, r, 1, code, border=True)
         _cell(ws, r, 2, f"={name_cell}", border=True)
-        # Current revenue = total billed (Revenue + Reimbursements OPE) to
+        # Current revenue = Total Income (Revenue + Reimbursements OPE) to
         # match the comparison side, which sums all Revenue-sheet rows.
-        _cell(ws, r, 3, f"={pl}!C{plrow}+{pl}!D{plrow}", fmt=INR, border=True)
+        _cell(ws, r, 3, f"={pl}!{rows_pl['col_total_income']}{plrow}",
+              fmt=INR, border=True)
         _cell(ws, r, 4, f"=SUMIFS({rev_c}!$H:$H,{rev_c}!$D:$D,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 5, f"=C{r}-D{r}", fmt=INR, border=True)
-        _cell(ws, r, 6, f"={pl}!J{plrow}", fmt=INR, border=True)
+        _cell(ws, r, 6, f"={pl}!{rows_pl['col_profit']}{plrow}",
+              fmt=INR, border=True)
         # Comparison profit = comp revenue − comp direct − comp labour
         # (labour includes the Overhead-type rows, which carry the
         # per-employee office allocation + the Office offset, so the
@@ -1658,3 +1737,4 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
               fill=_TOTAL_FILL, fmt=INR, border=True)
     _cell(ws, r, 9, f"=IF(G{r}=0,\"\",(F{r}-G{r})/ABS(G{r}))", font=_BOLD,
           fill=_TOTAL_FILL, fmt=PCT, border=True, align=_CENTER)
+    _subtotal_filter(ws, hrow, first, last, [3, 4, 5, 6, 7, 8], last_col=9)

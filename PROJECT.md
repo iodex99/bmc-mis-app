@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.91** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.92** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,33 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.92 — Total Income column, sales-based %, filtered subtotals on top
+
+1. **Cost Centre P&L — Total Income column.** New "Total Income" column
+   (= Revenue + Reimbursements (OPE)). Profit is now Total Income − Total
+   Cost; Profit % is Profit ÷ **Revenue** (sales income only, excluding the
+   reimbursement recovery). Mirrored in the dashboard CC table; the Excel
+   Dashboard tiles and Comparatives sheet were repointed to the shifted
+   columns.
+2. **Partner-Manager P&L — Gross/Net % on sales.** Both percentages now
+   divide by Sales (Income), not Total Income, at every level (per-manager
+   total, partner total, MIS total).
+3. **Filtered subtotals on top of every table.** Each amount column now
+   carries a ``=SUBTOTAL(109,…)`` cell above the header, and the table is
+   an AutoFilter — so when the operator filters, that top cell shows the
+   live sum of the visible rows. Applied to the data sheets (Revenue,
+   Expenses, Salary, Reimbursements, Provisions — header moved to row 2,
+   data to row 3 via a shared ``_DATA_FIRST_ROW``) and the summary sheets
+   (Cost Centre P&L, Entity, Service, Budget, Client Billing,
+   Comparatives). The bottom TOTAL rows stay plain SUMs. Full-column
+   SUMIFS are unaffected because their criteria columns are text (the
+   subtotal/header rows never match a criterion).
+
+Verified end-to-end: Total Income / Profit / Profit % formulas, PM
+gross/net % denominators, subtotal rows + autofilters on data and summary
+sheets, the Salary sheet's live overhead formulas still align after the
+row shift, and a comparison-period workbook + dashboard render cleanly.
 
 ### v0.3.91 — Reimbursements sheet: add Employee CC column
 

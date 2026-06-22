@@ -224,25 +224,28 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
     # Reimbursements (OPE) on the income side; Direct Expense +
     # Reimbursements on the cost side; no Target / Variance.
     headers = ["Code", "Cost Centre", "Revenue", "Reimb. (OPE)",
-               "Direct Exp.", "Reimb.", "Salary", "Overhead", "Total Cost",
-               "Profit", "Margin"]
-    right = set(range(2, 11))
+               "Total Income", "Direct Exp.", "Reimb.", "Salary", "Overhead",
+               "Total Cost", "Profit", "Margin"]
+    right = set(range(2, 12))
     rows = []
     for c in ccs:
         rows.append([
             _esc(c.code), _esc(c.name), _money(c.revenue),
-            _money(c.reimbursement_income), _money(c.direct_expense),
-            _money(c.reimbursement_expense), _money(c.labour),
-            _money(c.allocated_overhead), _money(c.total_cost),
-            _money(c.profit), _pct(c.profit, c.total_income)])
-    total = ["", "TOTAL", _money(sum(c.revenue for c in ccs)),
+            _money(c.reimbursement_income), _money(c.total_income),
+            _money(c.direct_expense), _money(c.reimbursement_expense),
+            _money(c.labour), _money(c.allocated_overhead),
+            _money(c.total_cost), _money(c.profit),
+            _pct(c.profit, c.revenue)])   # margin on sales income only
+    income_total = sum(c.revenue for c in ccs)
+    total = ["", "TOTAL", _money(income_total),
              _money(sum(c.reimbursement_income for c in ccs)),
+             _money(sum(c.total_income for c in ccs)),
              _money(sum(c.direct_expense for c in ccs)),
              _money(sum(c.reimbursement_expense for c in ccs)),
              _money(sum(c.labour for c in ccs)),
              _money(sum(c.allocated_overhead for c in ccs)),
              _money(data.total_cost), _money(data.total_profit),
-             _pct(data.total_profit, data.total_revenue)]
+             _pct(data.total_profit, income_total)]
 
     return _section(
         "Cost Centre P&L", "ccpl",
