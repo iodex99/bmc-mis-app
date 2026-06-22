@@ -865,6 +865,9 @@ class VoucherTab(QWidget):
             rows_body,
             action_label=labels,
             action_callback=self._edit_row,
+            secondary_label="Delete",
+            secondary_callback=self._delete_row,
+            secondary_object_name="rowActionDanger",
             status_for_row=status_for,
             stretch_col=2,
         )
@@ -903,6 +906,23 @@ class VoucherTab(QWidget):
         dlg = SplitEditorDialog(voucher, self)
         if dlg.exec() == SplitEditorDialog.Accepted:
             self.reload()
+
+    def _delete_row(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        v = self._rows[idx]
+        party = v.get("client_name") or v.get("party_name") or "—"
+        if QMessageBox.warning(
+                self, "Delete this voucher?",
+                f"Permanently delete voucher <b>{v.get('vch_no') or '—'}</b> "
+                f"({v['kind']}, {party}, {fmt_inr(v['net_amount'], 0)}) and "
+                "all its splits?<br><br>The MIS will no longer include it. "
+                "This cannot be undone.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        vsvc.delete_voucher(v["id"])
+        self.reload()
 
 
 # --- the page ----------------------------------------------------------------

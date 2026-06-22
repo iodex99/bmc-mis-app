@@ -62,6 +62,13 @@ def save_splits(voucher_id: int, splits: list[dict]) -> None:
                  s.get("manager_id"), s.get("service_id"), s.get("note")))
 
 
+def delete_voucher(voucher_id: int) -> None:
+    """Permanently delete a voucher and its splits (splits cascade via the
+    voucher_splits → vouchers FK ON DELETE CASCADE)."""
+    with transaction() as conn:
+        conn.execute("DELETE FROM vouchers WHERE id = ?", (voucher_id,))
+
+
 def split_stats() -> dict:
     """Counts used by the Review dashboard."""
     with transaction() as conn:

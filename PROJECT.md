@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.93** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.94** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,13 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.94 — Review & Map ▸ Vouchers: Delete action
+
+Each voucher row in the Review & Map Vouchers tab now has a **Delete**
+button (alongside "Edit splits →"), matching the Clients / Employees /
+Cost Centres tabs. It confirms, then permanently removes the voucher; its
+splits cascade via the FK. New ``vouchers.delete_voucher`` service.
 
 ### v0.3.93 — Partner-Manager P&L: Net Profit / Net % now fill the manager columns
 
