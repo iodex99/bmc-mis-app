@@ -25,6 +25,7 @@ from .calc import (
     expense_type,
     financial_year,
     normalize_fy,
+    revenue_category,
 )
 from .resolution import norm
 
@@ -69,22 +70,11 @@ _KPI_FILL = PatternFill("solid", fgColor=GREY)
 # Used to populate the Category column on the Revenue data sheet so the
 # Partner-Manager P&L can split "Sales" from "Reimb & OPE" via SUMIFS.
 
-_REIMB_KEYWORDS = ("reimbur",)
-_OPE_KEYWORDS = ("out of pocket", "out-of-pocket", " ope", "oop")
-_OTHER_KEYWORDS = ("round off", "roundoff", "round-off")
-
 
 def _service_category(name: str) -> str:
-    if not name:
-        return "Income"
-    s = name.lower()
-    if any(k in s for k in _REIMB_KEYWORDS):
-        return "Reimbursement"
-    if any(k in s for k in _OPE_KEYWORDS) or s.strip() in ("ope",):
-        return "OPE"
-    if any(k in s for k in _OTHER_KEYWORDS):
-        return "Other"
-    return "Income"
+    # Canonical classifier lives in calc.revenue_category so the Excel
+    # Category column and the calc roll-ups never diverge.
+    return revenue_category(name)
 _thin = Side(style="thin", color="D2D6DE")
 _BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 _CENTER = Alignment(horizontal="center", vertical="center")
@@ -244,7 +234,7 @@ def _sheet_dashboard(wb: Workbook, data: MISData) -> None:
 
     # KPI tiles — values filled later by _link_dashboard.
     tiles = [("Total Revenue", 5, 2), ("Total Cost", 5, 4),
-             ("Net Profit", 8, 2), ("Total Target", 8, 4)]
+             ("Net Profit", 8, 2), ("Net Margin", 8, 4)]
     for label, r, c in tiles:
         _cell(ws, r, c, label, font=_BOLD, fill=_KPI_FILL)
         ws.cell(row=r, column=c + 1).fill = _KPI_FILL
@@ -255,23 +245,27 @@ def _sheet_dashboard(wb: Workbook, data: MISData) -> None:
         kpi.alignment = Alignment(horizontal="left", vertical="center")
 
     _cell(ws, 12, 2, "See 'Cost Centre P&L' for the full partner-wise "
-          "profitability and target comparison.", font=_SUB)
+          "profitability. Total Revenue includes Reimbursements (OPE).",
+          font=_SUB)
 
 
 def _link_dashboard(wb: Workbook, rows_pl: dict) -> None:
     ws = wb["Dashboard"]
     pl = _q("Cost Centre P&L")
     total = rows_pl["total_row"]
+    rev = rows_pl["col_revenue"]
+    reimb = rows_pl["col_reimb_income"]
+    # (row, col): (formula, number_format)
     mapping = {
-        (6, 2): f"={pl}!{rows_pl['col_revenue']}{total}",
-        (6, 4): f"={pl}!{rows_pl['col_totalcost']}{total}",
-        (9, 2): f"={pl}!{rows_pl['col_profit']}{total}",
-        (9, 4): f"={pl}!{rows_pl['col_target']}{total}",
+        (6, 2): (f"={pl}!{rev}{total}+{pl}!{reimb}{total}", INR),
+        (6, 4): (f"={pl}!{rows_pl['col_totalcost']}{total}", INR),
+        (9, 2): (f"={pl}!{rows_pl['col_profit']}{total}", INR),
+        (9, 4): (f"={pl}!{rows_pl['col_margin']}{total}", PCT),
     }
-    for (r, c), formula in mapping.items():
+    for (r, c), (formula, fmt) in mapping.items():
         cell = ws.cell(row=r, column=c, value=formula)
         cell.font = _KPI
-        cell.number_format = INR
+        cell.number_format = fmt
 
 
 # --- Budget vs Monthly Sales -------------------------------------------------
@@ -323,16 +317,21 @@ def budget_monthly_data(data: MISData, lbl: dict) -> dict | None:
         return None
 
     placeholders = ','.join('?' * len(months))
+    svc_labels = lbl["svc"]
     with transaction() as conn:
+        # Per service so we can keep SALES only — reimbursement / OPE
+        # recoveries also come through the Sales Register but are NOT sales
+        # (v0.3.89): exclude them from the budget-vs-sales view.
         sales_rows = conn.execute(
             f"SELECT cc.code AS code, v.period AS period, "
+            f"       s.service_id AS service_id, "
             f"       COALESCE(SUM(s.amount), 0) AS amount "
             f"FROM voucher_splits s "
             f"JOIN vouchers v ON v.id = s.voucher_id "
             f"JOIN cost_centres cc ON cc.id = s.cost_centre_id "
             f"WHERE v.kind = 'sales' AND v.period IN ({placeholders}) "
             f"  AND cc.cc_type = 'partner' "
-            f"GROUP BY cc.code, v.period",
+            f"GROUP BY cc.code, v.period, s.service_id",
             months).fetchall()
         # Match on the NORMALISED financial year so loosely-typed master
         # values ('2026 - 27', '2026/27', …) still resolve to this FY —
@@ -345,7 +344,10 @@ def budget_monthly_data(data: MISData, lbl: dict) -> dict | None:
 
     monthly: dict[str, dict[str, float]] = {}
     for row in sales_rows:
-        monthly.setdefault(row["code"], {})[row["period"]] = row["amount"]
+        if revenue_category(svc_labels.get(row["service_id"])) != "Income":
+            continue   # skip reimbursement / OPE / round-off ledgers
+        m = monthly.setdefault(row["code"], {})
+        m[row["period"]] = m.get(row["period"], 0.0) + row["amount"]
     fy_norm = normalize_fy(fy)
     budgets = {row["code"]: row["amount"] for row in budget_rows
                if normalize_fy(row["fy"]) == fy_norm}
@@ -458,10 +460,13 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
 def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     ws = wb.create_sheet("Cost Centre P&L")
     ws.sheet_view.showGridLines = False
-    headers = ["Code", "Cost Centre", "Revenue", "Direct Expense",
-               "Salary Cost", "Allocated Overhead", "Total Cost", "Profit",
-               "Target", "Variance", "Profit %"]
-    widths = [10, 26, 16, 16, 16, 18, 16, 16, 16, 16, 11]
+    # v0.3.89: Revenue split into sales income + Reimbursements (OPE)
+    # recovery; Direct Expense split into voucher expenses + Reimbursements
+    # outlays. Target / Variance columns removed.
+    headers = ["Code", "Cost Centre", "Revenue", "Reimbursements (OPE)",
+               "Direct Expense", "Reimbursements", "Salary Cost",
+               "Allocated Overhead", "Total Cost", "Profit", "Profit %"]
+    widths = [10, 26, 16, 18, 16, 16, 16, 18, 16, 16, 11]
     for i, w in enumerate(widths):
         ws.column_dimensions[get_column_letter(1 + i)].width = w
 
@@ -474,7 +479,6 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     # 'Unassigned' line if any fact lacks a cost centre.
     partners = [c for c in lbl["cc_active"] if c["cc_type"] != "office"]
     office = [c for c in lbl["cc_active"] if c["cc_type"] == "office"]
-    targets = {c.cost_centre_id: c.target for c in data.cost_centres}
     has_unassigned = any(c.cost_centre_id is None for c in data.cost_centres)
 
     rev = _q("Revenue")
@@ -489,62 +493,60 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     last = first + n - 1
     total_row = last + 1
 
-    def write_row(r, code, name, target, kind):
+    def write_row(r, code, name, kind):
         _cell(ws, r, 1, code, font=_NORMAL, border=True)
         _cell(ws, r, 2, name, font=_NORMAL, border=True)
-        # Revenue: SUMIFS over the Revenue sheet (col H = Amount).
-        _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})",
-              fmt=INR, border=True)
-        # Direct Expense: voucher-driven expenses + reimbursement rows
-        # (the latter booked to the client's CC) + outstanding provisions
-        # (Provisions sheet Remaining=G by CostCentre=C). Expenses layout
-        # v0.3.69: Amount=J, CostCentre=E.
+        # Reimbursements (OPE) income: Revenue sheet rows whose Category
+        # (col I) is Reimbursement or OPE (Amount=H, CostCentre=D).
         _cell(ws, r, 4,
+              f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},{rev}!$I:$I,'
+              f'"Reimbursement")+SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},'
+              f'{rev}!$I:$I,"OPE")',
+              fmt=INR, border=True)
+        # Revenue (sales income only) = all revenue for the CC minus the
+        # Reimbursements (OPE) recovery above.
+        _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})-D{r}",
+              fmt=INR, border=True)
+        # Direct Expense: voucher-driven expenses + outstanding provisions
+        # (Provisions Remaining=G by CostCentre=C). Expenses Amount=J, CC=E.
+        _cell(ws, r, 5,
               f"=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r})"
-              f"+SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})"
               f"+SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
               fmt=INR, border=True)
-        # Salary Cost: ONLY the Salary-type rows of the Salary sheet
-        # (Type column = "Salary"). Office overhead is broken out
-        # separately into the Allocated Overhead column.
-        _cell(ws, r, 5,
+        # Reimbursements (cost): the reimbursement-sheet outlays booked to
+        # this CC (Reimbursements Amount=G, CC=C).
+        _cell(ws, r, 6, f"=SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})",
+              fmt=INR, border=True)
+        # Salary Cost: Salary-type rows of the Salary sheet.
+        _cell(ws, r, 7,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
               f'{lab}!$J:$J,"Salary")',
               fmt=INR, border=True)
-        # Allocated Overhead: the Overhead-type rows of the Salary
-        # sheet. Since v0.3.69 each ACTIVE employee carries one such
-        # row of (office indirect expenses ÷ active employees) on
-        # their home CC — see the Employee Register sheet for the
-        # computation — and Office carries the negative offset so the
-        # pool (already inside Office's Direct Expense) isn't counted
-        # twice in the firm total.
-        _cell(ws, r, 6,
+        # Allocated Overhead: Overhead-type rows of the Salary sheet.
+        _cell(ws, r, 8,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
               f'{lab}!$J:$J,"Overhead")',
               fmt=INR, border=True)
-        _cell(ws, r, 7, f"=D{r}+E{r}+F{r}", fmt=INR, border=True, font=_NORMAL)
-        _cell(ws, r, 8, f"=C{r}-G{r}", fmt=INR, border=True)
-        _cell(ws, r, 9, target or 0, fmt=INR, border=True)
-        # Variance: Revenue − Target (v0.3.67). Pre-v0.3.67 was
-        # Profit − Target which confused achievement-against-revenue-
-        # target with operating profit margin.
-        _cell(ws, r, 10, f"=C{r}-I{r}", fmt=INR, border=True)
-        _cell(ws, r, 11, f"=IF(C{r}=0,0,H{r}/C{r})", fmt=PCT, border=True,
-              align=_CENTER)
+        # Total Cost = Direct + Reimbursements + Salary + Overhead.
+        _cell(ws, r, 9, f"=E{r}+F{r}+G{r}+H{r}", fmt=INR, border=True)
+        # Profit = total income (Revenue + Reimb OPE) − Total Cost.
+        _cell(ws, r, 10, f"=C{r}+D{r}-I{r}", fmt=INR, border=True)
+        # Profit % = Profit ÷ total income.
+        _cell(ws, r, 11, f"=IF((C{r}+D{r})=0,0,J{r}/(C{r}+D{r}))",
+              fmt=PCT, border=True, align=_CENTER)
 
     row_of: dict[str, int] = {}
     r = first
     for c in partners:
-        write_row(r, c["code"], c["name"], targets.get(c["id"], 0.0), "partner")
+        write_row(r, c["code"], c["name"], "partner")
         row_of[c["code"]] = r
         r += 1
     for c in office:
-        write_row(r, c["code"], c["name"], targets.get(c["id"], 0.0), "office")
+        write_row(r, c["code"], c["name"], "office")
         row_of[c["code"]] = r
         r += 1
     if has_unassigned:
-        write_row(r, "Unassigned", "Unassigned / to be mapped", 0.0,
-                  "unassigned")
+        write_row(r, "Unassigned", "Unassigned / to be mapped", "unassigned")
         row_of["Unassigned"] = r
         r += 1
 
@@ -555,7 +557,8 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         L = get_column_letter(col)
         fmt = PCT if col == 11 else INR
         if col == 11:
-            formula = f"=IF(C{total_row}=0,0,H{total_row}/C{total_row})"
+            formula = (f"=IF((C{total_row}+D{total_row})=0,0,"
+                       f"J{total_row}/(C{total_row}+D{total_row}))")
         else:
             formula = f"=SUM({L}{first}:{L}{last})"
         _cell(ws, total_row, col, formula, font=_BOLD, fill=_TOTAL_FILL,
@@ -563,8 +566,8 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
 
     ws.freeze_panes = f"A{first}"
     return {"first": first, "last": last, "total_row": total_row,
-            "col_revenue": "C", "col_totalcost": "G", "col_profit": "H",
-            "col_target": "I", "row_of": row_of}
+            "col_revenue": "C", "col_reimb_income": "D", "col_totalcost": "I",
+            "col_profit": "J", "col_margin": "K", "row_of": row_of}
 
 
 # --- Partner – Manager P&L (matrix layout) ----------------------------------
@@ -1625,11 +1628,13 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
         name_cell = f"{pl}!B{plrow}"
         _cell(ws, r, 1, code, border=True)
         _cell(ws, r, 2, f"={name_cell}", border=True)
-        _cell(ws, r, 3, f"={pl}!C{plrow}", fmt=INR, border=True)
+        # Current revenue = total billed (Revenue + Reimbursements OPE) to
+        # match the comparison side, which sums all Revenue-sheet rows.
+        _cell(ws, r, 3, f"={pl}!C{plrow}+{pl}!D{plrow}", fmt=INR, border=True)
         _cell(ws, r, 4, f"=SUMIFS({rev_c}!$H:$H,{rev_c}!$D:$D,$A{r})",
               fmt=INR, border=True)
         _cell(ws, r, 5, f"=C{r}-D{r}", fmt=INR, border=True)
-        _cell(ws, r, 6, f"={pl}!H{plrow}", fmt=INR, border=True)
+        _cell(ws, r, 6, f"={pl}!J{plrow}", fmt=INR, border=True)
         # Comparison profit = comp revenue − comp direct − comp labour
         # (labour includes the Overhead-type rows, which carry the
         # per-employee office allocation + the Office offset, so the

@@ -183,7 +183,7 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
     partners = [c for c in ccs if not c.is_office and c.cost_centre_id is not None]
 
     p_labels = [c.code for c in partners]
-    rev = [round(c.revenue, 2) for c in partners]
+    rev = [round(c.total_income, 2) for c in partners]   # income + reimb OPE
     cost = [round(c.total_cost, 2) for c in partners]
     profit = [round(c.profit, 2) for c in partners]
 
@@ -194,14 +194,14 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
          {"label": "Profit", "data": profit}],
         controls=True)
 
-    rev_partners = [(c.code, round(c.revenue, 2)) for c in partners
-                    if c.revenue > 0]
+    rev_partners = [(c.code, round(c.total_income, 2)) for c in partners
+                    if c.total_income > 0]
     donut = ch.donut([c for c, _ in rev_partners],
                      [v for _, v in rev_partners], controls=True)
 
-    # Cost composition (Direct / Salary billable / Salary non-billable /
-    # Overhead) for every cost centre incl Office. Salary is split the same
-    # way the Partner-Manager P&L splits it (v0.3.82).
+    # Cost composition (Direct / Reimbursements / Salary billable / Salary
+    # non-billable / Overhead) for every cost centre incl Office. Salary is
+    # split the same way the Partner-Manager P&L splits it (v0.3.82).
     bill: dict = {}
     nonbill: dict = {}
     for f in data.labour_facts:
@@ -214,32 +214,35 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
     comp = ch.grouped_bar(
         comp_labels,
         [{"label": "Direct Expense", "data": [round(c.direct_expense, 2) for c in ccs]},
+         {"label": "Reimbursements", "data": [round(c.reimbursement_expense, 2) for c in ccs]},
          {"label": "Salary (billable)", "data": [round(bill.get(c.cost_centre_id, 0.0), 2) for c in ccs]},
          {"label": "Salary (non-billable)", "data": [round(nonbill.get(c.cost_centre_id, 0.0), 2) for c in ccs]},
          {"label": "Allocated Overhead", "data": [round(c.allocated_overhead, 2) for c in ccs]}],
         stacked=True)
 
-    headers = ["Code", "Cost Centre", "Revenue", "Direct Exp.", "Salary",
-               "Overhead", "Total Cost", "Profit", "Margin", "Target",
-               "Variance"]
+    # Table mirrors the Excel Cost Centre P&L (v0.3.89): Revenue +
+    # Reimbursements (OPE) on the income side; Direct Expense +
+    # Reimbursements on the cost side; no Target / Variance.
+    headers = ["Code", "Cost Centre", "Revenue", "Reimb. (OPE)",
+               "Direct Exp.", "Reimb.", "Salary", "Overhead", "Total Cost",
+               "Profit", "Margin"]
     right = set(range(2, 11))
     rows = []
     for c in ccs:
-        var = c.revenue - c.target          # matches Excel (Revenue − Target)
         rows.append([
             _esc(c.code), _esc(c.name), _money(c.revenue),
-            _money(c.direct_expense), _money(c.labour),
+            _money(c.reimbursement_income), _money(c.direct_expense),
+            _money(c.reimbursement_expense), _money(c.labour),
             _money(c.allocated_overhead), _money(c.total_cost),
-            _money(c.profit), _pct(c.profit, c.revenue),
-            _money(c.target), _money(var)])
-    total = ["", "TOTAL", _money(data.total_revenue),
+            _money(c.profit), _pct(c.profit, c.total_income)])
+    total = ["", "TOTAL", _money(sum(c.revenue for c in ccs)),
+             _money(sum(c.reimbursement_income for c in ccs)),
              _money(sum(c.direct_expense for c in ccs)),
+             _money(sum(c.reimbursement_expense for c in ccs)),
              _money(sum(c.labour for c in ccs)),
              _money(sum(c.allocated_overhead for c in ccs)),
              _money(data.total_cost), _money(data.total_profit),
-             _pct(data.total_profit, data.total_revenue),
-             _money(sum(c.target for c in ccs)),
-             _money(data.total_revenue - sum(c.target for c in ccs))]
+             _pct(data.total_profit, data.total_revenue)]
 
     return _section(
         "Cost Centre P&L", "ccpl",
@@ -247,8 +250,9 @@ def _cost_centre_section(data: MISData, ch: _Charts) -> str:
               _card("<h3>Revenue share by partner</h3>", donut)),
         _card("<h3>Cost composition by cost centre</h3>", comp),
         _card("<h3>Full P&L</h3>", _table(headers, rows, right, total)),
-        intro="Partner-wise profitability. Profit = Revenue − (Direct + "
-              "Salary + Allocated Overhead); Variance = Revenue − Target.")
+        intro="Partner-wise profitability. Income = Revenue + Reimbursements "
+              "(OPE); Profit = Income − (Direct Expense + Reimbursements + "
+              "Salary + Allocated Overhead).")
 
 
 def _budget_section(data: MISData, lbl: dict, ch: _Charts) -> str:

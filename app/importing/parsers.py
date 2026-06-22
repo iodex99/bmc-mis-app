@@ -53,6 +53,19 @@ def _first_number(row: list[Any]) -> float | None:
     return None
 
 
+_TOTAL_NAMES = {"total", "grand total", "subtotal", "sub total", "sub-total"}
+
+
+def _is_total_name(value: Any) -> bool:
+    """True when a name/label cell is a spreadsheet total row ("Total",
+    "Grand Total", …). Flat exports (salary, reimbursement, timesheet)
+    often end with a pivot Grand Total row whose amount equals the sum of
+    everything above — importing it as a real row silently DOUBLES the
+    total (the v0.3.89 reimbursement double-count)."""
+    t = clean(value).lower().strip().rstrip(":").strip()
+    return t in _TOTAL_NAMES
+
+
 def _is_total_row(row: list[Any], p_i: int | None) -> bool:
     """True for a Tally 'Total' / 'Grand Total' summary row.
 
@@ -378,6 +391,8 @@ def parse_timesheet(grid: list[list[Any]], colmap: ColMap,
         date = to_date(_cell(row, colmap.get("date")))
         if not name or not client:
             continue
+        if _is_total_name(name) or _is_total_name(client):  # skip total rows
+            continue
         hours = hours_from_duration(
             _cell(row, colmap.get("duration")),
             _cell(row, colmap.get("day_fraction")),
@@ -412,7 +427,7 @@ def parse_salary(grid: list[list[Any]], colmap: ColMap,
         if _is_blank(row):
             continue
         name = clean(_cell(row, colmap.get("name")))
-        if not name:
+        if not name or _is_total_name(name):   # skip pivot Total rows
             continue
         result.salary.append(ParsedSalaryRow(
             period=period_of(_cell(row, colmap.get("month"))),
@@ -450,7 +465,7 @@ def parse_reimbursement(grid: list[list[Any]], colmap: ColMap,
         if _is_blank(row):
             continue
         name = clean(_cell(row, colmap.get("name")))
-        if not name:
+        if not name or _is_total_name(name):   # skip pivot Grand Total rows
             continue
         date = to_date(_cell(row, colmap.get("date")))
         period = (period_of(_cell(row, colmap.get("period")))

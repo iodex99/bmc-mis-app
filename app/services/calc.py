@@ -68,6 +68,31 @@ def expense_type(service_name: str | None) -> str:
     return EXPENSE_TYPE_INDIRECT
 
 
+# --- revenue classification --------------------------------------------------
+
+_REIMB_KEYWORDS = ("reimbur",)
+_OPE_KEYWORDS = ("out of pocket", "out-of-pocket", " ope", "oop")
+_OTHER_KEYWORDS = ("round off", "roundoff", "round-off")
+
+
+def revenue_category(service_name: str | None) -> str:
+    """Bucket a revenue ledger head: ``Income`` (normal sales) /
+    ``Reimbursement`` / ``OPE`` (out-of-pocket recoveries) / ``Other``
+    (round-off). The canonical classifier used by both the Revenue data
+    sheet's Category column and the Cost Centre P&L revenue split, so the
+    Excel formulas and the calc roll-ups always agree."""
+    if not service_name:
+        return "Income"
+    s = service_name.lower()
+    if any(k in s for k in _REIMB_KEYWORDS):
+        return "Reimbursement"
+    if any(k in s for k in _OPE_KEYWORDS) or s.strip() == "ope":
+        return "OPE"
+    if any(k in s for k in _OTHER_KEYWORDS):
+        return "Other"
+    return "Income"
+
+
 @dataclass
 class MISOptions:
     """Operator-chosen toggles for one MIS run."""
@@ -82,23 +107,32 @@ class CostCentreLine:
     code: str
     name: str
     is_office: bool = False
-    revenue: float = 0.0
-    direct_expense: float = 0.0
+    # Income side (v0.3.89 split): sales income vs reimbursement/OPE recovery.
+    revenue: float = 0.0                 # Income + Other (sales)
+    reimbursement_income: float = 0.0    # Reimbursement + OPE recoveries
+    # Cost side: voucher expenses (+ provisions) vs reimbursement outlays.
+    direct_expense: float = 0.0          # voucher expenses + provisions
+    reimbursement_expense: float = 0.0   # reimbursement-sheet outlays
     labour: float = 0.0
     allocated_overhead: float = 0.0
     target: float = 0.0
 
     @property
+    def total_income(self) -> float:
+        return self.revenue + self.reimbursement_income
+
+    @property
     def total_cost(self) -> float:
-        return self.direct_expense + self.labour + self.allocated_overhead
+        return (self.direct_expense + self.reimbursement_expense
+                + self.labour + self.allocated_overhead)
 
     @property
     def profit(self) -> float:
-        return self.revenue - self.total_cost
+        return self.total_income - self.total_cost
 
     @property
     def variance(self) -> float:
-        return self.profit - self.target
+        return self.revenue - self.target
 
 
 @dataclass
@@ -131,7 +165,8 @@ class MISData:
 
     @property
     def total_revenue(self) -> float:
-        return sum(c.revenue for c in self.cost_centres)
+        # Total billed = sales income + reimbursement/OPE recoveries.
+        return sum(c.total_income for c in self.cost_centres)
 
     @property
     def total_cost(self) -> float:
@@ -281,6 +316,11 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
             "amount": float(r["amount"] or 0.0),
         }
         if r["kind"] == "sales":
+            # Category drives the CC P&L revenue split (Income vs the
+            # Reimbursement/OPE recovery) — same classifier the Revenue
+            # sheet's Category column uses.
+            svc_name = (services.get(r["service_id"]) or {}).get("name")
+            fact["category"] = revenue_category(svc_name)
             data.revenue_facts.append(fact)
         else:
             # Unassigned expense cost centre -> Office overhead.
@@ -686,7 +726,10 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "client_raw": None,
                     "is_residual": True,
                     "is_overhead": False,
-                    "billable": False,
+                    # Residual / unallocated time counts as billable
+                    # (operator decision, v0.3.89) — except for office-home
+                    # staff, whose cost is pure overhead either way.
+                    "billable": not emp_is_office_home,
                     "hours": residual, "amount": residual * salary_rate,
                 })
         elif rec["amount"]:
@@ -702,7 +745,9 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "client_raw": None,
                 "is_residual": True,
                 "is_overhead": False,
-                "billable": False,
+                # No timesheet at all → the whole salary is residual;
+                # treat as billable (v0.3.89) unless office-home.
+                "billable": not emp_is_office_home,
                 "hours": std_hours, "amount": rec["amount"],
             })
 
@@ -885,8 +930,14 @@ def _roll_up(data: MISData, masters: dict) -> None:
                 lines[cc_id] = CostCentreLine(cc_id, "—", "Unassigned")
         return lines[cc_id]
 
+    # Revenue splits into sales income vs reimbursement/OPE recovery
+    # (v0.3.89) so the Cost Centre P&L can show them in separate columns.
     for f in data.revenue_facts:
-        line_for(f["cost_centre_id"]).revenue += f["amount"]
+        line = line_for(f["cost_centre_id"])
+        if f.get("category") in ("Reimbursement", "OPE"):
+            line.reimbursement_income += f["amount"]
+        else:
+            line.revenue += f["amount"]
     for f in data.expense_facts:
         line_for(f["cost_centre_id"]).direct_expense += f["amount"]
     for f in data.labour_facts:
@@ -897,14 +948,12 @@ def _roll_up(data: MISData, masters: dict) -> None:
             line_for(f["cost_centre_id"]).allocated_overhead += f["amount"]
         else:
             line_for(f["cost_centre_id"]).labour += f["amount"]
-    # Reimbursement costs roll into Direct Expense on the partner P&L.
-    # They behave like any other operating expense: when
-    # client_reimbursable=YES the matching revenue line comes through
-    # the Sales Register as a Reimbursement/OPE ledger, so the
-    # partner's net is washed automatically; when NO the firm absorbs
-    # the cost and the partner's profit drops by that amount.
+    # Reimbursement-sheet outlays get their OWN cost column (v0.3.89). When
+    # client_reimbursable=YES the matching recovery comes through the Sales
+    # Register as a Reimbursement/OPE ledger (reimbursement_income above),
+    # so the partner's net is washed; when NO the firm absorbs the cost.
     for f in data.reimbursement_facts:
-        line_for(f["cost_centre_id"]).direct_expense += f["amount"]
+        line_for(f["cost_centre_id"]).reimbursement_expense += f["amount"]
     # Outstanding provisions are a direct cost on the client's cost centre.
     for f in data.provision_facts:
         line_for(f["cost_centre_id"]).direct_expense += f["amount"]

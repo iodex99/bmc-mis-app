@@ -477,6 +477,22 @@ MIGRATIONS: list[tuple[int, str]] = [
                   WHERE m.id = voucher_splits.manager_id
                     AND m.cost_centre_id = voucher_splits.cost_centre_id);
     """),
+    (16, """
+        -- Remove pivot 'Total' / 'Grand Total' rows that were imported as
+        -- real entries before the v0.3.89 parser guard. A reimbursement /
+        -- salary / timesheet export ending in a Grand Total row had that
+        -- row imported as an employee, DOUBLING the period total. Delete
+        -- any such rows so existing data self-corrects on update.
+        DELETE FROM reimbursements
+         WHERE lower(trim(employee_name)) IN
+               ('total','grand total','subtotal','sub total','sub-total');
+        DELETE FROM salary_entries
+         WHERE lower(trim(employee_name)) IN
+               ('total','grand total','subtotal','sub total','sub-total');
+        DELETE FROM timesheet_entries
+         WHERE lower(trim(emp_name)) IN
+               ('total','grand total','subtotal','sub total','sub-total');
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

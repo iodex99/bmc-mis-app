@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.88** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.89** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,35 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.89 — Budget sales-only, reimbursement double-count, CC P&L bifurcation, residual billable
+
+Five operator-reported changes, reflected in **both** the Excel workbook and the HTML dashboard:
+
+1. **Budget vs Monthly Sales = sales only.** `budget_monthly_data` now groups by service and keeps
+   only the **Income** category, excluding Reimbursement/OPE recoveries that also flow through the
+   Sales Register.
+2. **Manual entries on Dashboard & Cover — confirmed working.** Manual rows persist to the same
+   tables → `compute()` totals → Cover figures + the formula-linked Dashboard tiles. Verified with a
+   test (a manual sale shows up in Total Revenue).
+3. **Reimbursement double-count fixed.** Flat exports end with a pivot **"Grand Total"** row that the
+   importer was reading as a real employee (e.g. `Reimb MAy 26.xlsx` → ₹4,82,590 vs real ₹2,41,295).
+   New `_is_total_name` guard skips Total/Grand Total/Subtotal rows in the reimbursement, salary and
+   timesheet parsers; **migration 16** deletes any such rows already imported. (Individual entries were
+   verified NOT doubled — only the pivot total row was.)
+4. **Cost Centre P&L bifurcated; Target/Variance removed.** Revenue → `Revenue` (sales income) +
+   `Reimbursements (OPE)` (recovery); Direct Expense → `Direct Expense` (vouchers + provisions) +
+   `Reimbursements` (reimbursement-sheet outlays). `CostCentreLine` split accordingly with a canonical
+   `calc.revenue_category` (the Revenue-sheet Category column delegates to it). Profit/Total Cost
+   unchanged (presentation only); Margin % = Profit ÷ (Revenue + Reimb OPE). Excel Dashboard tiles,
+   Comparatives, and the dashboard CC table/cost-composition updated to match.
+5. **Residual / unallocated salary time is now billable.** The residual labour facts flip to billable
+   (except office-home staff), so the Partner-Manager P&L Salary (billable) and the dashboard
+   cost-composition reflect it.
+
+Verified end-to-end on a scenario covering all five: firm totals tie, budget excludes OPE, the
+reimbursement Grand Total no longer doubles, the CC P&L columns are correct in Excel + dashboard, and
+the comparison-period workbook + headless dashboard render cleanly.
 
 ### v0.3.88 — Client Register: additions only, no "lost"
 
