@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.90** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.91** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,17 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.91 — Reimbursements sheet: add Employee CC column
+
+The Reimbursements sheet now shows the **employee's own cost centre**
+("Employee CC", from the employee master) next to the existing booking
+``CostCentre`` (the client's partner who bears the cost). The two differ
+when an employee of one partner incurs a reimbursement for another
+partner's client. New column inserted after Employee (Amount shifts to
+col H); the Cost Centre P&L / Partner-Manager P&L SUMIFS that book
+reimbursements were updated to the new Amount column. Verified the
+columns and that the partner totals still tie.
 
 ### v0.3.90 — Reimbursements: make imports idempotent (kill duplicate rows)
 

@@ -515,7 +515,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
               fmt=INR, border=True)
         # Reimbursements (cost): the reimbursement-sheet outlays booked to
         # this CC (Reimbursements Amount=G, CC=C).
-        _cell(ws, r, 6, f"=SUMIFS({reimb}!$G:$G,{reimb}!$C:$C,$A{r})",
+        _cell(ws, r, 6, f"=SUMIFS({reimb}!$H:$H,{reimb}!$C:$C,$A{r})",
               fmt=INR, border=True)
         # Salary Cost: Salary-type rows of the Salary sheet.
         _cell(ws, r, 7,
@@ -871,7 +871,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     # ("Self" column) only. Keeps the P&L tying with the
                     # Cost Centre P&L's Direct Expense column.
                     if offset == 0:
-                        formula = (f'=SUMIFS({reimb}!$G:$G,'
+                        formula = (f'=SUMIFS({reimb}!$H:$H,'
                                    f'{reimb}!$C:$C,"{cc_code}")')
                     else:
                         formula = 0
@@ -1218,17 +1218,16 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
                             suffix: str = "") -> None:
     """Per-row reimbursement detail. One row per uploaded entry.
 
-    Columns: Period | Date | CostCentre | Employee | Client |
+    Columns: Period | Date | CostCentre | Employee | Employee CC | Client |
              Client Reimbursable | Amount
 
-    Cost centre comes from the client master (the partner serving
-    that client). The Client column shows the resolved master name
-    or the raw text + a "unmapped" hint if the client_raw hasn't
-    been linked yet.
+    ``CostCentre`` (the booking CC) comes from the client master (the
+    partner serving that client); ``Employee CC`` is the employee's own
+    home cost centre from the master. The two can differ when an employee
+    of one partner incurs a reimbursement for another partner's client.
 
-    Cost Centre P&L SUMIFs against this sheet's Amount column (G)
-    via CostCentre (C) so the partner-level totals include
-    reimbursements.
+    Cost Centre P&L SUMIFs against this sheet's Amount column (H) via
+    CostCentre (C) so the partner-level totals include reimbursements.
     """
     def _client_label(f):
         cid = f.get("client_id")
@@ -1241,15 +1240,17 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
     rows = [[
         f["period"], _fmt_date(f.get("txn_date")),
         lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
-        f["employee_name"], _client_label(f),
+        f["employee_name"],
+        lbl["cc"].get(f.get("employee_cost_centre_id"), "—"),
+        _client_label(f),
         "Yes" if f["client_reimbursable"] else "No",
         round(f["amount"], 2),
     ] for f in data.reimbursement_facts]
     _write_data_sheet(
         wb, "Reimbursements" + suffix,
-        ["Period", "Date", "CostCentre", "Employee", "Client",
+        ["Period", "Date", "CostCentre", "Employee", "Employee CC", "Client",
          "Client Reimbursable", "Amount"],
-        [10, 12, 12, 26, 28, 16, 14], rows)
+        [10, 12, 12, 26, 12, 28, 16, 14], rows)
 
 
 def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:

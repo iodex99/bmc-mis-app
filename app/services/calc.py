@@ -838,17 +838,21 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
             options.periods).fetchall()
     for r in rows:
         client = clients.get(r["client_id"])
-        cc = client["cost_centre_id"] if client else None
-        if cc is None:
-            emp_id = emp_index.get(norm(r["employee_name"]))
-            if isinstance(emp_id, int):
-                cc = (employees.get(emp_id) or {}).get(
-                    "default_cost_centre_id")
-        cc = cc or office_id
+        # The EMPLOYEE's home cost centre (from the master) — shown on the
+        # Reimbursements sheet; also the booking-CC fallback when the
+        # client isn't mapped.
+        emp_id = emp_index.get(norm(r["employee_name"]))
+        emp_cc = ((employees.get(emp_id) or {}).get("default_cost_centre_id")
+                  if isinstance(emp_id, int) else None)
+        # Booking CC: client's partner bears the cost; fall back to the
+        # employee's home CC, then Office.
+        cc = (client["cost_centre_id"] if client else None) or emp_cc \
+            or office_id
         data.reimbursement_facts.append({
             "period": r["period"],
             "txn_date": r["txn_date"],
             "cost_centre_id": cc,
+            "employee_cost_centre_id": emp_cc,
             "employee_name": r["employee_name"],
             "client_id": r["client_id"],
             "client_raw": r["client_raw"],
