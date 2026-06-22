@@ -844,10 +844,27 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     else:
                         formula = (f"=SUM({get_column_letter(from_col)}{r}:"
                                    f"{get_column_letter(to_col)}{r})")
-                elif kind in ("overhead", "net", "net_pct"):
-                    # Manager-level cells for overhead / net are blank —
-                    # office overhead doesn't break down by manager.
+                elif kind == "overhead":
+                    # Office overhead is partner-level only — it doesn't
+                    # break down by manager, so manager columns are blank
+                    # (the partner Total column carries it).
                     formula = 0
+                elif kind == "net":
+                    # Net per manager = Gross − Overhead − Indirect. Overhead
+                    # is 0 in manager columns, so this is Gross − Indirect;
+                    # the office overhead is deducted only in the partner
+                    # Total column (it isn't attributable to a manager).
+                    g = rows_by_kind["gross"]
+                    o = rows_by_kind["overhead"]
+                    ind = rows_by_kind["indirect"]
+                    L = get_column_letter(col)
+                    formula = f"={L}{g}-{L}{o}-{L}{ind}"
+                elif kind == "net_pct":
+                    # Net % per manager = Net ÷ Sales (income only).
+                    s = rows_by_kind["sales"]
+                    nr = rows_by_kind["net"]
+                    L = get_column_letter(col)
+                    formula = f"=IF({L}{s}=0,0,{L}{nr}/{L}{s})"
                 elif kind == "sales":
                     formula = sumifs(rev, "H", cc_code, mgr_filter,
                                      extra=[("I", "Income")])
@@ -953,7 +970,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
           "expenses + office-home staff salaries) ÷ partner-team employees, "
           "charged to each one's home cost centre (see Employee Register). "
           "Professional Fees / Indirect Expenses follow the Cost Center on "
-          "the voucher split and the Type of Expense column.",
+          "the voucher split and the Type of Expense column. Office Overhead "
+          "is partner-level (not split by manager), so a manager column's "
+          "Net is before office overhead — the partner Total deducts it, and "
+          "Gross/Net % are on sales income.",
           font=_SUB)
 
 

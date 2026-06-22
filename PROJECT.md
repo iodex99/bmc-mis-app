@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.92** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.93** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,17 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.93 — Partner-Manager P&L: Net Profit / Net % now fill the manager columns
+
+The Net Profit and Net Profit % rows were blank (0) in the per-manager
+columns — they'd been lumped with Office Overhead (which genuinely can't
+split by manager) and hard-coded to 0. Net CAN break down: each manager
+column now shows **Net = Gross − Overhead − Indirect** (overhead is 0 in
+manager columns, so effectively Gross − Indirect) and **Net % = Net ÷
+Sales**. Office overhead stays partner-level and is deducted in the
+partner Total column only; a footnote explains the manager Net is before
+office overhead. Verified the manager columns now carry live formulas.
 
 ### v0.3.92 — Total Income column, sales-based %, filtered subtotals on top
 
