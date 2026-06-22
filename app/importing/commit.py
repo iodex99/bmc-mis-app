@@ -346,19 +346,44 @@ def commit_result(result: ParseResult, entity_id: int | None,
             if progress_cb:
                 progress_cb("Importing reimbursement rows",
                              0, len(result.reimbursements))
-            rb_params = [
-                (batch_id, r.period,
-                 r.date.isoformat() if r.date else None,
-                 r.employee_name, r.client_raw, r.amount,
-                 1 if r.client_reimbursable else 0)
-                for r in result.reimbursements]
-            conn.executemany(
-                "INSERT INTO reimbursements "
-                "(batch_id, period, txn_date, employee_name, "
-                " client_raw, amount, client_reimbursable) "
-                "VALUES (?,?,?,?,?,?,?)",
-                rb_params)
+            # Dedup (v0.3.90): reimbursement pivots carry one row per
+            # (period, employee, client), so an identical row is always a
+            # duplicate — from a re-import, or a two-block side-by-side
+            # pivot file. Skip rows already in the DB AND exact repeats
+            # within this batch, so reimbursements never double-count.
+            def _rk(period, name, client, amount):
+                return (period or "", (name or "").strip().lower(),
+                        (client or "").strip().lower(),
+                        round(float(amount or 0.0), 2))
+            existing = {
+                _rk(x["period"], x["employee_name"], x["client_raw"],
+                    x["amount"])
+                for x in conn.execute(
+                    "SELECT period, employee_name, client_raw, amount "
+                    "FROM reimbursements")}
+            rb_params = []
+            seen: set = set()
+            skipped_dupes = 0
+            for r in result.reimbursements:
+                key = _rk(r.period, r.employee_name, r.client_raw, r.amount)
+                if key in existing or key in seen:
+                    skipped_dupes += 1
+                    continue
+                seen.add(key)
+                rb_params.append((
+                    batch_id, r.period,
+                    r.date.isoformat() if r.date else None,
+                    r.employee_name, r.client_raw, r.amount,
+                    1 if r.client_reimbursable else 0))
+            if rb_params:
+                conn.executemany(
+                    "INSERT INTO reimbursements "
+                    "(batch_id, period, txn_date, employee_name, "
+                    " client_raw, amount, client_reimbursable) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    rb_params)
             report.reimbursement_rows = len(rb_params)
+            report.skipped_duplicates += skipped_dupes
             if progress_cb:
                 progress_cb("Importing reimbursement rows",
                              len(rb_params), len(rb_params))

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.89** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.90** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,25 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.90 — Reimbursements: make imports idempotent (kill duplicate rows)
+
+Follow-up to the v0.3.89 Grand-Total fix. Reimbursements had **no
+de-duplication at all** (unlike vouchers, which dedup by vch_no), so any
+double-read produced duplicate rows in the generated Reimbursements sheet
+and doubled the cost — e.g. "Aarav Sarda" appearing twice. Causes: the
+reference pivots ship the SAME employees in two side-by-side blocks, and
+re-importing a reimbursement file simply appended everything again.
+
+* **commit.py** — reimbursement import is now idempotent: an identical
+  ``(period, employee, client, amount)`` row already in the DB, or repeated
+  within the same file, is skipped (counted under "skipped duplicates").
+* **Migration 17** — de-duplicates reimbursement rows already imported
+  before this guard, keeping the earliest of each identical group.
+
+Verified: importing the same reimbursement data twice inserts 0 rows the
+second time (Aarav stays at one row); the migration collapses planted
+duplicates to one while leaving distinct employees untouched.
 
 ### v0.3.89 — Budget sales-only, reimbursement double-count, CC P&L bifurcation, residual billable
 

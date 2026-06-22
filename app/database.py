@@ -493,6 +493,20 @@ MIGRATIONS: list[tuple[int, str]] = [
          WHERE lower(trim(emp_name)) IN
                ('total','grand total','subtotal','sub total','sub-total');
     """),
+    (17, """
+        -- De-duplicate reimbursement rows already imported before the
+        -- v0.3.90 dedup guard. Reimbursement pivots carry one row per
+        -- (period, employee, client), so identical rows are duplicates
+        -- (from a re-import or a two-block side-by-side pivot file) that
+        -- were doubling the figures. Keep the earliest id of each group.
+        DELETE FROM reimbursements
+         WHERE id NOT IN (
+           SELECT MIN(id) FROM reimbursements
+           GROUP BY period, lower(trim(employee_name)),
+                    lower(trim(coalesce(client_raw, ''))),
+                    round(amount, 2)
+         );
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
