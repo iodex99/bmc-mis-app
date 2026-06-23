@@ -842,8 +842,9 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
         # Reimbursements sheet; also the booking-CC fallback when the
         # client isn't mapped.
         emp_id = emp_index.get(norm(r["employee_name"]))
-        emp_cc = ((employees.get(emp_id) or {}).get("default_cost_centre_id")
-                  if isinstance(emp_id, int) else None)
+        emp_rec = employees.get(emp_id) if isinstance(emp_id, int) else None
+        emp_cc = (emp_rec or {}).get("default_cost_centre_id")
+        emp_mgr = (emp_rec or {}).get("manager_id")
         # Booking CC: client's partner bears the cost; fall back to the
         # employee's home CC, then Office.
         cc = (client["cost_centre_id"] if client else None) or emp_cc \
@@ -853,6 +854,7 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
             "txn_date": r["txn_date"],
             "cost_centre_id": cc,
             "employee_cost_centre_id": emp_cc,
+            "employee_manager_id": emp_mgr,
             "employee_name": r["employee_name"],
             "client_id": r["client_id"],
             "client_raw": r["client_raw"],

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.94** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.95** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,13 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.95 — Reimbursements sheet: add Manager column
+
+The Reimbursements sheet now shows the employee's **Manager** (from the
+employee master) after Employee CC. Amount shifts to col I; the Cost
+Centre P&L / Partner-Manager P&L reimbursement SUMIFS were repointed to
+the new Amount column. Verified the column populates and totals still tie.
 
 ### v0.3.94 — Review & Map ▸ Vouchers: Delete action
 
