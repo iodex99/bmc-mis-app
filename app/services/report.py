@@ -253,13 +253,14 @@ def _link_dashboard(wb: Workbook, rows_pl: dict) -> None:
     ws = wb["Dashboard"]
     pl = _q("Cost Centre P&L")
     total = rows_pl["total_row"]
-    rev = rows_pl["col_revenue"]
-    reimb = rows_pl["col_reimb_income"]
-    # (row, col): (formula, number_format)
+    ti = rows_pl["col_total_income"]
+    prof = rows_pl["col_profit"]
+    # (row, col): (formula, number_format). Total Revenue = Total Income;
+    # Total Cost = Total Income − Net Profit (no single Total-Cost column now).
     mapping = {
-        (6, 2): (f"={pl}!{rev}{total}+{pl}!{reimb}{total}", INR),
-        (6, 4): (f"={pl}!{rows_pl['col_totalcost']}{total}", INR),
-        (9, 2): (f"={pl}!{rows_pl['col_profit']}{total}", INR),
+        (6, 2): (f"={pl}!{ti}{total}", INR),
+        (6, 4): (f"={pl}!{ti}{total}-{pl}!{prof}{total}", INR),
+        (9, 2): (f"={pl}!{prof}{total}", INR),
         (9, 4): (f"={pl}!{rows_pl['col_margin']}{total}", PCT),
     }
     for (r, c), (formula, fmt) in mapping.items():
@@ -462,15 +463,23 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
 def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     ws = wb.create_sheet("Cost Centre P&L")
     ws.sheet_view.showGridLines = False
-    # v0.3.89: Revenue split into sales income + Reimbursements (OPE)
-    # recovery; Direct Expense split into voucher expenses + Reimbursements
-    # outlays. v0.3.92: explicit Total Income column (Revenue + Reimb OPE);
-    # Profit = Total Income − Total Cost; Profit % = Profit ÷ Revenue.
+    # v0.3.96: columns now mirror the Partner-Manager P&L line structure —
+    # Salary split billable / non-billable, Direct Expense split into
+    # Professional Fees / Indirect Expenses / Provisions, plus Total Direct
+    # Costs, Gross Profit and Gross Profit %. Gross/Net % are on sales
+    # income (Revenue), matching the PM P&L.
+    #   C Revenue  D Reimb(OPE)  E Total Income  F Salary(bill)
+    #   G Salary(non-bill)  H Professional Fees  I Reimbursement Expenses
+    #   J Provisions  K Total Direct Costs  L Gross Profit  M Gross %
+    #   N Office Overhead  O Indirect Expenses  P Net Profit  Q Net %
     headers = ["Code", "Cost Centre", "Revenue", "Reimbursements (OPE)",
-               "Total Income", "Direct Expense", "Reimbursements",
-               "Salary Cost", "Allocated Overhead", "Total Cost", "Profit",
-               "Profit %"]
-    widths = [10, 26, 16, 18, 16, 16, 16, 16, 18, 16, 16, 11]
+               "Total Income", "Salary (billable)", "Salary (non-billable)",
+               "Professional Fees", "Reimbursement Expenses", "Provisions",
+               "Total Direct Costs", "Gross Profit", "Gross Profit %",
+               "Office Overhead", "Indirect Expenses", "Net Profit",
+               "Net Profit %"]
+    widths = [10, 26, 15, 17, 15, 15, 17, 15, 17, 13, 16, 14, 12, 15, 15, 14,
+              12]
     for i, w in enumerate(widths):
         ws.column_dimensions[get_column_letter(1 + i)].width = w
 
@@ -500,45 +509,63 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     def write_row(r, code, name, kind):
         _cell(ws, r, 1, code, font=_NORMAL, border=True)
         _cell(ws, r, 2, name, font=_NORMAL, border=True)
-        # Reimbursements (OPE) income: Revenue sheet rows whose Category
-        # (col I) is Reimbursement or OPE (Amount=H, CostCentre=D).
+        # Reimbursements (OPE) income: Revenue rows whose Category (col I)
+        # is Reimbursement or OPE (Amount=H, CostCentre=D).
         _cell(ws, r, 4,
               f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},{rev}!$I:$I,'
               f'"Reimbursement")+SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},'
               f'{rev}!$I:$I,"OPE")',
               fmt=INR, border=True)
-        # Revenue (sales income only) = all revenue for the CC minus the
-        # Reimbursements (OPE) recovery above.
+        # Revenue (sales income only) = all revenue for the CC minus OPE.
         _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})-D{r}",
               fmt=INR, border=True)
         # Total Income = Revenue + Reimbursements (OPE).
         _cell(ws, r, 5, f"=C{r}+D{r}", fmt=INR, border=True)
-        # Direct Expense: voucher-driven expenses + outstanding provisions
-        # (Provisions Remaining=G by CostCentre=C). Expenses Amount=J, CC=E.
+        # Salary (billable) / (non-billable): Salary-type rows split on the
+        # Billable column (K). Salary Amount=I, Charged To=C, Type=J.
         _cell(ws, r, 6,
-              f"=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r})"
-              f"+SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
-              fmt=INR, border=True)
-        # Reimbursements (cost): the reimbursement-sheet outlays booked to
-        # this CC (Reimbursements Amount=I, CC=C).
-        _cell(ws, r, 7, f"=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,$A{r})",
-              fmt=INR, border=True)
-        # Salary Cost: Salary-type rows of the Salary sheet.
-        _cell(ws, r, 8,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
-              f'{lab}!$J:$J,"Salary")',
+              f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")',
               fmt=INR, border=True)
-        # Allocated Overhead: Overhead-type rows of the Salary sheet.
-        _cell(ws, r, 9,
+        _cell(ws, r, 7,
+              f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
+              f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")',
+              fmt=INR, border=True)
+        # Professional Fees: Expenses with Type = Professional Fees
+        # (Expenses Amount=J, CostCentre=E, Type of Expense=H).
+        _cell(ws, r, 8,
+              f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r},'
+              f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")',
+              fmt=INR, border=True)
+        # Reimbursement Expenses: reimbursement-sheet outlays (Amount=I,
+        # CostCentre=C).
+        _cell(ws, r, 9, f"=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,$A{r})",
+              fmt=INR, border=True)
+        # Provisions: outstanding provision remaining (Remaining=G, CC=C).
+        _cell(ws, r, 10, f"=SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
+              fmt=INR, border=True)
+        # Total Direct Costs = Salary(both) + Professional Fees +
+        # Reimbursement Expenses + Provisions.
+        _cell(ws, r, 11, f"=F{r}+G{r}+H{r}+I{r}+J{r}", fmt=INR, border=True)
+        # Gross Profit = Total Income − Total Direct Costs.
+        _cell(ws, r, 12, f"=E{r}-K{r}", fmt=INR, border=True)
+        # Gross Profit % = Gross ÷ Revenue (sales income only).
+        _cell(ws, r, 13, f"=IF(C{r}=0,0,L{r}/C{r})",
+              fmt=PCT, border=True, align=_CENTER)
+        # Office Overhead (allocated): Overhead-type rows of the Salary sheet.
+        _cell(ws, r, 14,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
               f'{lab}!$J:$J,"Overhead")',
               fmt=INR, border=True)
-        # Total Cost = Direct + Reimbursements + Salary + Overhead.
-        _cell(ws, r, 10, f"=F{r}+G{r}+H{r}+I{r}", fmt=INR, border=True)
-        # Profit = Total Income − Total Cost.
-        _cell(ws, r, 11, f"=E{r}-J{r}", fmt=INR, border=True)
-        # Profit % = Profit ÷ Revenue (sales income only, NOT reimbursements).
-        _cell(ws, r, 12, f"=IF(C{r}=0,0,K{r}/C{r})",
+        # Indirect Expenses: Expenses with Type = Indirect Expense.
+        _cell(ws, r, 15,
+              f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r},'
+              f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")',
+              fmt=INR, border=True)
+        # Net Profit = Gross − Office Overhead − Indirect Expenses.
+        _cell(ws, r, 16, f"=L{r}-N{r}-O{r}", fmt=INR, border=True)
+        # Net Profit % = Net ÷ Revenue (sales income only).
+        _cell(ws, r, 17, f"=IF(C{r}=0,0,P{r}/C{r})",
               fmt=PCT, border=True, align=_CENTER)
 
     row_of: dict[str, int] = {}
@@ -556,28 +583,30 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         row_of["Unassigned"] = r
         r += 1
 
-    # Total row.
+    # Total row. Percentage columns (13 = Gross %, 17 = Net %) recompute on
+    # the firm totals; every other column is a plain SUM.
+    pct_cols = {13, 17}
     _cell(ws, total_row, 1, "", fill=_TOTAL_FILL)
     _cell(ws, total_row, 2, "TOTAL", font=_BOLD, fill=_TOTAL_FILL, border=True)
-    for col in range(3, 13):
+    for col in range(3, 18):
         L = get_column_letter(col)
-        fmt = PCT if col == 12 else INR
-        if col == 12:
-            formula = (f"=IF(C{total_row}=0,0,"
-                       f"K{total_row}/C{total_row})")
+        if col in pct_cols:
+            num = "L" if col == 13 else "P"
+            formula = (f"=IF(C{total_row}=0,0,{num}{total_row}/C{total_row})")
         else:
             formula = f"=SUM({L}{first}:{L}{last})"
         _cell(ws, total_row, col, formula, font=_BOLD, fill=_TOTAL_FILL,
-              fmt=fmt, border=True)
+              fmt=PCT if col in pct_cols else INR, border=True)
 
-    # Filtered-subtotal row on top + AutoFilter over the CC rows (cols 3–11
-    # are amounts; the Profit % column is excluded).
-    _subtotal_filter(ws, hrow, first, last, list(range(3, 12)), last_col=12)
+    # Filtered-subtotal row on top + AutoFilter over the CC rows (amount
+    # columns only; the two % columns are excluded).
+    amount_cols = [c for c in range(3, 18) if c not in pct_cols]
+    _subtotal_filter(ws, hrow, first, last, amount_cols, last_col=17)
     ws.freeze_panes = f"A{first}"
     return {"first": first, "last": last, "total_row": total_row,
             "col_revenue": "C", "col_reimb_income": "D",
-            "col_total_income": "E", "col_totalcost": "J",
-            "col_profit": "K", "col_margin": "L", "row_of": row_of}
+            "col_total_income": "E", "col_gross": "L", "col_profit": "P",
+            "col_margin": "Q", "row_of": row_of}
 
 
 # --- Partner – Manager P&L (matrix layout) ----------------------------------

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.95** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.96** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,31 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.96 — Cost Centre P&L now mirrors the Partner-Manager P&L heads
+
+The Cost Centre P&L had a coarser column set than the Partner-Manager
+P&L. It now carries the SAME line heads (as columns): **Revenue |
+Reimbursements (OPE) | Total Income | Salary (billable) | Salary
+(non-billable) | Professional Fees | Reimbursement Expenses | Provisions
+| Total Direct Costs | Gross Profit | Gross Profit % | Office Overhead |
+Indirect Expenses | Net Profit | Net Profit %**. So Salary is split
+billable / non-billable, Direct Expense is split into Professional Fees /
+Indirect Expenses / Provisions, and Gross Profit / Gross % are added.
+Gross/Net % are on sales income (Revenue), matching the PM P&L; Net
+Profit equals the previous "Profit" (firm total unchanged — indirect just
+moves below the gross line, as in the PM P&L).
+
+Consumers repointed via the sheet's ``rows_pl`` map: the Excel Dashboard
+tiles (Total Cost = Total Income − Net Profit, since there's no single
+Total-Cost column now) and the Comparatives sheet (current Revenue =
+Total Income, Profit = Net Profit). Filtered subtotal-on-top + AutoFilter
+cover all 15 amount columns. The HTML dashboard's cost-centre view is
+unchanged (a valid coarser summary; its profit/margin already tie).
+
+Verified end-to-end: every column formula, full tie-out to the calc
+engine (Net = firm profit), the two % columns on revenue, the total row,
+the dashboard tiles and the comparison-period sheet.
 
 ### v0.3.95 — Reimbursements sheet: add Manager column
 
