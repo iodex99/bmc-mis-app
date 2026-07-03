@@ -615,12 +615,27 @@ def _build_pm_matrix(data: MISData, lbl: dict):
     """Build the partner-manager column structure for the P&L matrix.
 
     Returns a list of partner blocks, where each block is:
-        (cc_code, cc_name, [(manager_label, manager_filter_value), …, ("Total", None)])
+        (cc_code, cc_name, columns)
 
-    *manager_filter_value* is the value to SUMIFS against the data sheet's
-    Manager column. "(unassigned)" is used for splits the partner did
-    directly without delegating to a named manager (so the first sub-column
-    inside each partner block is the partner's "own" work).
+    ``columns`` is a list of ``(label, role, mgr_filter)`` tuples. ``role`` is
+    one of:
+
+    * ``"self"``      — the partner's own direct work (no manager named).
+      ``mgr_filter`` is ``"(unassigned)"`` — the value the data sheets write
+      in the Manager column for an unassigned split.
+    * ``"manager"``   — a named (active) manager sub-column. ``mgr_filter`` is
+      the manager's code.
+    * ``"subtotal"``  — the per-partner Total column (only present when the
+      partner has at least one manager sub-column). ``mgr_filter`` is ``None``.
+    * ``"partner_total"`` — a single partner-total column used when the partner
+      has NO active managers (none assigned, or all deactivated in the master).
+      ``mgr_filter`` is ``None`` — the cell SUMIFS at partner level with no
+      manager criterion, so the partner's whole figure (including any
+      deactivated manager's work) rolls up into this one column.
+
+    A manager whose master row is deactivated is already folded to ``None`` on
+    the facts by the calc engine, so it never appears as a "manager" column
+    here; its work shows up under the partner's "self"/"partner_total" column.
     """
     cc_active_map = {c["id"]: c for c in lbl["cc_active"]}
 
@@ -645,19 +660,25 @@ def _build_pm_matrix(data: MISData, lbl: dict):
                         key=lambda i: cc_active_map[i]["code"]):
         cc = cc_active_map[cc_id]
         mgr_ids = set(by_partner[cc_id])
-        managers: list[tuple[str, str | None]] = []
-        # "Self" — partner did the work directly (no manager named).
-        if None in mgr_ids:
-            managers.append((cc["code"], "(unassigned)"))
-            mgr_ids.discard(None)
-        # Then each named manager.
-        for mgr_id in sorted(mgr_ids,
-                             key=lambda m: lbl["mgr"].get(m, "?") or "?"):
-            managers.append((lbl["mgr"].get(mgr_id, "?"),
-                             lbl["mgr"].get(mgr_id)))
-        # Per-partner subtotal column.
-        managers.append(("Total", None))
-        result.append((cc["code"], cc["name"], managers))
+        has_self = None in mgr_ids
+        mgr_ids.discard(None)
+        named = sorted(mgr_ids, key=lambda m: lbl["mgr"].get(m, "?") or "?")
+        columns: list[tuple[str, str, str | None]] = []
+        if named:
+            # Partner delegates to at least one active manager — break the
+            # partner's P&L down by manager, with a "Self" column for the
+            # partner's own direct work and a per-partner subtotal.
+            if has_self:
+                columns.append((cc["code"], "self", "(unassigned)"))
+            for mgr_id in named:
+                columns.append((lbl["mgr"].get(mgr_id, "?"), "manager",
+                                lbl["mgr"].get(mgr_id)))
+            columns.append(("Total", "subtotal", None))
+        else:
+            # No active managers under this partner — show a single
+            # partner-total column instead of an identical Self + Total pair.
+            columns.append((cc["code"], "partner_total", None))
+        result.append((cc["code"], cc["name"], columns))
     return result
 
 
@@ -708,8 +729,9 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
     for (cc_code, cc_name, managers), start, count in zip(
             matrix, block_starts, cols_per_block):
         end = start + count - 1
-        ws.merge_cells(start_row=hdr_partner_row, start_column=start,
-                       end_row=hdr_partner_row, end_column=end)
+        if end > start:   # a collapsed single-column block needs no merge
+            ws.merge_cells(start_row=hdr_partner_row, start_column=start,
+                           end_row=hdr_partner_row, end_column=end)
         _cell(ws, hdr_partner_row, start, cc_name, font=_HEAD,
               fill=_HEAD_FILL, align=_CENTER, border=True)
         for col in range(start, end + 1):
@@ -723,7 +745,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
     _cell(ws, hdr_mgr_row, 1, "Particulars", font=_HEAD, fill=_SUBHEAD_FILL,
           align=_CENTER, border=True)
     for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
-        for offset, (label, _filter) in enumerate(managers):
+        for offset, (label, _role, _filter) in enumerate(managers):
             _cell(ws, hdr_mgr_row, start + offset, label, font=_HEAD,
                   fill=_SUBHEAD_FILL, align=_CENTER, border=True)
     _cell(ws, hdr_mgr_row, mis_total_col, "Total", font=_HEAD,
@@ -829,9 +851,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, r, 1, label, font=font, fill=fill, border=True)
 
         for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
-            for offset, (mgr_label, mgr_filter) in enumerate(managers):
+            for offset, (mgr_label, role, mgr_filter) in enumerate(managers):
                 col = start + offset
-                is_total_col = (offset == len(managers) - 1)
+                is_total_col = (role == "subtotal")
+                is_partner_total = (role == "partner_total")
                 cell_fmt = PCT if kind.endswith("_pct") else INR
                 if is_total_col and kind == "gross_pct":
                     # Recompute the ratio at the partner level — summing
@@ -842,12 +865,13 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict) -> None:
                     L = get_column_letter(col)
                     formula = (f"=IF({L}{inc_r}=0,0,"
                                f"{L}{gross_r}/{L}{inc_r})")
-                elif is_total_col and kind == "overhead":
+                elif (is_total_col or is_partner_total) and kind == "overhead":
                     # Allocated office overhead is partner-level, not
                     # manager-level — pull from the Salary sheet via
                     # SUMIFS on Type="Overhead" so it stays formula-
                     # driven (v0.3.67). Pre-v0.3.67 baked the computed
-                    # number directly into the cell.
+                    # number directly into the cell. A collapsed
+                    # partner-total column carries it the same way.
                     formula = (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,'
                                f'"{cc_code}",{lab}!$J:$J,"Overhead")')
                 elif is_total_col and kind == "net":

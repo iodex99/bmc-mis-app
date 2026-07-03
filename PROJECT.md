@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.96** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.97** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,43 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.97 — Deactivating a manager hides it from the MIS (folds into the partner total)
+
+Operator report: after deactivating all managers in the masters, the
+generated MIS still showed a per-manager breakdown. Data is captured with
+the `Partner – Manager` string, but a **deactivated** manager means "don't
+break the report down by this manager any more — just show the partner
+total (which still includes that manager's work)".
+
+The fix lives in **one choke point in the calc engine**
+(`calc._mgr_folder`): an inactive manager's id is folded to `None` on every
+fact — revenue, expense, labour and reimbursement — at report-build time.
+The stored data (voucher splits, employee→manager links) is untouched, so
+re-activating the manager brings the breakdown straight back. Because the
+Excel P&L, all data sheets and the HTML dashboard read those facts, they
+all collapse consistently.
+
+* **Partner-Manager P&L** — a manager whose master row is deactivated no
+  longer gets its own sub-column; its figures fold into the partner's own
+  ("Self") column. A partner left with **no active managers** collapses to a
+  single partner-total column (via `_build_pm_matrix` roles: `self` /
+  `manager` / `subtotal` / `partner_total`) instead of an identical
+  Self + Total pair. Partners that still have active managers keep their
+  full breakdown, so a mixed setup (some managers on, some off) works too.
+* **Data sheets** (Revenue / Expenses / Salary / Reimbursements) — the
+  Manager column now reads `(unassigned)` for a folded manager, matching
+  the SUMIFS the P&L uses.
+* **HTML dashboard** — the Partner-Manager section folds the same way; a
+  partner with no manager reads as just the partner code (e.g. `PM`) rather
+  than `PM – (unassigned)`.
+
+Verified end-to-end with a formula-evaluated tie-out (a mini Excel
+evaluator validated against the calc engine): with managers active, all
+deactivated, or mixed, **every partner Net and the firm Net are identical**
+— only the column breakdown changes. Deactivated managers' figures stay in
+the partner total; nothing is lost. Data-sheet Manager columns blank out
+and the comparison-period workbook + dashboard still build cleanly.
 
 ### v0.3.96 — Cost Centre P&L now mirrors the Partner-Manager P&L heads
 

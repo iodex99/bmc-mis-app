@@ -287,6 +287,27 @@ def _placeholders(items: list) -> str:
     return ",".join("?" * len(items))
 
 
+def _mgr_folder(masters: dict):
+    """Return a function that folds a *deactivated* manager down to ``None``.
+
+    Deactivating a manager in the master is the operator's way of saying
+    "don't break the MIS down by this manager any more — just show the
+    partner total". The captured data (voucher splits, employee→manager
+    links) is left untouched, but at report-build time an inactive manager's
+    id is treated as unassigned, so its figures fold into the partner's own
+    column instead of getting a separate Partner-Manager column. Active
+    managers (and ``None``) pass through unchanged. (v0.3.97)
+    """
+    managers = masters["managers"]
+
+    def fold(mgr_id):
+        if mgr_id is None:
+            return None
+        return mgr_id if (managers.get(mgr_id) or {}).get("active", 1) else None
+
+    return fold
+
+
 # --- revenue & expense facts -------------------------------------------------
 
 def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> None:
@@ -300,13 +321,15 @@ def _build_voucher_facts(data: MISData, options: MISOptions, masters: dict) -> N
             f"FROM voucher_splits s JOIN vouchers v ON v.id = s.voucher_id "
             f"WHERE v.period IN ({ph})", options.periods).fetchall()
     services = masters["services"]
+    fold_mgr = _mgr_folder(masters)
     for r in rows:
         fact = {
             "period": r["period"],
             "txn_date": r["txn_date"], "vch_no": r["vch_no"],
             "invoice_no": r["invoice_no"],
             "entity_id": r["entity_id"],
-            "cost_centre_id": r["cost_centre_id"], "manager_id": r["manager_id"],
+            "cost_centre_id": r["cost_centre_id"],
+            "manager_id": fold_mgr(r["manager_id"]),
             "service_id": r["service_id"], "client_id": r["client_id"],
             # Raw party text — the Client column's fallback when the
             # party hasn't been linked to a client-master row (most
@@ -596,13 +619,18 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         belongs to the cost centre the cost is charged to, so a manager
         only ever appears under their own partner block in the
         Partner-Manager P&L. Cross-partner billable work (charged to a
-        different partner) falls to that partner's 'Self' column."""
+        different partner) falls to that partner's 'Self' column. A
+        deactivated manager folds into the partner (returns None) so the
+        MIS shows the partner total without the manager breakdown."""
         if not isinstance(emp_lookup_key, int):
             return None
         m = (employees.get(emp_lookup_key) or {}).get("manager_id")
         if m is None:
             return None
-        if (managers.get(m) or {}).get("cost_centre_id") == charged_cc:
+        mrec = managers.get(m) or {}
+        if not mrec.get("active", 1):
+            return None
+        if mrec.get("cost_centre_id") == charged_cc:
             return m
         return None
 
@@ -828,6 +856,7 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
     employees = masters["employees"]
     emp_index = masters["emp_index"]
     office_id = masters["office_id"]
+    fold_mgr = _mgr_folder(masters)
     ph = _placeholders(options.periods)
     with transaction() as conn:
         rows = conn.execute(
@@ -844,7 +873,9 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
         emp_id = emp_index.get(norm(r["employee_name"]))
         emp_rec = employees.get(emp_id) if isinstance(emp_id, int) else None
         emp_cc = (emp_rec or {}).get("default_cost_centre_id")
-        emp_mgr = (emp_rec or {}).get("manager_id")
+        # Fold a deactivated manager to None so the Reimbursements sheet's
+        # Manager column matches the rest of the MIS (v0.3.97).
+        emp_mgr = fold_mgr((emp_rec or {}).get("manager_id"))
         # Booking CC: client's partner bears the cost; fall back to the
         # employee's home CC, then Office.
         cc = (client["cost_centre_id"] if client else None) or emp_cc \
@@ -1011,8 +1042,15 @@ def _roll_up_dimensions(data: MISData, masters: dict) -> None:
         key = (cc_id, mgr_id)
         if key not in pm:
             cc_code = cc.get(cc_id, {}).get("code", "—")
-            mgr_code = mgr.get(mgr_id, {}).get("code", "(unassigned)")
-            pm[key] = {"label": f"{cc_code} – {mgr_code}",
+            # No manager (partner's own work, or a deactivated manager folded
+            # in) → label with just the partner code, so a partner with no
+            # active managers reads as "PM" rather than "PM – (unassigned)".
+            if mgr_id is None:
+                label = cc_code
+            else:
+                mgr_code = mgr.get(mgr_id, {}).get("code", "(unassigned)")
+                label = f"{cc_code} – {mgr_code}"
+            pm[key] = {"label": label,
                        "cost_centre_id": cc_id, "manager_id": mgr_id,
                        "revenue": 0.0, "direct_expense": 0.0}
         return pm[key]
