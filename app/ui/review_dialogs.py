@@ -163,7 +163,9 @@ class ResolveEmployeeDialog(QDialog):
         self.mgr_combo = _combo(repo.fk_options("managers"), none_label="(none)")
         self.cc_combo = _combo(repo.fk_options("cost_centres"), none_label="(none)")
         # Location (v0.3.99): drives the Employee Register / overhead
-        # location filter on the Generate page. "(none)" = always included.
+        # location filter on the Generate page. An employee left "(none)"
+        # is EXCLUDED whenever the operator narrows the location selection
+        # (strict filter, v0.3.101) — a warning on the Cover lists them.
         self.loc_combo = _combo(repo.fk_options("locations"),
                                 none_label="(none)")
         form.addRow("Name:", self.name_edit)

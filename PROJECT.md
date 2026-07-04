@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.100** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.101** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,30 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.101 — Location filter is now STRICT
+
+Operator ask: when locations are selected before generating, ONLY
+employees marked with those locations count in the Employee Register and
+the overhead computation. Previously an employee with NO location
+assigned was still included (a lenient default so untagged records
+wouldn't vanish); now they are excluded whenever the operator narrows
+the selection — and the Cover carries a warning naming them ("N
+employee(s) with NO location assigned were left out… Assign locations in
+Master Data ▸ Employees"), so nothing drops silently. Unresolved raw
+timesheet names (no master row yet) are likewise excluded, with the same
+warning pointing at Review & Map. With every location ticked (no filter)
+behaviour is unchanged — everyone counts. Wrong-location exclusions are
+NOT warned about; that's the filter doing its job. Salary and voucher
+figures remain unfiltered, and the firm total is identical whatever the
+selection (an excluded office-home employee's pay simply stays on Office
+instead of joining the pool).
+
+Verified: Mumbai-only run considers only the Mumbai-tagged employee
+(pool ÷ 9 = Mumbai employee + 8 partners), the untagged employee is
+named in the warning while wrong-location ones are not, the ER sheet's
+formula-driven Recipients/Office-Staff-Salary evaluate to the strict
+figures, and the full regression suite is green.
 
 ### v0.3.100 — Readable month labels throughout the generated MIS
 

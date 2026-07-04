@@ -1180,7 +1180,8 @@ def create_employee(raw: str, name: str, category: str | None,
 
     ``location_id`` (v0.3.99) tags the employee's office location — used
     by the Employee Register / overhead location filter. Left NULL the
-    employee is always considered, so an untagged record never vanishes.
+    employee is excluded whenever a location selection is active (strict,
+    v0.3.101); the generated Cover carries a warning listing such records.
     """
     with transaction() as conn:
         eid = conn.execute(

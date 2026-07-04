@@ -252,10 +252,10 @@ def compute(options: MISOptions) -> MISData:
                  for i in options.location_ids]
         data.location_label = ", ".join(sorted(names)) if names else "(none)"
         data.warnings.append(
-            "Employee Register / office overhead consider only these "
-            f"locations: {data.location_label} (plus employees with no "
-            "location assigned). Salary and voucher figures are not "
-            "filtered.")
+            "Employee Register / office overhead consider ONLY employees "
+            f"of these locations: {data.location_label}. Employees with no "
+            "location assigned are left out (see the note below if any). "
+            "Salary and voucher figures are not filtered.")
     _build_voucher_facts(data, options, masters)
     # Employee register BEFORE labour facts: the register's active-employee
     # roster + office-indirect pool drive the per-employee overhead facts.
@@ -309,10 +309,12 @@ def _load_masters() -> dict:
 def _location_filter(masters: dict, options: MISOptions):
     """Return a predicate: is this employee key considered in this run?
 
-    ``options.location_ids`` = None → everyone. Otherwise an employee is
-    considered when their master location is in the selected set — or when
-    they have NO location assigned / no master row at all (a raw timesheet
-    name), so nothing silently drops out just because it was never tagged.
+    ``options.location_ids`` = None → everyone (no filter). Otherwise
+    STRICT (v0.3.101, operator ask): ONLY employees whose master location
+    is in the selected set are considered — an employee with no location
+    assigned, or an unresolved raw timesheet name (no master row at all),
+    is left out of the register and the overhead computation. The
+    exclusions are surfaced as a Cover warning so nothing drops silently.
     Applies only to the Employee Register and the office-overhead
     computation; salary/voucher figures are never location-filtered.
     """
@@ -323,9 +325,9 @@ def _location_filter(masters: dict, options: MISOptions):
 
     def included(key) -> bool:
         if not isinstance(key, int):
-            return True
+            return False        # unresolved raw name — has no location
         loc = (employees.get(key) or {}).get("location_id")
-        return loc is None or loc in allowed
+        return loc is not None and loc in allowed
 
     return included
 
@@ -462,9 +464,25 @@ def _build_employee_register(data: MISData, options: MISOptions,
     def emp_key(name: str):
         return emp_index.get(norm(name), f"raw:{norm(name)}")
 
-    # Location selection (v0.3.98): only employees of the selected
-    # locations (plus untagged ones) enter the register / overhead spread.
+    # Location selection (v0.3.98; STRICT since v0.3.101): only employees
+    # of the selected locations enter the register / overhead spread.
+    # Untagged / unresolved names are excluded and reported via a warning.
     included = _location_filter(masters, options)
+    filter_active = options.location_ids is not None
+    excluded_untagged: set[str] = set()
+
+    def _note_excluded(key, name: str) -> None:
+        """Record an employee dropped ONLY because they carry no location
+        (raw name, or master row with location NULL) — a tagging gap the
+        operator should know about; a wrong-location exclusion is not
+        noted (that's the filter working as intended)."""
+        if not filter_active:
+            return
+        if not isinstance(key, int):
+            excluded_untagged.add(name.strip() or "(unnamed)")
+        elif (employees.get(key) or {}).get("location_id") is None:
+            excluded_untagged.add(
+                (employees.get(key) or {}).get("name") or name)
 
     sal_cc: dict[tuple, int] = {}
     for r in sal_rows:
@@ -478,6 +496,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
     for r in ts_rows:
         key = emp_key(r["emp_name"])
         if not included(key):
+            _note_excluded(key, r["emp_name"])
             continue
         name = r["emp_name"]
         if isinstance(key, int):
@@ -536,6 +555,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
         # Location-excluded office staff don't feed the pool — their salary
         # stays as an Office cost instead of being spread to partner teams.
         if not included(key):
+            _note_excluded(key, r["employee_name"])
             continue
         if home_cc(p, key) != office_id:
             continue
@@ -604,6 +624,18 @@ def _build_employee_register(data: MISData, options: MISOptions,
                 f"{month_label(p)}: office overhead pool of {pool:,.0f} "
                 f"could not be allocated — no active partner-team "
                 f"employees in the period.")
+
+    # Tagging gaps: employees dropped ONLY because they carry no location.
+    if excluded_untagged:
+        shown = sorted(excluded_untagged)
+        names = ", ".join(shown[:8])
+        more = len(shown) - 8
+        data.warnings.append(
+            f"{len(shown)} employee(s) with NO location assigned were left "
+            f"out of the Employee Register / overhead: {names}"
+            + (f" (+{more} more)" if more > 0 else "")
+            + ". Assign locations in Master Data ▸ Employees (or resolve "
+              "raw names in Review & Map) to include them.")
 
 
 def _build_client_register(data: MISData, options: MISOptions,

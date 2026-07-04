@@ -512,8 +512,9 @@ MIGRATIONS: list[tuple[int, str]] = [
         -- (Mumbai, Bangalore, …). Employees are tagged with a location;
         -- at MIS-generation time the operator can select which locations
         -- to consider — only those employees enter the Employee Register
-        -- and the office-overhead computation. Employees with no location
-        -- assigned are always included (nothing silently vanishes).
+        -- and the office-overhead computation. Since v0.3.101 the filter
+        -- is STRICT: an untagged employee is excluded whenever a location
+        -- selection is active (a Cover warning lists them).
         CREATE TABLE IF NOT EXISTS locations (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             name        TEXT NOT NULL UNIQUE,
