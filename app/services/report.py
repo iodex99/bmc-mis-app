@@ -27,6 +27,7 @@ from .calc import (
     revenue_category,
 )
 from .resolution import norm
+from ..util import month_label, periods_label
 
 # --- palette & formats -------------------------------------------------------
 
@@ -193,11 +194,11 @@ def _sheet_cover(wb: Workbook, data: MISData,
     _cell(ws, 2, 2, config.ORG_NAME, font=Font(size=20, bold=True, color=NAVY))
     _cell(ws, 3, 2, "Management Information System",
           font=Font(size=13, color=BLUE))
-    periods = ", ".join(data.options.periods)
+    periods = periods_label(data.options.periods)
     rows = [
         ("Reporting period(s)", periods),
         ("Comparison period(s)",
-         ", ".join(compare.options.periods) if compare else "—"),
+         periods_label(compare.options.periods) if compare else "—"),
         ("Generated on", _dt.date.today().strftime("%d %b %Y")),
         ("Reimbursements in MIS",
          "Included" if data.options.include_reimbursement else "Excluded"),
@@ -237,7 +238,7 @@ def _sheet_dashboard(wb: Workbook, data: MISData) -> None:
         ws.column_dimensions[col].width = width
 
     _cell(ws, 2, 2, "MIS Dashboard", font=_TITLE)
-    _cell(ws, 3, 2, "Period(s): " + ", ".join(data.options.periods), font=_SUB)
+    _cell(ws, 3, 2, "Period(s): " + periods_label(data.options.periods), font=_SUB)
 
     # KPI tiles — values filled later by _link_dashboard.
     tiles = [("Total Revenue", 5, 2), ("Total Cost", 5, 4),
@@ -321,12 +322,10 @@ def _fy_months_through(fy: str, end_period: str) -> list[str]:
 
 
 def _month_short(period: str) -> str:
-    """``'2025-04'`` → ``'Apr 25'`` for compact column headers."""
-    try:
-        return _dt.date(int(period[:4]), int(period[5:7]), 1) \
-            .strftime("%b %y")
-    except (ValueError, IndexError):
-        return period
+    """``'2025-04'`` → ``'Apr-25'`` — delegates to :func:`util.month_label`
+    so every sheet renders periods identically (cross-sheet SUMIFS match
+    on these labels)."""
+    return month_label(period)
 
 
 def budget_monthly_data(data: MISData, lbl: dict) -> dict | None:
@@ -515,7 +514,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         ws.column_dimensions[get_column_letter(1 + i)].width = w
 
     _cell(ws, 1, 1, "Cost Centre Profitability", font=_TITLE)
-    _cell(ws, 2, 1, "Period(s): " + ", ".join(data.options.periods), font=_SUB)
+    _cell(ws, 2, 1, "Period(s): " + periods_label(data.options.periods), font=_SUB)
     hrow = 4
     _header_row(ws, hrow, headers)
 
@@ -739,7 +738,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
     _cell(ws, 1, 1, title, font=_TITLE)
     _cell(ws, 2, 1,
           ("Period(s): " if not suffix else "Comparison period(s): ")
-          + ", ".join(data.options.periods),
+          + periods_label(data.options.periods),
           font=_SUB)
 
     # ---- Column layout ----
@@ -1091,11 +1090,12 @@ def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
 
     _cell(ws, 1, 1, "Partner – Manager P&L — Current vs Comparison",
           font=_TITLE)
+    cur_lbl = periods_label(data.options.periods)
+    cmp_lbl = periods_label(compare.options.periods)
     _cell(ws, 2, 1,
-          "Current: " + ", ".join(data.options.periods)
-          + "    vs    Comparison: " + ", ".join(compare.options.periods)
-          + ".  Partner-level; the manager breakdown for the current "
-            "period is on the Partner-Manager P&L sheet.",
+          f"Current: {cur_lbl}    vs    Comparison: {cmp_lbl}."
+          "  Partner-level; the manager breakdown for the current "
+          "period is on the Partner-Manager P&L sheet.",
           font=_SUB)
 
     partners = [c for c in lbl["cc_active"] if c["cc_type"] == "partner"]
@@ -1113,7 +1113,7 @@ def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
     mis_start = 2 + len(partners) * n_cols_per_block
     last_col = mis_start + n_cols_per_block - 1
     for col in range(2, last_col + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 14
+        ws.column_dimensions[get_column_letter(col)].width = 17
 
     # Partner super-headers + the MIS Total block.
     blocks = ([(c["name"], start) for c, start in zip(partners, block_starts)]
@@ -1127,7 +1127,7 @@ def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
         for col in range(start, end + 1):
             ws.cell(row=hdr_partner_row, column=col).fill = _HEAD_FILL
             ws.cell(row=hdr_partner_row, column=col).border = _BORDER
-        for off, label in enumerate(("Current", "Comparison", "Δ")):
+        for off, label in enumerate((cur_lbl, cmp_lbl, "Δ")):
             _cell(ws, hdr_sub_row, start + off, label, font=_HEAD,
                   fill=_SUBHEAD_FILL, align=_CENTER, border=True)
     _cell(ws, hdr_partner_row, 1, "", fill=_HEAD_FILL)
@@ -1340,7 +1340,7 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
         ws.column_dimensions[get_column_letter(3 + i)].width = 13
 
     _cell(ws, 1, 1, "Client-wise Billing", font=_TITLE)
-    _cell(ws, 2, 1, "Period(s): " + ", ".join(periods), font=_SUB)
+    _cell(ws, 2, 1, "Period(s): " + periods_label(periods), font=_SUB)
     hrow = 4
     headers = ["Client", "Grand Total"] + [_month_short(p) for p in periods]
     _header_row(ws, hrow, headers)
@@ -1560,7 +1560,7 @@ def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
             f.get("expense_type") or expense_type(svc_name),
             _client_or_party(lbl, f),
             round(f["amount"], 2), f.get("description", ""),
-            f.get("period") or "",
+            month_label(f.get("period")) if f.get("period") else "",
         ])
     _write_data_sheet(wb, "Expenses" + suffix,
                       ["Date", "Voucher No", "Invoice No", "Entity",
@@ -1580,7 +1580,8 @@ def _sheet_provisions(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     rows = []
     for f in data.provision_facts:
         rows.append([
-            f.get("provision_period") or "",
+            month_label(f.get("provision_period"))
+            if f.get("provision_period") else "",
             f.get("entity_name") or "(unspecified)",
             lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
             f.get("client_name") or "(unmapped)",
@@ -1632,7 +1633,7 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
             return f"{raw}  ← unmapped, link in Review tab"
         return "(no client)"
     rows = [[
-        f["period"], _fmt_date(f.get("txn_date")),
+        month_label(f["period"]), _fmt_date(f.get("txn_date")),
         lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
         f["employee_name"],
         lbl["cc"].get(f.get("employee_cost_centre_id"), "—"),
@@ -1719,7 +1720,7 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     # staff (within the selected locations) whose pay feeds the overhead
     # pool. The Employee Register's Office Staff Salary column SUMIFS this
     # column, so the whole overhead cascade stays formula-driven.
-    rows = [[f["period"], _fmt_date(f.get("txn_date")),
+    rows = [[month_label(f["period"]), _fmt_date(f.get("txn_date")),
              _cc_label(f["cost_centre_id"]) or "Unassigned",
              f["employee_name"], _client_label(f),
              _cc_label(f.get("client_cost_centre_id")),
@@ -1803,16 +1804,16 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     for r in reg:
         for emp in r["active"]:
             roster_rows.append([
-                r["period"], emp["name"], emp["cc_code"],
+                month_label(r["period"]), emp["name"], emp["cc_code"],
                 emp.get("location", "—"), "Active",
                 "New Joiner" if emp["is_new"] else ""])
         for emp in r["exits"]:
             roster_rows.append([
-                r["period"], emp["name"], emp["cc_code"],
+                month_label(r["period"]), emp["name"], emp["cc_code"],
                 emp.get("location", "—"), "Exited", "Exit"])
         for p in r.get("partners", []):
             roster_rows.append([
-                r["period"], p["name"], p["cc_code"],
+                month_label(r["period"]), p["name"], p["cc_code"],
                 p.get("location", "—"), "Partner", ""])
 
     sum_hrow = 4
@@ -1836,8 +1837,8 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     notes = []
     for i, r in enumerate(reg):
         row = sum_first + i
-        _cell(ws, row, 1, r["period"], border=True)
-        _cell(ws, row, 2, r["prev_period"]
+        _cell(ws, row, 1, month_label(r["period"]), border=True)
+        _cell(ws, row, 2, month_label(r["prev_period"])
               + ("" if r["has_prev_data"] else "  (no data)"), border=True)
         _cell(ws, row, 3,
               f'=COUNTIFS({rA},$A{row},{rStat},"Active")',
@@ -1884,7 +1885,8 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
               font=_BOLD, fmt=INR, border=True)
         if not r["has_prev_data"]:
             notes.append(
-                f"{r['period']}: no timesheet found for {r['prev_period']} — "
+                f"{month_label(r['period'])}: no timesheet found for "
+                f"{month_label(r['prev_period'])} — "
                 f"joiners/exits not computed for this period.")
 
     # ---- 2. Roster -------------------------------------------------------
@@ -1920,8 +1922,8 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         for code in cc_codes:
             for r in reg:
                 _cell(ws, row, hc_c0, code, border=True)
-                _cell(ws, row, hc_c0 + 1, r["period"], border=True,
-                      align=_CENTER)
+                _cell(ws, row, hc_c0 + 1, month_label(r["period"]),
+                      border=True, align=_CENTER)
                 _cell(ws, row, hc_c0 + 2,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
                       f'{rStat},"Active")',
@@ -1972,7 +1974,7 @@ def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     for r in reg:
         for c in r["active"]:
             roster_rows.append([
-                r["period"], c["name"], c["cc_code"],
+                month_label(r["period"]), c["name"], c["cc_code"],
                 "New" if c["is_new"] else ""])
 
     sum_hrow = 4
@@ -1989,7 +1991,7 @@ def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     _header_row(ws, sum_hrow, ["Period", "Active Clients", "New Clients"])
     for i, r in enumerate(reg):
         row = sum_first + i
-        _cell(ws, row, 1, r["period"], border=True)
+        _cell(ws, row, 1, month_label(r["period"]), border=True)
         # Active = every roster row for the period; New = the flagged ones.
         _cell(ws, row, 2, f'=COUNTIFS({rA},$A{row})',
               font=_BOLD, border=True, align=_CENTER)
@@ -2023,7 +2025,8 @@ def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         for code in cc_codes:
             for r in reg:
                 _cell(ws, row, c0, code, border=True)
-                _cell(ws, row, c0 + 1, r["period"], border=True, align=_CENTER)
+                _cell(ws, row, c0 + 1, month_label(r["period"]),
+                      border=True, align=_CENTER)
                 _cell(ws, row, c0 + 2,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row})',
                       border=True, align=_CENTER)
@@ -2045,8 +2048,8 @@ def _sheet_comparatives(wb: Workbook, data: MISData, compare: MISData,
     SUMIFS over the comparison data sheets — so the whole sheet is live."""
     ws = wb.create_sheet("Comparatives")
     ws.sheet_view.showGridLines = False
-    cur_lbl = ", ".join(data.options.periods)
-    cmp_lbl = ", ".join(compare.options.periods)
+    cur_lbl = periods_label(data.options.periods)
+    cmp_lbl = periods_label(compare.options.periods)
     headers = ["Code", "Cost Centre",
                f"Revenue — {cur_lbl}", f"Revenue — {cmp_lbl}", "Revenue Δ",
                f"Profit — {cur_lbl}", f"Profit — {cmp_lbl}", "Profit Δ",

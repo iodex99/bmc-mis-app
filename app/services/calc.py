@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..database import transaction
+from ..util import month_label
 from .resolution import norm
 
 OVERHEAD_SEPARATE = "separate"
@@ -600,8 +601,9 @@ def _build_employee_register(data: MISData, options: MISOptions,
         })
         if pool > 0 and recipients == 0:
             data.warnings.append(
-                f"{p}: office overhead pool of {pool:,.0f} could not be "
-                f"allocated — no active partner-team employees in the period.")
+                f"{month_label(p)}: office overhead pool of {pool:,.0f} "
+                f"could not be allocated — no active partner-team "
+                f"employees in the period.")
 
 
 def _build_client_register(data: MISData, options: MISOptions,

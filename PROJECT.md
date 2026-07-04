@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.99** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.100** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,39 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.100 — Readable month labels throughout the generated MIS
+
+Operator ask: months should read "Apr-26", not "2026-04", everywhere in
+the generated MIS; and the PM P&L comparison sheet's column headers
+should show the actual periods instead of "Current" / "Comparison".
+
+* **One canonical formatter** — ``util.month_label`` ("2026-04" →
+  "Apr-26") and ``util.periods_label`` (one month → "Apr-26"; a
+  contiguous run → "Apr-25 to Jul-25"; otherwise a comma list).
+  ``report._month_short`` now delegates to it.
+* **Every sheet converted**: Cover (reporting/comparison periods), the
+  Excel Dashboard subtitle, Cost Centre P&L / Partner-Manager P&L
+  subtitles, Budget vs Monthly Sales month headers, Client Billing
+  month headers, the Period columns on the Salary / Expenses /
+  Reimbursements / Provisions data sheets, the Employee Register
+  (summary, prev-month, roster, headcount block, notes), the Client
+  Register, the Comparatives sheet headers, calc warnings, and the HTML
+  dashboard (already short labels; its provisions "Booked" column and
+  header line included).
+* **PM P&L (Cmp) headers** are now the period labels themselves —
+  e.g. "May-26 | Apr-26 | Δ" (or "Apr-25 to Jul-25" for a range).
+* **Cross-sheet formulas stay intact by construction**: the Employee
+  Register's SUMIFS/COUNTIFS match Period cells on the Salary /
+  Expenses sheets and its own roster, so BOTH sides now render through
+  the same formatter — mixing raw and pretty labels would break them,
+  which is why the formatter lives in one place.
+
+Verified: a swept comparative workbook contains **zero** raw ``YYYY-MM``
+cells across all 22 sheets; Cover / Budget / ER / (Cmp) headers show the
+new labels; a multi-month run shows "Apr-26 to May-26"; and the entire
+regression suite (locations, overhead, managers, comparison figures,
+migrations, UI smoke) passes with the labels in place.
 
 ### v0.3.99 — PM P&L comparison side-by-side, location everywhere, Cover formula-driven
 

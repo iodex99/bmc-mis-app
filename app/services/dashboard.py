@@ -467,7 +467,8 @@ def _provision_section(data: MISData, lbl: dict, ch: _Charts) -> str:
         controls=True)
     headers = ["Booked", "Entity", "Cost Centre", "Client",
                "Original", "Adjusted", "Remaining"]
-    rows = [[_esc(f.get("provision_period") or ""),
+    rows = [[_esc(report._month_short(f["provision_period"])
+                  if f.get("provision_period") else ""),
              _esc(f.get("entity_name") or "(unspecified)"),
              _esc(lbl["cc"].get(f["cost_centre_id"], "Unassigned")),
              _esc(f.get("client_name") or "(unmapped)"),
