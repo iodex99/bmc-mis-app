@@ -164,7 +164,7 @@ def generate(data: MISData, path: str | Path,
     _sheet_partner_manager(wb, data, lbl, fy_label=fy_label, fy_data=fy_data)
     _sheet_entity(wb, data, lbl)
     _sheet_service(wb, data, lbl)
-    _sheet_client_billing(wb, data, lbl)
+    _sheet_client_billing(wb, data, lbl, fy_label=fy_label, fy_data=fy_data)
     _sheet_employee_register(wb, data, lbl)
     _sheet_client_register(wb, data, lbl)
     if compare is not None:
@@ -693,7 +693,8 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
 
 def _build_pm_matrix(data: MISData, lbl: dict,
                      fy_label: str | None = None,
-                     fy_data: MISData | None = None):
+                     fy_data: MISData | None = None,
+                     cur_label: str | None = None):
     """Build the partner-manager column structure for the P&L matrix.
 
     Returns a list of partner blocks, where each block is:
@@ -764,6 +765,11 @@ def _build_pm_matrix(data: MISData, lbl: dict,
         mgr_ids.discard(None)
         named = sorted(mgr_ids, key=lambda m: lbl["mgr"].get(m, "?") or "?")
         columns: list[tuple[str, str, str | None]] = []
+        # Total-column labels carry the PERIOD (v0.3.103, operator ask):
+        # the partner's name already sits in the merged super-header, so
+        # "Jul-26" (or "Nov-26 to Feb-27") beside the cumulative label
+        # reads much clearer than the partner's initials / "Total".
+        total_lbl = cur_label or "Total"
         if named:
             # Partner delegates to at least one active manager — break the
             # partner's P&L down by manager, with a "Self" column for the
@@ -773,11 +779,11 @@ def _build_pm_matrix(data: MISData, lbl: dict,
             for mgr_id in named:
                 columns.append((lbl["mgr"].get(mgr_id, "?"), "manager",
                                 lbl["mgr"].get(mgr_id)))
-            columns.append(("Total", "subtotal", None))
+            columns.append((total_lbl, "subtotal", None))
         else:
             # No active managers under this partner — show a single
             # partner-total column instead of an identical Self + Total pair.
-            columns.append((cc["code"], "partner_total", None))
+            columns.append((cur_label or cc["code"], "partner_total", None))
         if fy_label:
             # FY-cumulative column (v0.3.102): the partner's totals for
             # the FY months BEFORE the selected period, SUMIFS-driven
@@ -802,7 +808,9 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
     ws = wb.create_sheet("Partner-Manager P&L" + suffix)
     ws.sheet_view.showGridLines = False
 
-    matrix = _build_pm_matrix(data, lbl, fy_label=fy_label, fy_data=fy_data)
+    cur_lbl = periods_label(data.options.periods)
+    matrix = _build_pm_matrix(data, lbl, fy_label=fy_label, fy_data=fy_data,
+                              cur_label=cur_lbl)
     if not matrix:
         # Nothing to show — still draw a heading so the sheet isn't blank.
         _cell(ws, 1, 1, title, font=_TITLE)
@@ -839,9 +847,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         ws.column_dimensions[get_column_letter(col)].width = 14
     for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
         for off, (_lbl2, _role2, _f2) in enumerate(managers):
-            if _role2 == "fy_prior":
+            if _role2 in ("fy_prior", "subtotal", "partner_total"):
                 ws.column_dimensions[
                     get_column_letter(start + off)].width = 17
+    ws.column_dimensions[get_column_letter(mis_total_col)].width = 17
     if mis_fy_col:
         ws.column_dimensions[get_column_letter(mis_fy_col)].width = 17
 
@@ -879,7 +888,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         for offset, (label, _role, _filter) in enumerate(managers):
             _cell(ws, hdr_mgr_row, start + offset, label, font=_HEAD,
                   fill=_SUBHEAD_FILL, align=_CENTER, border=True)
-    _cell(ws, hdr_mgr_row, mis_total_col, "Total", font=_HEAD,
+    _cell(ws, hdr_mgr_row, mis_total_col, cur_lbl or "Total", font=_HEAD,
           fill=_SUBHEAD_FILL, align=_CENTER, border=True)
     if mis_fy_col:
         _cell(ws, hdr_mgr_row, mis_fy_col, fy_label, font=_HEAD,
@@ -1445,27 +1454,33 @@ def _sheet_service(wb: Workbook, data: MISData, lbl: dict) -> None:
                     sumcol_rev="F", sumcol_exp="G")
 
 
-def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
+def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
+                          fy_label: str | None = None,
+                          fy_data: MISData | None = None) -> None:
     """Client × period billing matrix.
 
     One row per client (canonical name from the master, or ``(unmapped)``
-    when the voucher's party didn't resolve). One column per selected
-    period plus a ``Grand Total`` column second from the left, mirroring
-    the operator's reference layout. Cells sum the revenue (net amount)
-    booked to that client × period. Credit / Debit Notes flow through
-    with their signs intact so the net billing nets returns automatically.
-    Sorted by Grand Total descending so the biggest clients sit at top.
+    when the voucher's party didn't resolve). Columns: Client | Grand
+    Total | Cum <FY window> | one per selected period. The cumulative
+    column (v0.3.103) shows the client's billing over the FY months
+    BEFORE the selected period — a live SUMIFS over the "Revenue (FY)"
+    data sheet. Clients billed only in that prior window still get a row
+    (0 current), so the cumulative total never undercounts. Credit /
+    Debit Notes flow through with signs intact. Sorted by Grand Total
+    descending.
     """
     if not data.options.periods:
         return
     periods = sorted(data.options.periods)
+    has_fy = bool(fy_label and fy_data is not None)
 
     # Group by resolved client; unresolved parties group by their raw
     # party name (one row per distinct vendor/client as Tally spells it)
     # instead of all lumping into a single "(unmapped)" bucket.
     agg: dict = {}
     names: dict = {}
-    for f in data.revenue_facts:
+
+    def client_key(f):
         cid = f.get("client_id")
         if cid is not None:
             key = ("c", cid)
@@ -1474,8 +1489,18 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
             party = (f.get("party_name") or "").strip()
             key = ("r", norm(party)) if party else ("u",)
             names[key] = party or "(unmapped)"
+        return key
+
+    for f in data.revenue_facts:
+        key = client_key(f)
         bucket = agg.setdefault(key, {p: 0.0 for p in periods})
         bucket[f["period"]] = bucket.get(f["period"], 0.0) + float(f["amount"])
+    # Clients billed only in the FY-prior window get a zero current row —
+    # their cumulative figure must still show.
+    if has_fy:
+        for f in fy_data.revenue_facts:
+            key = client_key(f)
+            agg.setdefault(key, {p: 0.0 for p in periods})
 
     if not agg:
         return
@@ -1488,49 +1513,70 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict) -> None:
         rows.append((names[key], total, amounts))
     rows.sort(key=lambda r: -r[1])
 
+    # Layout: A Client, B Grand Total, then (optionally) the cumulative
+    # column, then one column per period.
+    cum_col = 3 if has_fy else None
+    p0 = 4 if has_fy else 3          # first period column
+
     ws = wb.create_sheet("Client Billing")
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 36
     ws.column_dimensions["B"].width = 16
+    if has_fy:
+        ws.column_dimensions["C"].width = 20
     for i in range(len(periods)):
-        ws.column_dimensions[get_column_letter(3 + i)].width = 13
+        ws.column_dimensions[get_column_letter(p0 + i)].width = 13
 
     _cell(ws, 1, 1, "Client-wise Billing", font=_TITLE)
-    _cell(ws, 2, 1, "Period(s): " + periods_label(periods), font=_SUB)
+    _cell(ws, 2, 1, "Period(s): " + periods_label(periods)
+          + (f".  'Cum {fy_label}' = the client's billing over the FY "
+             "months before the selected period." if has_fy else ""),
+          font=_SUB)
     hrow = 4
-    headers = ["Client", "Grand Total"] + [_month_short(p) for p in periods]
+    headers = (["Client", "Grand Total"]
+               + ([f"Cum {fy_label}"] if has_fy else [])
+               + [_month_short(p) for p in periods])
     _header_row(ws, hrow, headers)
 
     body_start = hrow + 1
     r = body_start
-    first_period_col = get_column_letter(3)
-    last_period_col = get_column_letter(3 + len(periods) - 1)
+    first_period_col = get_column_letter(p0)
+    last_period_col = get_column_letter(p0 + len(periods) - 1)
+    rev_fy = _q("Revenue" + FYS)
     for name, _total, amounts in rows:
         _cell(ws, r, 1, name, border=True)
         # Grand Total is a SUM formula across the period columns —
         # not a baked-in value — so the operator can edit a cell and
-        # the total updates live.
+        # the total updates live. (The cumulative column is context and
+        # is NOT part of the Grand Total.)
         _cell(ws, r, 2,
               f"=SUM({first_period_col}{r}:{last_period_col}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
+        if has_fy:
+            # Live SUMIFS over the Revenue (FY) sheet's Client column —
+            # both sheets name clients identically (master canonical
+            # name, raw party fallback), so the criterion always matches.
+            _cell(ws, r, cum_col,
+                  f"=SUMIFS({rev_fy}!$H:$H,{rev_fy}!$G:$G,$A{r})",
+                  fmt=INR, border=True)
         for i, amt in enumerate(amounts):
-            _cell(ws, r, 3 + i, amt, fmt=INR, border=True)
+            _cell(ws, r, p0 + i, amt, fmt=INR, border=True)
         r += 1
 
     # TOTAL row
     last_body = r - 1
     if last_body >= body_start:
         _cell(ws, r, 1, "TOTAL", font=_BOLD, fill=_TOTAL_FILL, border=True)
-        for col in range(2, 3 + len(periods)):
+        for col in range(2, p0 + len(periods)):
             L = get_column_letter(col)
             _cell(ws, r, col,
                   f"=SUM({L}{body_start}:{L}{last_body})",
                   font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
         _subtotal_filter(ws, hrow, body_start, last_body,
-                         list(range(2, 3 + len(periods))),
-                         last_col=2 + len(periods))
+                         list(range(2, p0 + len(periods))),
+                         last_col=p0 + len(periods) - 1)
 
-    ws.freeze_panes = f"C{body_start}"
+    ws.freeze_panes = f"{get_column_letter(p0)}{body_start}"
 
 
 def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,

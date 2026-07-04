@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.102** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.103** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,35 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.103 — Period-labeled total columns; Client Billing cumulative column
+
+Two operator follow-ups on the v0.3.102 cumulative feature:
+
+**1. Total columns carry the period, not the partner's initials.** On
+the Partner-Manager P&L the partner's total column was labeled with the
+partner CODE (collapsed blocks) or "Total" (manager blocks) — beside the
+cumulative "Apr-26 to Jun-26" it read as initials + months. The
+partner's name already sits in the merged super-header, so the total
+columns now carry the CURRENT period label: a July MIS shows
+**"Jul-26" | "Apr-26 to Jun-26"** under each partner name (and the same
+pair under "MIS Total"). Self / manager sub-columns keep their codes —
+they're breakdown labels, not periods.
+
+**2. Client Billing — cumulative column.** New **"Cum <FY window>"**
+column right after Grand Total: each client's billing over the FY months
+before the selected period, as a live SUMIFS over the "Revenue (FY)"
+data sheet (client names are written identically on both sheets, so the
+criterion always matches). Clients billed only in the prior window still
+get a row (0 current), so the cumulative total never undercounts. The
+Grand Total keeps summing ONLY the current period columns.
+
+Verified with the formula evaluator: a May-26 MIS shows per-partner
+column pairs "May-26"/"Apr-26" with the right figures; Client Billing
+shows PM Client 50,000 current / 1,40,000 cumulative and AM Client
+listed with 0 current / 3,50,000 cumulative (TOTAL cum 4,90,000);
+partner initials / "Total" no longer appear as column labels; the full
+regression suite is green.
 
 ### v0.3.102 — Partner-Manager P&L: FY-cumulative column
 
