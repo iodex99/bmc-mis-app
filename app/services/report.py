@@ -21,6 +21,8 @@ from .calc import (
     EXPENSE_TYPE_INDIRECT,
     EXPENSE_TYPE_PROFESSIONAL,
     MISData,
+    MISOptions,
+    compute,
     expense_type,
     financial_year,
     normalize_fy,
@@ -143,11 +145,23 @@ def generate(data: MISData, path: str | Path,
     wb = Workbook()
     wb.remove(wb.active)
 
+    # FY-cumulative context (v0.3.102): the months of the financial year
+    # BEFORE the earliest selected month (or the whole previous FY when
+    # the selection starts in April). Computed with the same calc engine
+    # and written to " (FY)" data sheets so the Partner-Manager P&L's
+    # cumulative column is live SUMIFS like every other figure.
+    fy_periods = _fy_prior_periods(data.options.periods)
+    fy_data = compute(MISOptions(
+        periods=fy_periods,
+        include_reimbursement=data.options.include_reimbursement,
+        location_ids=data.options.location_ids)) if fy_periods else None
+    fy_label = periods_label(fy_periods) if fy_periods else None
+
     _sheet_cover(wb, data, compare)
     _sheet_dashboard(wb, data)
     _sheet_budget_monthly(wb, data, lbl)
     rows_pl = _sheet_cost_centre(wb, data, lbl)
-    _sheet_partner_manager(wb, data, lbl)
+    _sheet_partner_manager(wb, data, lbl, fy_label=fy_label, fy_data=fy_data)
     _sheet_entity(wb, data, lbl)
     _sheet_service(wb, data, lbl)
     _sheet_client_billing(wb, data, lbl)
@@ -169,6 +183,12 @@ def generate(data: MISData, path: str | Path,
         _sheet_salary(wb, compare, lbl, CMP)
         _sheet_reimbursements(wb, compare, lbl, CMP)
         _sheet_provisions(wb, compare, lbl, CMP)
+    if fy_data is not None:
+        _sheet_revenue(wb, fy_data, lbl, FYS)
+        _sheet_expenses(wb, fy_data, lbl, FYS)
+        _sheet_salary(wb, fy_data, lbl, FYS)
+        _sheet_reimbursements(wb, fy_data, lbl, FYS)
+        _sheet_provisions(wb, fy_data, lbl, FYS)
 
     # Dashboard KPIs + Cover totals link to the Cost Centre P&L total row.
     _link_dashboard(wb, rows_pl)
@@ -180,6 +200,36 @@ def generate(data: MISData, path: str | Path,
 
 
 CMP = " (Cmp)"   # suffix for comparison-period data sheets
+FYS = " (FY)"    # suffix for the FY-prior cumulative data sheets
+
+
+def _fy_prior_periods(periods: list[str]) -> list[str]:
+    """The FY months BEFORE the earliest selected month (v0.3.102).
+
+    MIS for Jul-26 → Apr-26..Jun-26; MIS for Nov-26..Feb-27 → Apr-26..
+    Oct-26 (anchored on the EARLIEST selected month's financial year).
+    Edge case per the operator: a selection starting in April has no
+    prior FY months — show the WHOLE previous FY instead (Apr..Mar).
+    Empty input → empty output.
+    """
+    if not periods:
+        return []
+    earliest = min(periods)
+    try:
+        start_year = int(financial_year(earliest).split("-")[0])
+    except (ValueError, IndexError):
+        return []
+    fy_start = f"{start_year:04d}-04"
+    if earliest == fy_start:
+        # First month of the FY — cumulative = the whole previous FY.
+        return ([f"{start_year - 1:04d}-{m:02d}" for m in range(4, 13)]
+                + [f"{start_year:04d}-{m:02d}" for m in range(1, 4)])
+    months = []
+    y, m = start_year, 4
+    while f"{y:04d}-{m:02d}" < earliest:
+        months.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return months
 
 
 # --- Cover -------------------------------------------------------------------
@@ -641,7 +691,9 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
 
 # --- Partner – Manager P&L (matrix layout) ----------------------------------
 
-def _build_pm_matrix(data: MISData, lbl: dict):
+def _build_pm_matrix(data: MISData, lbl: dict,
+                     fy_label: str | None = None,
+                     fy_data: MISData | None = None):
     """Build the partner-manager column structure for the P&L matrix.
 
     Returns a list of partner blocks, where each block is:
@@ -666,6 +718,10 @@ def _build_pm_matrix(data: MISData, lbl: dict):
     A manager whose master row is deactivated is already folded to ``None`` on
     the facts by the calc engine, so it never appears as a "manager" column
     here; its work shows up under the partner's "self"/"partner_total" column.
+
+    With *fy_label*, every block additionally ends with a ``"fy_prior"``
+    column of that label — the FY-cumulative figures for the months before
+    the selected period (v0.3.102).
     """
     cc_active_map = {c["id"]: c for c in lbl["cc_active"]}
 
@@ -684,6 +740,20 @@ def _build_pm_matrix(data: MISData, lbl: dict):
         if cc is None or cc["cc_type"] != "partner":
             continue
         by_partner.setdefault(cc_id, []).append(mgr_id)
+
+    # A partner with FY-prior activity but nothing in the CURRENT period
+    # must still get a block (a collapsed 0 current column + the FY
+    # cumulative) — otherwise the MIS FY-cumulative total would silently
+    # undercount the firm's year-to-date (v0.3.102).
+    if fy_label and fy_data is not None:
+        for f in (fy_data.revenue_facts + fy_data.expense_facts
+                  + fy_data.labour_facts + fy_data.provision_facts):
+            cc_id = f.get("cost_centre_id")
+            if cc_id is None or cc_id in by_partner:
+                continue
+            cc = cc_active_map.get(cc_id)
+            if cc is not None and cc["cc_type"] == "partner":
+                by_partner[cc_id] = [None]
 
     result = []
     for cc_id in sorted(by_partner.keys(),
@@ -708,12 +778,19 @@ def _build_pm_matrix(data: MISData, lbl: dict):
             # No active managers under this partner — show a single
             # partner-total column instead of an identical Self + Total pair.
             columns.append((cc["code"], "partner_total", None))
+        if fy_label:
+            # FY-cumulative column (v0.3.102): the partner's totals for
+            # the FY months BEFORE the selected period, SUMIFS-driven
+            # from the " (FY)" data sheets.
+            columns.append((fy_label, "fy_prior", None))
         result.append((cc["code"], cc["name"], columns))
     return result
 
 
 def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
-                           suffix: str = "") -> None:
+                           suffix: str = "",
+                           fy_label: str | None = None,
+                           fy_data: MISData | None = None) -> None:
     """The headline P&L sheet — partner super-headers, manager sub-columns,
     formula-driven from the Revenue / Expenses / Labour data sheets.
 
@@ -725,7 +802,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
     ws = wb.create_sheet("Partner-Manager P&L" + suffix)
     ws.sheet_view.showGridLines = False
 
-    matrix = _build_pm_matrix(data, lbl)
+    matrix = _build_pm_matrix(data, lbl, fy_label=fy_label, fy_data=fy_data)
     if not matrix:
         # Nothing to show — still draw a heading so the sheet isn't blank.
         _cell(ws, 1, 1, title, font=_TITLE)
@@ -752,12 +829,21 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         cols_per_block.append(len(managers))
         col_idx += len(managers)
     mis_total_col = col_idx
-    last_col = mis_total_col
+    mis_fy_col = mis_total_col + 1 if fy_label else None
+    last_col = mis_fy_col or mis_total_col
 
-    # Set column widths.
+    # Set column widths (FY-cumulative columns are wider — they carry a
+    # period-range label like "Apr-26 to Jun-26").
     ws.column_dimensions["A"].width = 30
     for col in range(2, last_col + 1):
         ws.column_dimensions[get_column_letter(col)].width = 14
+    for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
+        for off, (_lbl2, _role2, _f2) in enumerate(managers):
+            if _role2 == "fy_prior":
+                ws.column_dimensions[
+                    get_column_letter(start + off)].width = 17
+    if mis_fy_col:
+        ws.column_dimensions[get_column_letter(mis_fy_col)].width = 17
 
     # ---- Header rows ----
     hdr_partner_row = 4
@@ -776,8 +862,14 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         for col in range(start, end + 1):
             ws.cell(row=hdr_partner_row, column=col).fill = _HEAD_FILL
             ws.cell(row=hdr_partner_row, column=col).border = _BORDER
+    if mis_fy_col:
+        ws.merge_cells(start_row=hdr_partner_row, start_column=mis_total_col,
+                       end_row=hdr_partner_row, end_column=mis_fy_col)
     _cell(ws, hdr_partner_row, mis_total_col, "MIS Total", font=_HEAD,
           fill=_HEAD_FILL, align=_CENTER, border=True)
+    if mis_fy_col:
+        ws.cell(row=hdr_partner_row, column=mis_fy_col).fill = _HEAD_FILL
+        ws.cell(row=hdr_partner_row, column=mis_fy_col).border = _BORDER
     _cell(ws, hdr_partner_row, 1, "", fill=_HEAD_FILL)
 
     # Manager sub-header (row 5): one cell per manager column + Total.
@@ -789,6 +881,9 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                   fill=_SUBHEAD_FILL, align=_CENTER, border=True)
     _cell(ws, hdr_mgr_row, mis_total_col, "Total", font=_HEAD,
           fill=_SUBHEAD_FILL, align=_CENTER, border=True)
+    if mis_fy_col:
+        _cell(ws, hdr_mgr_row, mis_fy_col, fy_label, font=_HEAD,
+              fill=_SUBHEAD_FILL, align=_CENTER, border=True)
 
     # ---- P&L lines ----
     rev, exp, lab = (_q("Revenue" + suffix), _q("Expenses" + suffix),
@@ -897,7 +992,16 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                 is_total_col = (role == "subtotal")
                 is_partner_total = (role == "partner_total")
                 cell_fmt = PCT if kind.endswith("_pct") else INR
-                if is_total_col and kind == "gross_pct":
+                fy_leaf = (_pm_leaf_formula(kind, cc_code, FYS)
+                           if role == "fy_prior" else None)
+                if fy_leaf is not None:
+                    # FY-cumulative column: partner-level SUMIFS against
+                    # the " (FY)" data sheets. Row-arithmetic kinds
+                    # (totals / %s) fall through to the generic
+                    # same-column branches below, which are column-local
+                    # and therefore already correct for this column.
+                    formula = fy_leaf
+                elif is_total_col and kind == "gross_pct":
                     # Recompute the ratio at the partner level — summing
                     # percentages doesn't make sense. Denominator is SALES
                     # (income only), not Total Income (v0.3.92).
@@ -930,9 +1034,13 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                     formula = (f"=IF({L}{inc_r}=0,0,"
                                f"{L}{net_r}/{L}{inc_r})")
                 elif is_total_col:
-                    # Plain SUM across the partner's manager columns.
+                    # Plain SUM across the partner's leaf (Self + manager)
+                    # columns — NOT the FY-cumulative column after the
+                    # Total (that belongs to a different period window).
+                    leaf_n = sum(1 for _l3, ro3, _f3 in managers
+                                 if ro3 in ("self", "manager"))
                     from_col = start
-                    to_col = start + len(managers) - 2
+                    to_col = start + leaf_n - 1
                     if from_col > to_col:
                         formula = 0
                     else:
@@ -1046,29 +1154,132 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
             mis_formula = (f"=IF({L}{inc_r}=0,0,"
                            f"{L}{net_r}/{L}{inc_r})")
         else:
-            total_refs = [f"{get_column_letter(start + count - 1)}{r}"
-                          for start, count in zip(block_starts, cols_per_block)]
+            # Reference each block's subtotal / partner-total column —
+            # the block's LAST column may now be the FY-cumulative one.
+            total_refs = []
+            for (_cc4, _nm4, cols4), start in zip(matrix, block_starts):
+                for off, (_l4, ro4, _f4) in enumerate(cols4):
+                    if ro4 in ("subtotal", "partner_total"):
+                        total_refs.append(
+                            f"{get_column_letter(start + off)}{r}")
+                        break
             mis_formula = "=" + "+".join(total_refs) if total_refs else 0
         _cell(ws, r, mis_total_col, mis_formula, font=_BOLD,
               fill=_TOTAL_FILL,
               fmt=PCT if kind.endswith("_pct") else INR, border=True)
 
+        # MIS FY-cumulative column: leaf kinds sum the partner blocks'
+        # FY columns; arithmetic kinds (totals / %s) recompute within
+        # this column so the %s are true cumulative ratios.
+        if mis_fy_col:
+            Lf = get_column_letter(mis_fy_col)
+            fy_formula = _pm_col_arith(kind, Lf, rows_by_kind)
+            if fy_formula is None:
+                fy_refs = []
+                for (_cc5, _nm5, cols5), start in zip(matrix, block_starts):
+                    for off, (_l5, ro5, _f5) in enumerate(cols5):
+                        if ro5 == "fy_prior":
+                            fy_refs.append(
+                                f"{get_column_letter(start + off)}{r}")
+                            break
+                fy_formula = "=" + "+".join(fy_refs) if fy_refs else 0
+            _cell(ws, r, mis_fy_col, fy_formula, font=_BOLD,
+                  fill=_TOTAL_FILL,
+                  fmt=PCT if kind.endswith("_pct") else INR, border=True)
+
         r += 1
 
     ws.freeze_panes = f"B{body_start}"
-    _cell(ws, r + 1, 1,
-          "Salary (billable) = labour booked to this partner's clients; "
-          "Salary (non-billable) = the partner's own staff time that isn't "
-          "client-billable (office-booked / admin / unlogged), charged to "
-          "their home cost centre. Office Overhead = (office indirect "
-          "expenses + office-home staff salaries) ÷ partner-team employees, "
-          "charged to each one's home cost centre (see Employee Register). "
-          "Professional Fees / Indirect Expenses follow the Cost Center on "
-          "the voucher split and the Type of Expense column. Office Overhead "
-          "is partner-level (not split by manager), so a manager column's "
-          "Net is before office overhead — the partner Total deducts it, and "
-          "Gross/Net % are on sales income.",
-          font=_SUB)
+    note = (
+        "Salary (billable) = labour booked to this partner's clients; "
+        "Salary (non-billable) = the partner's own staff time that isn't "
+        "client-billable (office-booked / admin / unlogged), charged to "
+        "their home cost centre. Office Overhead = (office indirect "
+        "expenses + office-home staff salaries) ÷ partner-team employees, "
+        "charged to each one's home cost centre (see Employee Register). "
+        "Professional Fees / Indirect Expenses follow the Cost Center on "
+        "the voucher split and the Type of Expense column. Office Overhead "
+        "is partner-level (not split by manager), so a manager column's "
+        "Net is before office overhead — the partner Total deducts it, and "
+        "Gross/Net % are on sales income.")
+    if fy_label:
+        note += (
+            f" The '{fy_label}' column shows the partner's CUMULATIVE "
+            "figures for the financial-year months before the selected "
+            "period (a selection starting in April shows the whole "
+            "previous FY), read live from the ' (FY)' data sheets; it is "
+            "context only and is NOT included in the partner Total or "
+            "MIS Total.")
+    _cell(ws, r + 1, 1, note, font=_SUB)
+
+
+# --- Partner-level P&L formula builders (shared) ------------------------------
+# Used by the Partner-Manager comparison sheet AND the FY-cumulative column
+# on the main Partner-Manager P&L, so both stay formula-identical.
+
+def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
+    """Partner-level SUMIFS for *kind* against the ``sfx`` data sheets
+    ("" = current, ``CMP`` = comparison, ``FYS`` = FY-prior cumulative).
+    Returns ``None`` for row-arithmetic kinds (sums / %s)."""
+    rev, exp, lab = (_q("Revenue" + sfx), _q("Expenses" + sfx),
+                     _q("Salary" + sfx))
+    reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
+    if kind == "sales":
+        return (f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
+                f'{rev}!$I:$I,"Income")')
+    if kind == "reimb":
+        f1 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
+              f'{rev}!$I:$I,"Reimbursement")')
+        f2 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
+              f'{rev}!$I:$I,"OPE")')
+        return "=" + f1 + "+" + f2
+    if kind == "salary":
+        return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")')
+    if kind == "salary_nonbill":
+        return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")')
+    if kind == "expense":
+        return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
+                f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")')
+    if kind == "indirect":
+        return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
+                f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")')
+    if kind == "reimb_exp":
+        return f'=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,"{cc_code}")'
+    if kind == "provisions":
+        return f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}")'
+    if kind == "overhead":
+        return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                f'{lab}!$J:$J,"Overhead")')
+    return None
+
+
+def _pm_col_arith(kind: str, L: str, rows_by_kind: dict) -> str | None:
+    """Row-arithmetic P&L kinds (totals and %s), computed within one
+    column letter *L* from that column's own leaf rows."""
+    if kind == "income_sum":
+        return f"={L}{rows_by_kind['sales']}+{L}{rows_by_kind['reimb']}"
+    if kind == "cost_sum":
+        return (f"={L}{rows_by_kind['salary']}"
+                f"+{L}{rows_by_kind['salary_nonbill']}"
+                f"+{L}{rows_by_kind['expense']}"
+                f"+{L}{rows_by_kind['reimb_exp']}"
+                f"+{L}{rows_by_kind['provisions']}")
+    if kind == "gross":
+        return (f"={L}{rows_by_kind['income_sum']}"
+                f"-{L}{rows_by_kind['cost_sum']}")
+    if kind == "gross_pct":
+        s, g = rows_by_kind["sales"], rows_by_kind["gross"]
+        return f"=IF({L}{s}=0,0,{L}{g}/{L}{s})"
+    if kind == "net":
+        return (f"={L}{rows_by_kind['gross']}"
+                f"-{L}{rows_by_kind['overhead']}"
+                f"-{L}{rows_by_kind['indirect']}")
+    if kind == "net_pct":
+        s, n = rows_by_kind["sales"], rows_by_kind["net"]
+        return f"=IF({L}{s}=0,0,{L}{n}/{L}{s})"
+    return None
 
 
 # --- Partner-Manager P&L: current vs comparison ------------------------------
@@ -1134,41 +1345,9 @@ def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
     _cell(ws, hdr_sub_row, 1, "Particulars", font=_HEAD, fill=_SUBHEAD_FILL,
           align=_CENTER, border=True)
 
-    def leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
-        """Partner-level SUMIFS for *kind* against the ``sfx`` data sheets
-        ("" = current, CMP = comparison). None for row-arithmetic kinds."""
-        rev, exp, lab = (_q("Revenue" + sfx), _q("Expenses" + sfx),
-                         _q("Salary" + sfx))
-        reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
-        if kind == "sales":
-            return (f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
-                    f'{rev}!$I:$I,"Income")')
-        if kind == "reimb":
-            f1 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
-                  f'{rev}!$I:$I,"Reimbursement")')
-            f2 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
-                  f'{rev}!$I:$I,"OPE")')
-            return "=" + f1 + "+" + f2
-        if kind == "salary":
-            return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                    f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")')
-        if kind == "salary_nonbill":
-            return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                    f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")')
-        if kind == "expense":
-            return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
-                    f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")')
-        if kind == "indirect":
-            return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
-                    f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")')
-        if kind == "reimb_exp":
-            return f'=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,"{cc_code}")'
-        if kind == "provisions":
-            return f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}")'
-        if kind == "overhead":
-            return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                    f'{lab}!$J:$J,"Overhead")')
-        return None
+    # Shared partner-level builders (also used by the FY-cumulative column
+    # on the main sheet).
+    leaf_formula = _pm_leaf_formula
 
     # Same line plan as the main Partner-Manager P&L.
     plan = [
@@ -1192,30 +1371,7 @@ def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
         ("Net Profit %", "net_pct"),
     ]
 
-    def arith_formula(kind: str, L: str, rows_by_kind: dict) -> str | None:
-        """Row-arithmetic kinds, computed within one column letter *L*."""
-        if kind == "income_sum":
-            return f"={L}{rows_by_kind['sales']}+{L}{rows_by_kind['reimb']}"
-        if kind == "cost_sum":
-            return (f"={L}{rows_by_kind['salary']}"
-                    f"+{L}{rows_by_kind['salary_nonbill']}"
-                    f"+{L}{rows_by_kind['expense']}"
-                    f"+{L}{rows_by_kind['reimb_exp']}"
-                    f"+{L}{rows_by_kind['provisions']}")
-        if kind == "gross":
-            return (f"={L}{rows_by_kind['income_sum']}"
-                    f"-{L}{rows_by_kind['cost_sum']}")
-        if kind == "gross_pct":
-            s, g = rows_by_kind["sales"], rows_by_kind["gross"]
-            return f"=IF({L}{s}=0,0,{L}{g}/{L}{s})"
-        if kind == "net":
-            return (f"={L}{rows_by_kind['gross']}"
-                    f"-{L}{rows_by_kind['overhead']}"
-                    f"-{L}{rows_by_kind['indirect']}")
-        if kind == "net_pct":
-            s, n = rows_by_kind["sales"], rows_by_kind["net"]
-            return f"=IF({L}{s}=0,0,{L}{n}/{L}{s})"
-        return None
+    arith_formula = _pm_col_arith
 
     r = body_start
     rows_by_kind: dict[str, int] = {}

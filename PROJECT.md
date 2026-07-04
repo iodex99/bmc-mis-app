@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.101** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.102** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,42 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.102 — Partner-Manager P&L: FY-cumulative column
+
+Operator ask: alongside the selected period's figures, show the
+CUMULATIVE figures of the financial-year months before it. MIS for
+Jul-26 → a column "Apr-26 to Jun-26" beside the Jul-26 figures; MIS for
+Nov-26..Feb-27 → "Apr-26 to Oct-26". Edge case: a selection starting in
+April has no prior FY months, so the column shows the WHOLE previous FY
+("Apr-25 to Mar-26").
+
+* **Window** — from the FY start (April) of the EARLIEST selected month
+  up to the month before it (``_fy_prior_periods``).
+* **Formula-driven** — the prior window is computed with the same calc
+  engine and written to five ``" (FY)"`` data sheets (Revenue, Expenses,
+  Salary, Reimbursements, Provisions); the cumulative column is live
+  partner-level SUMIFS over them, sharing one formula builder
+  (``_pm_leaf_formula`` / ``_pm_col_arith``) with the comparison sheet.
+* **Layout** — every partner block ends with the cumulative column
+  (after the partner's Total), and the MIS Total block gains a matching
+  cumulative column; %s recompute within the cumulative column so they
+  are true YTD ratios. The cumulative column is context only — it is
+  NOT summed into the partner Total or MIS Total (the per-partner
+  subtotal now sums only the leaf Self/manager columns explicitly, and
+  the MIS row references each block's Total column by role).
+* **Completeness** — a partner with prior-FY activity but nothing in
+  the current period still gets a block (0 current + cumulative), so
+  the MIS cumulative never undercounts the firm's year-to-date.
+
+Verified end-to-end with the formula evaluator: window arithmetic
+(Jul→Apr-Jun; Nov-Feb→Apr-Oct; Apr→whole previous FY; Jan year
+rollover); a May-26 MIS shows PM current 50,000 with cumulative
+1,40,000 and pulls in AM (no May activity) with cumulative 3,50,000;
+the MIS cumulative Net ties to the April calc run; the partner Total
+provably EXCLUDES the cumulative column; an April MIS shows the empty
+previous FY as 0 with the current MIS intact; full regression suite
+green.
 
 ### v0.3.101 — Location filter is now STRICT
 
