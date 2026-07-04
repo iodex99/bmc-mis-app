@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.97** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.98** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,55 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.98 — Locations master, partners in the overhead spread, fully formula-driven Employee Register, comparative Partner-Manager P&L
+
+Four operator asks in one release (migration 18):
+
+**1. Locations master + per-location MIS.** New Master Data tab
+**Locations** (the offices the firm operates from); the Employee master
+gains a **Location** dropdown. The Generate page now offers a location
+checklist (hidden until locations exist; all ticked by default): only
+employees of the selected locations enter the **Employee Register** and
+the **office-overhead computation**. Employees with **no location
+assigned are always included** (nothing silently vanishes), and salary /
+voucher **figures are never filtered** — an excluded office-home
+employee's pay simply stays on Office instead of joining the pool, so
+the firm total is identical whatever the selection (verified). The Cover
+sheet shows "Locations considered"; a warning note spells out the
+filter. The comparison-period run uses the same selection.
+
+**2. Partners are overhead recipients.** Partners aren't in the employee
+master, but each **active partner cost centre now counts as one head**
+in the overhead spread: Recipients = partner-team active employees +
+partners, and each partner CC receives a per-head share (live Salary-
+sheet Overhead rows, like employees). Partner rows appear in the ER
+roster with status **Partner** (they don't inflate the Active-employee
+counts or headcount-by-CC).
+
+**3. Employee Register fully formula-driven.** Two columns were baked
+values; now: **Office Staff Salary** = SUMIFS over the Salary sheet's
+new **Pool Source** column (Yes on the salary rows of office-home staff
+within the selected locations — the range is bounded to the salary-only
+rows because the Overhead rows chain back to this sheet, which would
+otherwise be a circular reference), and **Overhead Recipients** =
+COUNTIFS over the roster (Active minus office-home Active, plus Partner
+rows). The whole overhead cascade — pool → per-head → Salary-sheet
+Overhead rows → P&Ls — now recomputes live from an edited cell.
+
+**4. Comparative Partner-Manager P&L.** A comparative MIS now carries a
+full **"Partner-Manager P&L (Cmp)"** sheet (same matrix layout, built
+from the comparison period's own facts), driven by the (Cmp) data
+sheets — including a new **Provisions (Cmp)** sheet so its Provisions
+row resolves.
+
+Verified end-to-end with the formula evaluator (validated against the
+calc engine): pool = office indirect + office staff salary and per-head
+share exact (28,000 ÷ 11 heads); location filter drops the excluded
+employees from the register and pool while their salary stays put and
+the firm Net is IDENTICAL filtered vs unfiltered; ER's G/H cells
+evaluate to the filtered figures; the comparative PM P&L ties to the
+compare-period calc; migrations idempotent; managers regression green.
 
 ### v0.3.97 — Deactivating a manager hides it from the MIS (folds into the partner total)
 

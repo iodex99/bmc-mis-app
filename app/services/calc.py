@@ -99,6 +99,13 @@ class MISOptions:
     periods: list[str]
     include_reimbursement: bool = True
     overhead_mode: str = OVERHEAD_SEPARATE      # retained for compatibility
+    # Locations to consider for the Employee Register / office-overhead
+    # computation (v0.3.98). ``None`` = no filter (all locations). When a
+    # list is given, only employees whose master location is in it (plus
+    # employees with NO location assigned) enter the register and the
+    # overhead pool/spread. Voucher/salary FIGURES are never filtered —
+    # only the register and the overhead allocation.
+    location_ids: list[int] | None = None
 
 
 @dataclass
@@ -162,6 +169,9 @@ class MISData:
     entities: list[dict] = field(default_factory=list)
     services: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Human-readable label of the location selection ("All locations" or
+    # "Mumbai, Bangalore") — shown on the workbook Cover.
+    location_label: str = "All locations"
 
     @property
     def total_revenue(self) -> float:
@@ -236,6 +246,15 @@ def compute(options: MISOptions) -> MISData:
     apply_known_client_aliases(skip_fuzzy=True)
 
     masters = _load_masters()
+    if options.location_ids is not None:
+        names = [masters["locations"].get(i, {}).get("name", f"#{i}")
+                 for i in options.location_ids]
+        data.location_label = ", ".join(sorted(names)) if names else "(none)"
+        data.warnings.append(
+            "Employee Register / office overhead consider only these "
+            f"locations: {data.location_label} (plus employees with no "
+            "location assigned). Salary and voucher figures are not "
+            "filtered.")
     _build_voucher_facts(data, options, masters)
     # Employee register BEFORE labour facts: the register's active-employee
     # roster + office-indirect pool drive the per-employee overhead facts.
@@ -262,6 +281,8 @@ def _load_masters() -> dict:
                     for r in conn.execute("SELECT * FROM services")}
         clients = {r["id"]: dict(r)
                    for r in conn.execute("SELECT * FROM clients")}
+        locations = {r["id"]: dict(r)
+                     for r in conn.execute("SELECT * FROM locations")}
         # name -> employee id (master names + aliases). Insert aliases
         # FIRST so canonical names overwrite them on key collision —
         # the same correctness fix applied to clients in v0.3.58.
@@ -279,8 +300,33 @@ def _load_masters() -> dict:
     return {
         "cost_centres": cost_centres, "managers": managers,
         "entities": entities, "services": services, "clients": clients,
+        "locations": locations,
         "emp_index": emp_index, "employees": employees, "office_id": office_id,
     }
+
+
+def _location_filter(masters: dict, options: MISOptions):
+    """Return a predicate: is this employee key considered in this run?
+
+    ``options.location_ids`` = None → everyone. Otherwise an employee is
+    considered when their master location is in the selected set — or when
+    they have NO location assigned / no master row at all (a raw timesheet
+    name), so nothing silently drops out just because it was never tagged.
+    Applies only to the Employee Register and the office-overhead
+    computation; salary/voucher figures are never location-filtered.
+    """
+    if options.location_ids is None:
+        return lambda key: True
+    allowed = set(options.location_ids)
+    employees = masters["employees"]
+
+    def included(key) -> bool:
+        if not isinstance(key, int):
+            return True
+        loc = (employees.get(key) or {}).get("location_id")
+        return loc is None or loc in allowed
+
+    return included
 
 
 def _placeholders(items: list) -> str:
@@ -415,19 +461,39 @@ def _build_employee_register(data: MISData, options: MISOptions,
     def emp_key(name: str):
         return emp_index.get(norm(name), f"raw:{norm(name)}")
 
+    # Location selection (v0.3.98): only employees of the selected
+    # locations (plus untagged ones) enter the register / overhead spread.
+    included = _location_filter(masters, options)
+
     sal_cc: dict[tuple, int] = {}
     for r in sal_rows:
         sal_cc[(r["period"], emp_key(r["employee_name"]))] = r["cost_centre_id"]
 
     # period -> {key: display name}. Master canonical name wins over the
-    # raw timesheet spelling when the employee is resolved.
+    # raw timesheet spelling when the employee is resolved. Employees
+    # outside the selected locations are left out entirely (so they are
+    # neither Active nor Exits).
     roster: dict[str, dict] = {p: {} for p in all_periods}
     for r in ts_rows:
         key = emp_key(r["emp_name"])
+        if not included(key):
+            continue
         name = r["emp_name"]
         if isinstance(key, int):
             name = (employees.get(key) or {}).get("name") or name
         roster.setdefault(r["period"], {})[key] = name
+
+    # Partners are not in the employee master but ARE overhead recipients
+    # (v0.3.98): every active partner cost centre counts as one head in
+    # the overhead spread and carries a per-head share to its own CC.
+    partners = [{
+        "key": f"partner:{cc['code']}",
+        "name": cc["name"],
+        "cost_centre_id": cc_id,
+        "cc_code": cc["code"],
+    } for cc_id, cc in sorted(cost_centres.items(),
+                              key=lambda kv: kv[1]["code"])
+        if cc["cc_type"] == "partner" and cc.get("active", 1)]
 
     def home_cc(period: str, key) -> int | None:
         cc = None
@@ -456,7 +522,12 @@ def _build_employee_register(data: MISData, options: MISOptions,
         p = r["period"]
         if p not in office_salary_by_period:
             continue
-        if home_cc(p, emp_key(r["employee_name"])) != office_id:
+        key = emp_key(r["employee_name"])
+        # Location-excluded office staff don't feed the pool — their salary
+        # stays as an Office cost instead of being spread to partner teams.
+        if not included(key):
+            continue
+        if home_cc(p, key) != office_id:
             continue
         amt = float(r["salary_paid"] or 0.0)
         if options.include_reimbursement:
@@ -490,9 +561,12 @@ def _build_employee_register(data: MISData, options: MISOptions,
                     "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
                 })
         n = len(active)
-        # Overhead recipients = active employees whose home CC is a PARTNER.
-        # Office-home staff are the cost SOURCE, not recipients (v0.3.82).
-        recipients = sum(1 for a in active if a["cost_centre_id"] != office_id)
+        # Overhead recipients = active employees whose home CC is a PARTNER
+        # (office-home staff are the cost SOURCE, not recipients, v0.3.82)
+        # PLUS the partners themselves (v0.3.98) — partners aren't in the
+        # employee master but each active partner is one overhead head.
+        recipients = (sum(1 for a in active if a["cost_centre_id"] != office_id)
+                      + len(partners))
         office_indirect = round(pool_by_period.get(p, 0.0), 2)
         office_salary = round(office_salary_by_period.get(p, 0.0), 2)
         pool = round(office_indirect + office_salary, 2)
@@ -503,6 +577,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
             "has_prev_data": has_prev,
             "active": active,
             "exits": exits,
+            "partners": partners,
             "active_count": n,
             "new_count": sum(1 for a in active if a["is_new"]),
             "exit_count": len(exits),
@@ -612,6 +687,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
     emp_index = masters["emp_index"]
     employees = masters["employees"]
     managers = masters["managers"]
+    included = _location_filter(masters, options)
     ph = _placeholders(options.periods)
 
     def manager_for(emp_lookup_key, charged_cc):
@@ -698,6 +774,12 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         # cost lands on Office regardless of which client they booked, and
         # their pay is redistributed to the partner teams via the pool.
         emp_is_office_home = (home_cc == office_id)
+        # Pool source (v0.3.98): this employee's salary rows feed the
+        # overhead pool — flagged so the Employee Register's Office Staff
+        # Salary column can SUMIFS them live off the Salary sheet. Only
+        # office-home staff within the selected locations qualify (must
+        # mirror the register's office_salary_by_period computation).
+        is_pool_source = emp_is_office_home and included(emp_lookup_key)
 
         if total_logged > 0:
             for t in rows:
@@ -737,6 +819,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "client_raw": t["client_raw"],
                     "is_residual": False,
                     "is_overhead": False,
+                    "is_pool_source": is_pool_source,
                     "billable": billable,
                     "hours": h, "amount": h * salary_rate,
                 })
@@ -754,6 +837,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "client_raw": None,
                     "is_residual": True,
                     "is_overhead": False,
+                    "is_pool_source": is_pool_source,
                     # Residual / unallocated time counts as billable
                     # (operator decision, v0.3.89) — except for office-home
                     # staff, whose cost is pure overhead either way.
@@ -773,6 +857,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "client_raw": None,
                 "is_residual": True,
                 "is_overhead": False,
+                "is_pool_source": is_pool_source,
                 # No timesheet at all → the whole salary is residual;
                 # treat as billable (v0.3.89) unless office-home.
                 "billable": not emp_is_office_home,
@@ -792,11 +877,13 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         if per_emp <= 0 or recipients <= 0:
             continue
         period = reg["period"]
-        for emp in reg["active"]:
-            # Only partner-team employees receive an overhead share; the
-            # office-home staff are the source of (part of) the pool.
-            if emp["cost_centre_id"] == office_id:
-                continue
+        # Recipients: partner-team active employees + the partners
+        # themselves (v0.3.98). Office-home staff are the source of
+        # (part of) the pool, not recipients.
+        heads = ([e for e in reg["active"]
+                  if e["cost_centre_id"] != office_id]
+                 + reg.get("partners", []))
+        for emp in heads:
             data.labour_facts.append({
                 "period": period,
                 "txn_date": None,

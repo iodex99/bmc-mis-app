@@ -113,7 +113,15 @@ SPECS: list[TableSpec] = [
         Field("manager_id", "Manager", "fk", fk_table="managers", optional=True),
         Field("default_cost_centre_id", "Default cost centre", "fk",
               fk_table="cost_centres", optional=True),
+        Field("location_id", "Location", "fk", fk_table="locations",
+              optional=True),
     ]),
+    # Locations the firm operates from (v0.3.98). Employees are tagged with
+    # one; the Generate page lets the operator pick which locations an MIS
+    # run considers for the Employee Register / office-overhead spread.
+    TableSpec("locations", "Locations", [
+        Field("name", "Location name"),
+    ], order_by="name"),
     # Manager was on the client master in v0.3.47 but became redundant
     # once the Sales/Purchase Register Excel began carrying the
     # manager-partner string per voucher line (v0.3.49). The DB column
@@ -878,8 +886,8 @@ class MasterDataPage(QWidget):
         heading.setObjectName("pageHeading")
         layout.addWidget(heading)
         note = QLabel("Add, edit or deactivate entities, cost centres, "
-                      "managers, employees, clients, services and annual "
-                      "targets.")
+                      "managers, employees, clients, services, locations "
+                      "and annual targets.")
         note.setObjectName("pageNote")
         layout.addWidget(note)
 

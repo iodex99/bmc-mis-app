@@ -507,6 +507,21 @@ MIGRATIONS: list[tuple[int, str]] = [
                     round(amount, 2)
          );
     """),
+    (18, """
+        -- Locations master (v0.3.98): the offices the firm operates from
+        -- (Mumbai, Bangalore, …). Employees are tagged with a location;
+        -- at MIS-generation time the operator can select which locations
+        -- to consider — only those employees enter the Employee Register
+        -- and the office-overhead computation. Employees with no location
+        -- assigned are always included (nothing silently vanishes).
+        CREATE TABLE IF NOT EXISTS locations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            active      INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        ALTER TABLE employees ADD COLUMN location_id INTEGER REFERENCES locations(id);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
