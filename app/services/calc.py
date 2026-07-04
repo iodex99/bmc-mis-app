@@ -491,6 +491,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
         "name": cc["name"],
         "cost_centre_id": cc_id,
         "cc_code": cc["code"],
+        "location": "—",     # partners aren't in the employee master
     } for cc_id, cc in sorted(cost_centres.items(),
                               key=lambda kv: kv[1]["code"])
         if cc["cc_type"] == "partner" and cc.get("active", 1)]
@@ -503,6 +504,14 @@ def _build_employee_register(data: MISData, options: MISOptions,
 
     def cc_code(cc_id) -> str:
         return (cost_centres.get(cc_id) or {}).get("code") or "—"
+
+    locations = masters["locations"]
+
+    def loc_name(key) -> str:
+        if not isinstance(key, int):
+            return "—"
+        loc_id = (employees.get(key) or {}).get("location_id")
+        return (locations.get(loc_id) or {}).get("name") or "—"
 
     # Office indirect pool per period, from the already-built expense facts.
     pool_by_period: dict[str, float] = {p: 0.0 for p in periods}
@@ -545,6 +554,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
             active.append({
                 "key": key, "name": name,
                 "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
+                "location": loc_name(key),
                 # Movement is only meaningful when we actually hold the
                 # previous month's timesheet — otherwise EVERYONE would
                 # read as a "new joiner" on the first ever import.
@@ -559,6 +569,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
                 exits.append({
                     "key": key, "name": name,
                     "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
+                    "location": loc_name(key),
                 })
         n = len(active)
         # Overhead recipients = active employees whose home CC is a PARTNER
@@ -687,8 +698,16 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
     emp_index = masters["emp_index"]
     employees = masters["employees"]
     managers = masters["managers"]
+    locations = masters["locations"]
     included = _location_filter(masters, options)
     ph = _placeholders(options.periods)
+
+    def emp_location(key) -> str:
+        """Display name of the employee's location ('—' when untagged)."""
+        if not isinstance(key, int):
+            return "—"
+        loc_id = (employees.get(key) or {}).get("location_id")
+        return (locations.get(loc_id) or {}).get("name") or "—"
 
     def manager_for(emp_lookup_key, charged_cc):
         """The employee's assigned manager — but only when that manager
@@ -780,6 +799,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         # office-home staff within the selected locations qualify (must
         # mirror the register's office_salary_by_period computation).
         is_pool_source = emp_is_office_home and included(emp_lookup_key)
+        location = emp_location(emp_lookup_key)
 
         if total_logged > 0:
             for t in rows:
@@ -820,6 +840,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "is_residual": False,
                     "is_overhead": False,
                     "is_pool_source": is_pool_source,
+                    "location": location,
                     "billable": billable,
                     "hours": h, "amount": h * salary_rate,
                 })
@@ -838,6 +859,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                     "is_residual": True,
                     "is_overhead": False,
                     "is_pool_source": is_pool_source,
+                    "location": location,
                     # Residual / unallocated time counts as billable
                     # (operator decision, v0.3.89) — except for office-home
                     # staff, whose cost is pure overhead either way.
@@ -858,6 +880,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "is_residual": True,
                 "is_overhead": False,
                 "is_pool_source": is_pool_source,
+                "location": location,
                 # No timesheet at all → the whole salary is residual;
                 # treat as billable (v0.3.89) unless office-home.
                 "billable": not emp_is_office_home,
@@ -896,6 +919,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
                 "is_residual": False,
                 "is_overhead": True,
                 "is_overhead_offset": False,
+                "location": emp.get("location", "—"),
                 "billable": False,
                 "hours": 0.0, "amount": per_emp,
             })
@@ -914,6 +938,7 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
             "is_residual": False,
             "is_overhead": True,
             "is_overhead_offset": True,
+            "location": "—",
             "billable": False,
             "hours": 0.0,
             "amount": -round(per_emp * recipients, 2),

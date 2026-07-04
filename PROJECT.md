@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.98** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.99** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,46 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.99 — PM P&L comparison side-by-side, location everywhere, Cover formula-driven
+
+Operator feedback on v0.3.98, plus a full sweep for anywhere location was
+still missing:
+
+**1. "Partner-Manager P&L (Cmp)" is now a real comparison.** The v0.3.98
+edition showed the comparison period standalone, so the operator saw "no
+comparison figures". Rebuilt: the same P&L lines with, per partner,
+three side-by-side columns — **Current | Comparison | Δ** — plus a
+three-column MIS Total block. Current columns SUMIFS the live data
+sheets, Comparison columns the " (Cmp)" data sheets, Δ = Current −
+Comparison (percentage-point difference on the % rows). Partner-level;
+the current period's manager breakdown stays on the main PM P&L sheet.
+
+**2. Location flows everywhere an employee is created or shown.**
+* **Review & Map ▸ Resolve Employee** — the create-new-employee form now
+  asks for **Location** (dropdown; "(none)" = always included);
+  ``resolution.create_employee`` takes ``location_id``.
+* **Employee Register** — the roster gains a **Location** column
+  (Period | Employee | Home CC | Location | Status | Movement); every
+  COUNTIFS (summary, recipients, headcount-by-CC) repointed to the
+  shifted Status/Movement columns. Partners show "—".
+* **Salary sheet** — new **Location** column (N) so the operator can see
+  and filter exactly whose rows fed the pool.
+* The overhead computation itself was already location-filtered in
+  v0.3.98 (roster, pool, recipients).
+
+**3. Cover totals formula-driven.** Total revenue / Total cost / Net
+profit on the Cover were baked strings; they now reference the Cost
+Centre P&L total row (``_link_cover``), so the Cover stays true when a
+data row is edited.
+
+Verified end-to-end with the formula evaluator: the comparison sheet's
+Current/Comparison/Δ evaluate correctly on a two-month scenario (May
+50,000 vs April 1,40,000 → Δ −90,000; MIS Net ties to each period's calc
+engine run); Cover formulas tie to calc; the roster Location column and
+Salary Location column carry the right names; Resolve-Employee dialog
+saves the location; all v0.3.97/98 regressions green (managers fold,
+location filter, overhead math, migrations, dashboard, UI smoke).
 
 ### v0.3.98 — Locations master, partners in the overhead spread, fully formula-driven Employee Register, comparative Partner-Manager P&L
 

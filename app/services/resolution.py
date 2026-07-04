@@ -1174,13 +1174,19 @@ def repoint_employee_links(employee_id: int, employee_name: str) -> int:
 
 def create_employee(raw: str, name: str, category: str | None,
                      manager_id: int | None,
-                     cost_centre_id: int | None) -> int:
-    """Create a new employee master record from a raw name."""
+                     cost_centre_id: int | None,
+                     location_id: int | None = None) -> int:
+    """Create a new employee master record from a raw name.
+
+    ``location_id`` (v0.3.99) tags the employee's office location — used
+    by the Employee Register / overhead location filter. Left NULL the
+    employee is always considered, so an untagged record never vanishes.
+    """
     with transaction() as conn:
         eid = conn.execute(
             "INSERT INTO employees (name, category, manager_id, "
-            "default_cost_centre_id) VALUES (?, ?, ?, ?)",
-            (name, category, manager_id, cost_centre_id)).lastrowid
+            "default_cost_centre_id, location_id) VALUES (?, ?, ?, ?, ?)",
+            (name, category, manager_id, cost_centre_id, location_id)).lastrowid
         if norm(raw) != norm(name):
             conn.execute(
                 "INSERT OR IGNORE INTO employee_aliases "

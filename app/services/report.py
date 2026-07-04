@@ -17,7 +17,6 @@ from openpyxl.utils import get_column_letter
 
 from .. import config
 from ..database import transaction
-from ..util import fmt_inr
 from .calc import (
     EXPENSE_TYPE_INDIRECT,
     EXPENSE_TYPE_PROFESSIONAL,
@@ -161,17 +160,18 @@ def generate(data: MISData, path: str | Path,
     _sheet_reimbursements(wb, data, lbl)
     _sheet_provisions(wb, data, lbl)
     if compare is not None:
-        # The comparison period gets its own full Partner-Manager P&L,
-        # driven by the comparison data sheets below (v0.3.98).
-        _sheet_partner_manager(wb, compare, lbl, CMP)
+        # Current vs comparison, side by side per partner (v0.3.99) —
+        # driven by the current AND comparison data sheets below.
+        _sheet_pm_comparison(wb, data, compare, lbl)
         _sheet_revenue(wb, compare, lbl, CMP)
         _sheet_expenses(wb, compare, lbl, CMP)
         _sheet_salary(wb, compare, lbl, CMP)
         _sheet_reimbursements(wb, compare, lbl, CMP)
         _sheet_provisions(wb, compare, lbl, CMP)
 
-    # Dashboard KPIs link to the Cost Centre P&L total row.
+    # Dashboard KPIs + Cover totals link to the Cost Centre P&L total row.
     _link_dashboard(wb, rows_pl)
+    _link_cover(wb, rows_pl)
 
     path = Path(path)
     wb.save(path)
@@ -204,9 +204,11 @@ def _sheet_cover(wb: Workbook, data: MISData,
         ("Locations considered", data.location_label),
         ("Office overhead basis",
          "Office indirect expenses ÷ (partner-team employees + partners)"),
-        ("Total revenue", fmt_inr(data.total_revenue)),
-        ("Total cost", fmt_inr(data.total_cost)),
-        ("Net profit", fmt_inr(data.total_profit)),
+        # The three totals become live formulas via _link_cover once the
+        # Cost Centre P&L sheet exists (v0.3.99); 0 is just a placeholder.
+        ("Total revenue", 0),
+        ("Total cost", 0),
+        ("Net profit", 0),
     ]
     for i, (k, v) in enumerate(rows):
         r = 6 + i
@@ -252,6 +254,30 @@ def _sheet_dashboard(wb: Workbook, data: MISData) -> None:
     _cell(ws, 12, 2, "See 'Cost Centre P&L' for the full partner-wise "
           "profitability. Total Revenue includes Reimbursements (OPE).",
           font=_SUB)
+
+
+def _link_cover(wb: Workbook, rows_pl: dict) -> None:
+    """Point the Cover's three headline totals at the Cost Centre P&L
+    total row (v0.3.99 — they were baked fmt_inr strings before), so the
+    Cover stays true when the operator edits a data row."""
+    ws = wb["Cover"]
+    pl = _q("Cost Centre P&L")
+    total = rows_pl["total_row"]
+    ti = rows_pl["col_total_income"]
+    prof = rows_pl["col_profit"]
+    formulas = {
+        "Total revenue": f"={pl}!{ti}{total}",
+        "Total cost": f"={pl}!{ti}{total}-{pl}!{prof}{total}",
+        "Net profit": f"={pl}!{prof}{total}",
+    }
+    for r in range(6, 20):
+        label = ws.cell(row=r, column=2).value
+        if label in formulas:
+            cell = ws.cell(row=r, column=3, value=formulas.pop(label))
+            cell.font = _NORMAL
+            cell.number_format = INR
+        if not formulas:
+            break
 
 
 def _link_dashboard(wb: Workbook, rows_pl: dict) -> None:
@@ -1046,6 +1072,207 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
           font=_SUB)
 
 
+# --- Partner-Manager P&L: current vs comparison ------------------------------
+
+def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
+                         lbl: dict) -> None:
+    """"Partner-Manager P&L (Cmp)" — the SAME P&L lines as the main
+    Partner-Manager sheet, but per partner three columns side by side:
+    **Current | Comparison | Δ** (v0.3.99; the earlier edition showed the
+    comparison period standalone, so the operator saw no comparison).
+
+    Partner-level (no manager sub-columns — the current period's manager
+    detail lives on the main Partner-Manager P&L). Every cell is a live
+    formula: Current SUMIFS the current data sheets, Comparison SUMIFS
+    the " (Cmp)" data sheets, Δ = Current − Comparison.
+    """
+    ws = wb.create_sheet("Partner-Manager P&L (Cmp)")
+    ws.sheet_view.showGridLines = False
+
+    _cell(ws, 1, 1, "Partner – Manager P&L — Current vs Comparison",
+          font=_TITLE)
+    _cell(ws, 2, 1,
+          "Current: " + ", ".join(data.options.periods)
+          + "    vs    Comparison: " + ", ".join(compare.options.periods)
+          + ".  Partner-level; the manager breakdown for the current "
+            "period is on the Partner-Manager P&L sheet.",
+          font=_SUB)
+
+    partners = [c for c in lbl["cc_active"] if c["cc_type"] == "partner"]
+    if not partners:
+        _cell(ws, 4, 1, "No partner cost centres are active.", font=_SUB)
+        return
+
+    hdr_partner_row = 4
+    hdr_sub_row = 5
+    body_start = 7
+    n_cols_per_block = 3          # Current | Comparison | Δ
+
+    ws.column_dimensions["A"].width = 30
+    block_starts = [2 + i * n_cols_per_block for i in range(len(partners))]
+    mis_start = 2 + len(partners) * n_cols_per_block
+    last_col = mis_start + n_cols_per_block - 1
+    for col in range(2, last_col + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 14
+
+    # Partner super-headers + the MIS Total block.
+    blocks = ([(c["name"], start) for c, start in zip(partners, block_starts)]
+              + [("MIS Total", mis_start)])
+    for name, start in blocks:
+        end = start + n_cols_per_block - 1
+        ws.merge_cells(start_row=hdr_partner_row, start_column=start,
+                       end_row=hdr_partner_row, end_column=end)
+        _cell(ws, hdr_partner_row, start, name, font=_HEAD, fill=_HEAD_FILL,
+              align=_CENTER, border=True)
+        for col in range(start, end + 1):
+            ws.cell(row=hdr_partner_row, column=col).fill = _HEAD_FILL
+            ws.cell(row=hdr_partner_row, column=col).border = _BORDER
+        for off, label in enumerate(("Current", "Comparison", "Δ")):
+            _cell(ws, hdr_sub_row, start + off, label, font=_HEAD,
+                  fill=_SUBHEAD_FILL, align=_CENTER, border=True)
+    _cell(ws, hdr_partner_row, 1, "", fill=_HEAD_FILL)
+    _cell(ws, hdr_sub_row, 1, "Particulars", font=_HEAD, fill=_SUBHEAD_FILL,
+          align=_CENTER, border=True)
+
+    def leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
+        """Partner-level SUMIFS for *kind* against the ``sfx`` data sheets
+        ("" = current, CMP = comparison). None for row-arithmetic kinds."""
+        rev, exp, lab = (_q("Revenue" + sfx), _q("Expenses" + sfx),
+                         _q("Salary" + sfx))
+        reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
+        if kind == "sales":
+            return (f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
+                    f'{rev}!$I:$I,"Income")')
+        if kind == "reimb":
+            f1 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
+                  f'{rev}!$I:$I,"Reimbursement")')
+            f2 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
+                  f'{rev}!$I:$I,"OPE")')
+            return "=" + f1 + "+" + f2
+        if kind == "salary":
+            return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                    f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")')
+        if kind == "salary_nonbill":
+            return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                    f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")')
+        if kind == "expense":
+            return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
+                    f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")')
+        if kind == "indirect":
+            return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
+                    f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")')
+        if kind == "reimb_exp":
+            return f'=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,"{cc_code}")'
+        if kind == "provisions":
+            return f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}")'
+        if kind == "overhead":
+            return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
+                    f'{lab}!$J:$J,"Overhead")')
+        return None
+
+    # Same line plan as the main Partner-Manager P&L.
+    plan = [
+        ("Sales (Income)", "sales"),
+        ("Reimbursement & OPE", "reimb"),
+        ("Total Income", "income_sum"),
+        ("", "blank"),
+        ("Salary (billable)", "salary"),
+        ("Salary (non-billable)", "salary_nonbill"),
+        ("Professional Fees", "expense"),
+        ("Reimbursement Expenses", "reimb_exp"),
+        ("Provisions", "provisions"),
+        ("Total Direct Costs", "cost_sum"),
+        ("", "blank"),
+        ("Gross Profit", "gross"),
+        ("Gross Profit %", "gross_pct"),
+        ("", "blank"),
+        ("Office Overhead (allocated)", "overhead"),
+        ("Indirect Expenses", "indirect"),
+        ("Net Profit", "net"),
+        ("Net Profit %", "net_pct"),
+    ]
+
+    def arith_formula(kind: str, L: str, rows_by_kind: dict) -> str | None:
+        """Row-arithmetic kinds, computed within one column letter *L*."""
+        if kind == "income_sum":
+            return f"={L}{rows_by_kind['sales']}+{L}{rows_by_kind['reimb']}"
+        if kind == "cost_sum":
+            return (f"={L}{rows_by_kind['salary']}"
+                    f"+{L}{rows_by_kind['salary_nonbill']}"
+                    f"+{L}{rows_by_kind['expense']}"
+                    f"+{L}{rows_by_kind['reimb_exp']}"
+                    f"+{L}{rows_by_kind['provisions']}")
+        if kind == "gross":
+            return (f"={L}{rows_by_kind['income_sum']}"
+                    f"-{L}{rows_by_kind['cost_sum']}")
+        if kind == "gross_pct":
+            s, g = rows_by_kind["sales"], rows_by_kind["gross"]
+            return f"=IF({L}{s}=0,0,{L}{g}/{L}{s})"
+        if kind == "net":
+            return (f"={L}{rows_by_kind['gross']}"
+                    f"-{L}{rows_by_kind['overhead']}"
+                    f"-{L}{rows_by_kind['indirect']}")
+        if kind == "net_pct":
+            s, n = rows_by_kind["sales"], rows_by_kind["net"]
+            return f"=IF({L}{s}=0,0,{L}{n}/{L}{s})"
+        return None
+
+    r = body_start
+    rows_by_kind: dict[str, int] = {}
+    for label, kind in plan:
+        if kind == "blank":
+            r += 1
+            continue
+        rows_by_kind[kind] = r
+        is_total = kind in ("income_sum", "cost_sum", "gross", "gross_pct",
+                            "net", "net_pct")
+        font = _BOLD if is_total else _NORMAL
+        fill = _TOTAL_FILL if is_total else None
+        cell_fmt = PCT if kind.endswith("_pct") else INR
+        _cell(ws, r, 1, label, font=font, fill=fill, border=True)
+
+        for c, start in zip(partners, block_starts):
+            for off, sfx in ((0, ""), (1, CMP)):
+                L = get_column_letter(start + off)
+                formula = (leaf_formula(kind, c["code"], sfx)
+                           or arith_formula(kind, L, rows_by_kind))
+                _cell(ws, r, start + off, formula, font=font, fill=fill,
+                      fmt=cell_fmt, border=True)
+            # Δ = Current − Comparison (percentage-point diff on % rows).
+            curL = get_column_letter(start)
+            cmpL = get_column_letter(start + 1)
+            _cell(ws, r, start + 2, f"={curL}{r}-{cmpL}{r}", font=font,
+                  fill=fill, fmt=cell_fmt, border=True)
+
+        # MIS Total block: Current/Comparison sum the partner columns
+        # (leaf kinds) or recompute from this block's own rows (arithmetic
+        # kinds, incl. the two %s); Δ = Current − Comparison.
+        for off in (0, 1):
+            L = get_column_letter(mis_start + off)
+            if leaf_formula(kind, "X", "") is not None:
+                refs = [f"{get_column_letter(start + off)}{r}"
+                        for start in block_starts]
+                formula = "=" + "+".join(refs)
+            else:
+                formula = arith_formula(kind, L, rows_by_kind)
+            _cell(ws, r, mis_start + off, formula, font=_BOLD,
+                  fill=_TOTAL_FILL, fmt=cell_fmt, border=True)
+        curL = get_column_letter(mis_start)
+        cmpL = get_column_letter(mis_start + 1)
+        _cell(ws, r, mis_start + 2, f"={curL}{r}-{cmpL}{r}", font=_BOLD,
+              fill=_TOTAL_FILL, fmt=cell_fmt, border=True)
+        r += 1
+
+    ws.freeze_panes = f"B{body_start}"
+    _cell(ws, r + 1, 1,
+          "Current columns read the live data sheets; Comparison columns "
+          "read the ' (Cmp)' data sheets. Δ = Current − Comparison "
+          "(percentage-point difference on the % rows). Office Overhead "
+          "and Net follow the same definitions as the Partner-Manager "
+          "P&L sheet.",
+          font=_SUB)
+
+
 # --- Entity & Service --------------------------------------------------------
 
 def _sheet_entity(wb: Workbook, data: MISData, lbl: dict) -> None:
@@ -1502,14 +1729,15 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
              _billable(f),
              lbl["mgr"].get(f.get("manager_id"), "(unassigned)"),
              "Yes" if (f.get("is_pool_source")
-                       and not f.get("is_overhead")) else ""]
+                       and not f.get("is_overhead")) else "",
+             f.get("location") or "—"]
             for i, f in enumerate(data.labour_facts)]
     _write_data_sheet(wb, "Salary" + suffix,
                       ["Period", "Date", "Charged To", "Employee", "Client",
                        "Client CC", "Home CC", "Hours", "Amount", "Type",
-                       "Billable", "Manager", "Pool Source"],
-                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12, 10, 16, 12],
-                      rows)
+                       "Billable", "Manager", "Pool Source", "Location"],
+                      [10, 12, 12, 26, 28, 12, 12, 12, 14, 12, 10, 16, 12,
+                       14], rows)
 
 
 # --- Employee Register --------------------------------------------------------
@@ -1569,18 +1797,23 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     # their range before being written. Partners (from the cost-centre
     # master, not the employee master) get status "Partner": they count
     # as overhead recipients but not as Active employees (v0.3.98).
+    # Roster layout (v0.3.99 — Location added):
+    #   A Period  B Employee  C Home CC  D Location  E Status  F Movement
     roster_rows: list[list] = []
     for r in reg:
         for emp in r["active"]:
             roster_rows.append([
-                r["period"], emp["name"], emp["cc_code"], "Active",
+                r["period"], emp["name"], emp["cc_code"],
+                emp.get("location", "—"), "Active",
                 "New Joiner" if emp["is_new"] else ""])
         for emp in r["exits"]:
             roster_rows.append([
-                r["period"], emp["name"], emp["cc_code"], "Exited", "Exit"])
+                r["period"], emp["name"], emp["cc_code"],
+                emp.get("location", "—"), "Exited", "Exit"])
         for p in r.get("partners", []):
             roster_rows.append([
-                r["period"], p["name"], p["cc_code"], "Partner", ""])
+                r["period"], p["name"], p["cc_code"],
+                p.get("location", "—"), "Partner", ""])
 
     sum_hrow = 4
     sum_first = sum_hrow + 1
@@ -1588,10 +1821,10 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     roster_hrow = sum_last + 2
     roster_first = roster_hrow + 1
     roster_last = max(roster_first, roster_first + len(roster_rows) - 1)
-    rA = f"$A${roster_first}:$A${roster_last}"
-    rC = f"$C${roster_first}:$C${roster_last}"
-    rD = f"$D${roster_first}:$D${roster_last}"
-    rE = f"$E${roster_first}:$E${roster_last}"
+    rA = f"$A${roster_first}:$A${roster_last}"        # Period
+    rC = f"$C${roster_first}:$C${roster_last}"        # Home CC
+    rStat = f"$E${roster_first}:$E${roster_last}"     # Status
+    rMov = f"$F${roster_first}:$F${roster_last}"      # Movement
 
     # ---- 1. Summary -----------------------------------------------------
     for col, w in (("F", 18), ("G", 20), ("H", 16), ("I", 16), ("J", 20)):
@@ -1607,13 +1840,13 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, row, 2, r["prev_period"]
               + ("" if r["has_prev_data"] else "  (no data)"), border=True)
         _cell(ws, row, 3,
-              f'=COUNTIFS({rA},$A{row},{rD},"Active")',
+              f'=COUNTIFS({rA},$A{row},{rStat},"Active")',
               font=_BOLD, border=True, align=_CENTER)
         _cell(ws, row, 4,
-              f'=COUNTIFS({rA},$A{row},{rE},"New Joiner")',
+              f'=COUNTIFS({rA},$A{row},{rMov},"New Joiner")',
               border=True, align=_CENTER)
         _cell(ws, row, 5,
-              f'=COUNTIFS({rA},$A{row},{rE},"Exit")',
+              f'=COUNTIFS({rA},$A{row},{rMov},"Exit")',
               border=True, align=_CENTER)
         # Office indirect — live SUMIFS so editing an office expense
         # recomputes the cascade.
@@ -1639,9 +1872,9 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         # was a baked value): partner-team Active employees (Active minus
         # office-home Active) plus the Partner rows.
         _cell(ws, row, 8,
-              f'=COUNTIFS({rA},$A{row},{rD},"Active")'
-              f'-COUNTIFS({rA},$A{row},{rD},"Active",{rC},"{office_code}")'
-              f'+COUNTIFS({rA},$A{row},{rD},"Partner")',
+              f'=COUNTIFS({rA},$A{row},{rStat},"Active")'
+              f'-COUNTIFS({rA},$A{row},{rStat},"Active",{rC},"{office_code}")'
+              f'+COUNTIFS({rA},$A{row},{rStat},"Partner")',
               border=True, align=_CENTER)
         # Pool = office indirect + office staff salary.
         _cell(ws, row, 9, f"=F{row}+G{row}", fmt=INR, border=True)
@@ -1656,12 +1889,12 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     # ---- 2. Roster -------------------------------------------------------
     _header_row(ws, roster_hrow, [
-        "Period", "Employee", "Home CC", "Status", "Movement"])
+        "Period", "Employee", "Home CC", "Location", "Status", "Movement"])
     for i, row_vals in enumerate(roster_rows):
         row = roster_first + i
         for ci, val in enumerate(row_vals, start=1):
             _cell(ws, row, ci, val, border=True,
-                  align=_CENTER if ci in (1, 3, 4, 5) else None)
+                  align=_CENTER if ci in (1, 3, 4, 5, 6) else None)
 
     # ---- 3. Headcount by cost centre -------------------------------------
     # Placed BESIDE the summary (top-right) rather than at the bottom of
@@ -1691,15 +1924,15 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
                       align=_CENTER)
                 _cell(ws, row, hc_c0 + 2,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
-                      f'{rD},"Active")',
+                      f'{rStat},"Active")',
                       border=True, align=_CENTER)
                 _cell(ws, row, hc_c0 + 3,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
-                      f'{rE},"New Joiner")',
+                      f'{rMov},"New Joiner")',
                       border=True, align=_CENTER)
                 _cell(ws, row, hc_c0 + 4,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
-                      f'{rE},"Exit")',
+                      f'{rMov},"Exit")',
                       border=True, align=_CENTER)
                 row += 1
 

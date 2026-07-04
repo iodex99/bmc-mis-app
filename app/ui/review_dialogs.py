@@ -162,10 +162,15 @@ class ResolveEmployeeDialog(QDialog):
         self.cat_combo.addItems(["Employee", "CA Article", "CMA Article"])
         self.mgr_combo = _combo(repo.fk_options("managers"), none_label="(none)")
         self.cc_combo = _combo(repo.fk_options("cost_centres"), none_label="(none)")
+        # Location (v0.3.99): drives the Employee Register / overhead
+        # location filter on the Generate page. "(none)" = always included.
+        self.loc_combo = _combo(repo.fk_options("locations"),
+                                none_label="(none)")
         form.addRow("Name:", self.name_edit)
         form.addRow("Category:", self.cat_combo)
         form.addRow("Manager:", self.mgr_combo)
         form.addRow("Cost centre:", self.cc_combo)
+        form.addRow("Location:", self.loc_combo)
         layout.addLayout(form)
 
         if not opts:
@@ -190,7 +195,9 @@ class ResolveEmployeeDialog(QDialog):
                 QMessageBox.warning(self, "Name required", "Enter a name.")
                 return
             self._result = ("create", name, self.cat_combo.currentText(),
-                            self.mgr_combo.currentData(), self.cc_combo.currentData())
+                            self.mgr_combo.currentData(),
+                            self.cc_combo.currentData(),
+                            self.loc_combo.currentData())
         self.accept()
 
     def apply(self) -> None:
@@ -199,8 +206,8 @@ class ResolveEmployeeDialog(QDialog):
         if self._result[0] == "link":
             resolution.link_employee(self.raw, self._result[1])
         else:
-            _a, name, cat, mgr, cc = self._result
-            resolution.create_employee(self.raw, name, cat, mgr, cc)
+            _a, name, cat, mgr, cc, loc = self._result
+            resolution.create_employee(self.raw, name, cat, mgr, cc, loc)
 
 
 # --- Resolve a Cost Centre string -------------------------------------------
