@@ -253,9 +253,10 @@ def compute(options: MISOptions) -> MISData:
         data.location_label = ", ".join(sorted(names)) if names else "(none)"
         data.warnings.append(
             "Employee Register / office overhead consider ONLY employees "
-            f"of these locations: {data.location_label}. Employees with no "
-            "location assigned are left out (see the note below if any). "
-            "Salary and voucher figures are not filtered.")
+            f"and partners of these locations: {data.location_label}. "
+            "Employees and partners with no location assigned are left out "
+            "(see the note below if any). Salary and voucher figures are "
+            "not filtered.")
     _build_voucher_facts(data, options, masters)
     # Employee register BEFORE labour facts: the register's active-employee
     # roster + office-indirect pool drive the per-employee overhead facts.
@@ -506,15 +507,36 @@ def _build_employee_register(data: MISData, options: MISOptions,
     # Partners are not in the employee master but ARE overhead recipients
     # (v0.3.98): every active partner cost centre counts as one head in
     # the overhead spread and carries a per-head share to its own CC.
-    partners = [{
-        "key": f"partner:{cc['code']}",
-        "name": cc["name"],
-        "cost_centre_id": cc_id,
-        "cc_code": cc["code"],
-        "location": "—",     # partners aren't in the employee master
-    } for cc_id, cc in sorted(cost_centres.items(),
-                              key=lambda kv: kv[1]["code"])
-        if cc["cc_type"] == "partner" and cc.get("active", 1)]
+    #
+    # Partner location filter (v0.3.104): partners can now be tagged with a
+    # location too. When the operator narrows the run to some locations, ONLY
+    # partners of those locations count as recipient heads — mirroring the
+    # STRICT employee filter (v0.3.101). An untagged partner (location NULL)
+    # is dropped whenever a filter is active and named in a Cover warning;
+    # a wrong-location partner is dropped silently (the filter doing its job).
+    # With no filter (all locations) every active partner counts, as before.
+    locations = masters["locations"]
+    allowed_locs = set(options.location_ids) if filter_active else None
+    excluded_partners_untagged: set[str] = set()
+    partners = []
+    for cc_id, cc in sorted(cost_centres.items(),
+                            key=lambda kv: kv[1]["code"]):
+        if cc["cc_type"] != "partner" or not cc.get("active", 1):
+            continue
+        loc_id = cc.get("location_id")
+        if allowed_locs is not None:
+            if loc_id is None:
+                excluded_partners_untagged.add(cc["name"])
+                continue
+            if loc_id not in allowed_locs:
+                continue
+        partners.append({
+            "key": f"partner:{cc['code']}",
+            "name": cc["name"],
+            "cost_centre_id": cc_id,
+            "cc_code": cc["code"],
+            "location": (locations.get(loc_id) or {}).get("name") or "—",
+        })
 
     def home_cc(period: str, key) -> int | None:
         cc = None
@@ -524,8 +546,6 @@ def _build_employee_register(data: MISData, options: MISOptions,
 
     def cc_code(cc_id) -> str:
         return (cost_centres.get(cc_id) or {}).get("code") or "—"
-
-    locations = masters["locations"]
 
     def loc_name(key) -> str:
         if not isinstance(key, int):
@@ -636,6 +656,20 @@ def _build_employee_register(data: MISData, options: MISOptions,
             + (f" (+{more} more)" if more > 0 else "")
             + ". Assign locations in Master Data ▸ Employees (or resolve "
               "raw names in Review & Map) to include them.")
+
+    # Tagging gaps: partners dropped ONLY because they carry no location
+    # (v0.3.104). A wrong-location partner is excluded silently (filter
+    # working as intended); an untagged one is a setup gap worth flagging.
+    if excluded_partners_untagged:
+        shown = sorted(excluded_partners_untagged)
+        names = ", ".join(shown[:8])
+        more = len(shown) - 8
+        data.warnings.append(
+            f"{len(shown)} partner(s) with NO location assigned were left "
+            f"out of the office-overhead recipients: {names}"
+            + (f" (+{more} more)" if more > 0 else "")
+            + ". Assign locations in Master Data ▸ Cost Centres to include "
+              "them.")
 
 
 def _build_client_register(data: MISData, options: MISOptions,

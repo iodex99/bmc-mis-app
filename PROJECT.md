@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-06-12
 >
-> Current version: **v0.3.103** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.104** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -331,6 +331,44 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.104 — Partners are location-mapped in the office-overhead spread
+
+Operator ask: employees were location-tagged (v0.3.98), but partners
+weren't — so when the operator narrowed an MIS to a location, ALL
+partners still counted as office-overhead recipient heads. Now each
+**partner cost centre carries a location** too, and the overhead spread
+counts only the partners of the selected location(s).
+
+* **Master Data ▸ Cost Centres** gains a **Location** dropdown (migration
+  19 adds ``cost_centres.location_id``; "(none)" = untagged).
+* **Overhead recipients are location-filtered** — mirroring the STRICT
+  employee filter (v0.3.101). With locations selected, only partners of
+  those locations are recipient heads; the pool is spread over that
+  smaller set (each remaining head gets a larger per-head share). An
+  **untagged** partner (location NULL) is dropped whenever a filter is
+  active and **named in a Cover warning** ("N partner(s) with NO location
+  assigned were left out of the office-overhead recipients… Assign
+  locations in Master Data ▸ Cost Centres"); a **wrong-location** partner
+  is dropped silently (the filter doing its job). With no filter (all
+  locations) every active partner still counts — behaviour unchanged.
+* **Firm total is invariant** — the pool is redistributed and backed out
+  by the Office offset exactly, so excluding a partner as a *recipient*
+  only reallocates the pool across the remaining heads; the firm's Net is
+  identical whatever the selection. Partner P&L columns are NOT hidden by
+  location (their revenue/costs are real regardless) — only the overhead
+  recipient set changes. The Employee Register roster shows each partner's
+  location, and its formula-driven Overhead Recipients COUNTIFS follows
+  automatically.
+
+Verified end-to-end: a Mumbai-only run counts only the Mumbai partners
+(pool ÷ 3 = 1 Mumbai employee + 2 Mumbai partners), the untagged partner
+is named in the warning while the wrong-location one is not, the firm
+total_profit is identical across all four location selections
+(none / Mumbai / Bangalore / both), the generated workbook's roster
+carries only the selected-location Partner rows with their location, and
+the Employee Register's Overhead Recipients / per-head cells
+formula-evaluate to the strict figures (3 heads, ₹4,000/head).
 
 ### v0.3.103 — Period-labeled total columns; Client Billing cumulative column
 

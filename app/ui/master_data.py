@@ -98,6 +98,12 @@ SPECS: list[TableSpec] = [
         Field("code", "Code"),
         Field("name", "Name"),
         Field("cc_type", "Type", "choice", choices=["partner", "office"]),
+        # Partner location (v0.3.104): at MIS-generation time, only partners
+        # of the selected locations count as office-overhead recipient heads
+        # (mirrors the employee location filter). "(none)" = untagged, always
+        # counted unless the operator narrows the location selection.
+        Field("location_id", "Location", "fk", fk_table="locations",
+              optional=True),
     ]),
     TableSpec("managers", "Managers", [
         Field("code", "Code"),

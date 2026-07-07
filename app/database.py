@@ -523,6 +523,16 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         ALTER TABLE employees ADD COLUMN location_id INTEGER REFERENCES locations(id);
     """),
+    (19, """
+        -- Partners (partner cost centres) get a location too (v0.3.104).
+        -- Employees were location-tagged in v0.3.98; now each partner cost
+        -- centre can carry a location as well, so the office-overhead spread
+        -- counts ONLY the partners of the selected locations as recipient
+        -- heads (mirroring the STRICT employee filter from v0.3.101). NULL =
+        -- untagged: included when no location filter is active, excluded (and
+        -- flagged in a Cover warning) whenever the operator narrows the run.
+        ALTER TABLE cost_centres ADD COLUMN location_id INTEGER REFERENCES locations(id);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 
