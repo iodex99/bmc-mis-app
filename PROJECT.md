@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.106** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.107** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,50 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.107 — Consider gates only the overhead; Records gains a Reimbursements tab
+
+Two operator refinements on v0.3.106:
+
+**1. "Don't consider" is only about the overhead per-employee cost.**
+The Employee Register's headcounts are a whole-firm status overview:
+the summary's Active / New Joiners / Exits columns and the
+**headcount-by-cost-centre block now count EVERYONE**, whatever
+locations were selected — a Bangalore employee in a Mumbai-only MIS
+still shows under her cost centre as Active. Only the
+office-overhead computation reads the Consider flag: Overhead
+Recipients (and therefore pool ÷ heads) counts "Consider" rows alone,
+in calc, in the sheet's COUNTIFS, and in the overhead labour facts.
+Flipping a dropdown still live-recomputes the recipients and per-head
+figures — but no longer changes the headcounts. The dashboard's
+headcount charts follow the same whole-firm rule, staying tied to the
+workbook.
+
+**2. Records ▸ Reimbursements tab.** Until now there was NO way to see
+stored reimbursement rows in the app before generating the MIS. The
+Records page gains a **Reimbursements** tab mirroring Salary /
+Timesheet: period dropdown (defaults to the latest; "(all periods)"
+available), debounced employee + client filters, paged loading with
+"Load all", and a totals line (rows · employees · amount · the
+client-reimbursable slice). Columns: Period, Date, Employee, Client
+(canonical master name once resolved, else the raw upload text),
+Amount, Client reimbursable, and **Source** — the uploaded file's name,
+or "(manual entry)" — so Excel-imported and manually-added rows are
+both visible and distinguishable. New read-only queries
+``records.list_reimbursements`` / ``reimbursement_totals`` /
+``list_reimbursement_periods``; the tab hint spells out the 21st→20th
+cycle bucketing.
+
+Verified with the expanded 54-check suite (plus the v0.3.105 48-check
+suite and a UI smoke, all green): headcounts count Don't-consider rows
+(calc, formula-evaluated summary cells, the by-CC block showing the
+excluded employees under their CCs, dashboard series) while recipients/
+pool/per-head stay strict and the firm net stays invariant across
+location selections; a what-if flip still recomputes Recipients 7→8 and
+per-head with overhead netting to zero, and now leaves the Active count
+untouched; the Reimbursements tab lists an imported row and a manual
+entry side by side with correct date/client/amount/source, totals line,
+default period, and working employee/client filters.
 
 ### v0.3.106 — Employee Register shows everyone, with a Consider dropdown
 

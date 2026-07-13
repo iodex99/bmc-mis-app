@@ -501,23 +501,21 @@ def _employee_section(data: MISData, ch: _Charts) -> str:
          {"label": "Exits", "data": [r["exit_count"] for r in reg]}],
         unit="count", height=300)
 
-    # Headcount by cost centre, stacked per period. Only CONSIDERED
-    # roster members count (v0.3.106) — the register now carries
-    # everyone, flagged by the location selection, and the chart must
-    # keep tying to the workbook's filtered counts.
+    # Headcount by cost centre, stacked per period. Headcounts are a
+    # whole-firm status overview (v0.3.107): every roster member counts,
+    # whatever the location selection — the Consider flag gates only the
+    # overhead computation. Ties to the workbook's headcount block.
     cc_codes: list[str] = []
     for r in reg:
         for emp in r["active"]:
-            if emp.get("considered", True) and emp["cc_code"] not in cc_codes:
+            if emp["cc_code"] not in cc_codes:
                 cc_codes.append(emp["cc_code"])
     cc_codes.sort()
     cc_ds = []
     for code in cc_codes:
         cc_ds.append({
             "label": code,
-            "data": [sum(1 for e in r["active"]
-                         if e.get("considered", True)
-                         and e["cc_code"] == code)
+            "data": [sum(1 for e in r["active"] if e["cc_code"] == code)
                      for r in reg]})
     cc_bar = ch.grouped_bar(p_short, cc_ds, unit="count", stacked=True,
                             height=300)

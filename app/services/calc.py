@@ -466,13 +466,15 @@ def _build_employee_register(data: MISData, options: MISOptions,
         return emp_index.get(norm(name), f"raw:{norm(name)}")
 
     # Location selection (v0.3.98; STRICT since v0.3.101): only employees
-    # of the selected locations are CONSIDERED in the overhead spread and
-    # the headline counts. Since v0.3.106 everyone still APPEARS in the
-    # register — each roster member carries a ``considered`` flag, so the
-    # Employee Register sheet can show the full roster with a
-    # Consider / Don't consider column while every count and the overhead
-    # spread keep using only the considered rows. Untagged / unresolved
-    # names are flagged Don't consider and reported via a warning.
+    # of the selected locations are CONSIDERED in the overhead spread.
+    # Since v0.3.106 everyone APPEARS in the register — each roster member
+    # carries a ``considered`` flag rendered as the sheet's Consider /
+    # Don't consider dropdown. Since v0.3.107 the flag gates ONLY the
+    # overhead computation (recipients / pool / per-head); the headcount
+    # figures — Active / New Joiners / Exits and the by-cost-centre
+    # block — count EVERYONE, so the register reads as a true status
+    # overview of the whole firm. Untagged / unresolved names are flagged
+    # Don't consider and reported via a warning.
     included = _location_filter(masters, options)
     filter_active = options.location_ids is not None
     excluded_untagged: set[str] = set()
@@ -625,12 +627,15 @@ def _build_employee_register(data: MISData, options: MISOptions,
                     "location": loc_name(key),
                     "considered": considered,
                 })
-        n = sum(1 for a in active if a["considered"])
+        # Headcounts are a whole-firm status overview (v0.3.107): every
+        # roster member counts, considered or not.
+        n = len(active)
         # Overhead recipients = CONSIDERED active employees whose home CC
         # is a PARTNER (office-home staff are the cost SOURCE, not
         # recipients, v0.3.82) PLUS the considered partners themselves
         # (v0.3.98) — partners aren't in the employee master but each
-        # active partner is one overhead head.
+        # active partner is one overhead head. The considered flag gates
+        # ONLY this overhead side, not the headcounts.
         recipients = (sum(1 for a in active
                           if a["considered"]
                           and a["cost_centre_id"] != office_id)
@@ -647,9 +652,8 @@ def _build_employee_register(data: MISData, options: MISOptions,
             "exits": exits,
             "partners": partners,
             "active_count": n,
-            "new_count": sum(1 for a in active
-                             if a["considered"] and a["is_new"]),
-            "exit_count": sum(1 for e in exits if e["considered"]),
+            "new_count": sum(1 for a in active if a["is_new"]),
+            "exit_count": len(exits),
             "office_indirect": office_indirect,
             "office_salary": office_salary,
             "recipients_count": recipients,

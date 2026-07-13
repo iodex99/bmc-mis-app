@@ -361,10 +361,131 @@ class TimesheetTab(QWidget):
         self.period_combo.blockSignals(False)
 
 
+# --- Reimbursements tab -------------------------------------------------------
+
+class ReimbursementsTab(QWidget):
+    """Every reimbursement row — Excel imports and manual entries alike —
+    so the operator can review what's stored before generating the MIS."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._first_load = True
+        self._show_all = False
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.addWidget(_hint(
+            "Every reimbursement row the system holds — uploaded files and "
+            "manual entries alike — bucketed into the MIS month it "
+            "contributes to. Like the timesheet, reimbursements follow the "
+            "firm's <b>21st → 20th cycle</b>: a row dated 25 Apr shows "
+            "under <b>2026-05</b> (May MIS); rows without a transaction "
+            "date keep their stated month. Defaults to the latest period — "
+            "switch the dropdown to a different period or '(all periods)'."))
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        bar.addWidget(QLabel("Period:"))
+        self.period_combo = NoScrollComboBox()
+        self.period_combo.currentIndexChanged.connect(self._on_period_change)
+        bar.addWidget(self.period_combo)
+        bar.addWidget(QLabel("Employee:"))
+        self.emp_search = QLineEdit()
+        self.emp_search.setPlaceholderText("filter by name…")
+        bar.addWidget(self.emp_search, 1)
+        bar.addWidget(QLabel("Client:"))
+        self.client_search = QLineEdit()
+        self.client_search.setPlaceholderText("filter by client…")
+        bar.addWidget(self.client_search, 1)
+        self._sched_reload, self._timer = _debounce(self.reload)
+        self.emp_search.textChanged.connect(self._sched_reload)
+        self.client_search.textChanged.connect(self._sched_reload)
+        layout.addLayout(bar)
+
+        self.summary = _info("")
+        layout.addWidget(self.summary)
+
+        self.table = QTableWidget()
+        setup_data_table(self.table)
+        layout.addWidget(self.table, 1)
+
+        self.load_all_btn = QPushButton("")
+        self.load_all_btn.setVisible(False)
+        self.load_all_btn.clicked.connect(self._load_all)
+        layout.addWidget(self.load_all_btn, alignment=Qt.AlignLeft)
+
+    def _on_period_change(self):
+        self._show_all = False
+        self.reload()
+
+    def _load_all(self):
+        self._show_all = True
+        self.reload()
+
+    def reload(self) -> None:
+        self._refill_periods()
+        period = self.period_combo.currentData()
+        emp_q = self.emp_search.text().strip()
+        cli_q = self.client_search.text().strip()
+        limit = None if self._show_all else _PAGE_LIMIT
+        rows = records.list_reimbursements(period, emp_q, cli_q, limit=limit)
+        totals = records.reimbursement_totals(period, emp_q, cli_q)
+        total_n = totals.get("n", 0)
+        showing = len(rows)
+        truncated = (not self._show_all) and total_n > showing
+
+        msg = (f"{fmt_inr(total_n)} row(s) · "
+               f"{fmt_inr(totals.get('people', 0))} employee(s) · "
+               f"Amount ₹ {fmt_inr(totals.get('amount', 0))} "
+               f"(₹ {fmt_inr(totals.get('reimbursable', 0))} client-"
+               f"reimbursable)")
+        if truncated:
+            msg += (f"   <span style='color:#92400E;'>"
+                    f"(showing first {fmt_inr(showing)})</span>")
+        self.summary.setText(msg)
+        self.load_all_btn.setVisible(truncated)
+        self.load_all_btn.setText(
+            f"Load all {fmt_inr(total_n)} row(s)" if truncated else "")
+
+        body = [[
+            r["period"] or "",
+            (r["txn_date"] or "")[:10] or "—",
+            r["employee_name"] or "",
+            r["client_name"] or r["client_raw"] or "—",
+            fmt_inr(r["amount"] or 0, 2),
+            "Yes" if r["client_reimbursable"] else "No",
+            r["source"] or "",
+        ] for r in rows]
+        fill_table_with_actions(
+            self.table,
+            ["Period", "Date", "Employee", "Client", "Amount",
+             "Client reimbursable", "Source"],
+            body, stretch_col=3,
+        )
+
+    def _refill_periods(self) -> None:
+        keep = self.period_combo.currentData()
+        periods = records.list_reimbursement_periods()
+        self.period_combo.blockSignals(True)
+        self.period_combo.clear()
+        self.period_combo.addItem("(all periods)", None)
+        for p in periods:
+            self.period_combo.addItem(p, p)
+        if self._first_load and periods:
+            idx = self.period_combo.findData(periods[0])
+            if idx >= 0:
+                self.period_combo.setCurrentIndex(idx)
+            self._first_load = False
+        elif keep is not None:
+            idx = self.period_combo.findData(keep)
+            if idx >= 0:
+                self.period_combo.setCurrentIndex(idx)
+        self.period_combo.blockSignals(False)
+
+
 # --- the page ---------------------------------------------------------------
 
 class RecordsPage(QWidget):
-    """Hosts the Imports / Salary / Timesheet tabs."""
+    """Hosts the Imports / Salary / Timesheet / Reimbursements tabs."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -377,15 +498,18 @@ class RecordsPage(QWidget):
         layout.addWidget(heading)
         layout.addWidget(_hint(
             "Browse the raw data the system has stored — every import batch, "
-            "every salary row and every timesheet line, period by period."))
+            "every salary row, every timesheet line and every reimbursement, "
+            "period by period."))
 
         self.tabs = QTabWidget()
         self.imports_tab = ImportsTab()
         self.salary_tab = SalaryTab()
         self.timesheet_tab = TimesheetTab()
+        self.reimb_tab = ReimbursementsTab()
         self.tabs.addTab(self.imports_tab, "Import batches")
         self.tabs.addTab(self.salary_tab, "Salary")
         self.tabs.addTab(self.timesheet_tab, "Timesheet")
+        self.tabs.addTab(self.reimb_tab, "Reimbursements")
         self.tabs.currentChanged.connect(self._refresh)
         layout.addWidget(self.tabs, 1)
 

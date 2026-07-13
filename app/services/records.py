@@ -51,6 +51,13 @@ def list_timesheet_periods() -> list[str]:
             "WHERE period IS NOT NULL ORDER BY period DESC")]
 
 
+def list_reimbursement_periods() -> list[str]:
+    with transaction() as conn:
+        return [r["period"] for r in conn.execute(
+            "SELECT DISTINCT period FROM reimbursements "
+            "WHERE period IS NOT NULL ORDER BY period DESC")]
+
+
 # --- salary -----------------------------------------------------------------
 
 def list_salary(period: str | None = None, employee_q: str = "",
@@ -153,4 +160,69 @@ def timesheet_totals(period: str | None = None, employee_q: str = "",
             f"  COALESCE(SUM(CASE WHEN is_billable=1 THEN hours ELSE 0 END), 0) "
             f"     AS billable_hours "
             f"FROM timesheet_entries {sql_where}", params).fetchone()
+    return dict(row) if row else {}
+
+
+# --- reimbursements -----------------------------------------------------------
+
+def list_reimbursements(period: str | None = None, employee_q: str = "",
+                        client_q: str = "",
+                        limit: int | None = None) -> list[dict]:
+    """Every reimbursement row — file imports AND manual entries live in
+    the same table, so both show. The client shows its canonical master
+    name once resolved, falling back to the raw uploaded text."""
+    sql = (
+        "SELECT r.period, r.txn_date, r.employee_name, r.client_raw, "
+        "  c.canonical_name AS client_name, "
+        "  r.amount, r.client_reimbursable, "
+        "  b.file_name AS source "
+        "FROM reimbursements r "
+        "LEFT JOIN clients c ON c.id = r.client_id "
+        "LEFT JOIN import_batches b ON b.id = r.batch_id "
+        "WHERE 1=1")
+    params: list = []
+    if period:
+        sql += " AND r.period = ?"
+        params.append(period)
+    if employee_q:
+        sql += " AND lower(r.employee_name) LIKE ?"
+        params.append(f"%{employee_q.lower()}%")
+    if client_q:
+        sql += (" AND (lower(coalesce(r.client_raw, '')) LIKE ? "
+                "OR lower(coalesce(c.canonical_name, '')) LIKE ?)")
+        like = f"%{client_q.lower()}%"
+        params.extend([like, like])
+    sql += " ORDER BY r.period DESC, r.txn_date, r.employee_name"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(sql, params)]
+
+
+def reimbursement_totals(period: str | None = None, employee_q: str = "",
+                         client_q: str = "") -> dict:
+    sql_where = "WHERE 1=1"
+    params: list = []
+    if period:
+        sql_where += " AND r.period = ?"
+        params.append(period)
+    if employee_q:
+        sql_where += " AND lower(r.employee_name) LIKE ?"
+        params.append(f"%{employee_q.lower()}%")
+    if client_q:
+        sql_where += (" AND (lower(coalesce(r.client_raw, '')) LIKE ? "
+                      "OR lower(coalesce(c.canonical_name, '')) LIKE ?)")
+        like = f"%{client_q.lower()}%"
+        params.extend([like, like])
+    with transaction() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n, "
+            f"  COUNT(DISTINCT lower(trim(r.employee_name))) AS people, "
+            f"  COALESCE(SUM(r.amount), 0) AS amount, "
+            f"  COALESCE(SUM(CASE WHEN r.client_reimbursable = 1 "
+            f"     THEN r.amount ELSE 0 END), 0) AS reimbursable "
+            f"FROM reimbursements r "
+            f"LEFT JOIN clients c ON c.id = r.client_id "
+            f"{sql_where}", params).fetchone()
     return dict(row) if row else {}
