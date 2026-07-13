@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.105** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.106** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,53 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.106 — Employee Register shows everyone, with a Consider dropdown
+
+Operator ask: the Employee Register should show **all** employees even
+when the MIS is generated for specific locations, with an extra column —
+a two-value dropdown, **"Consider" / "Don't consider"** — that tells
+both the reader and the sheet's own formulas which rows enter the
+computation. "Consider" = the employees (and partners) of the locations
+selected before generating; everyone else reads "Don't consider".
+
+* **calc** — every timesheet-active employee, every exit and every
+  active partner now enters the register roster regardless of the
+  location selection; each member carries a ``considered`` flag (the
+  strict v0.3.101/104 location filter decides the flag, not the
+  presence). All headline figures — Active / New Joiners / Exits /
+  Overhead Recipients / pool / per-head — and the overhead labour facts
+  count ONLY considered members, so the system output is unchanged; the
+  firm net stays identical across any location selection (verified).
+  The untagged-employee/partner warnings now say the rows are marked
+  "Don't consider" rather than left out.
+* **Employee Register sheet** — the roster gains a **Consider** column
+  (G) with an in-cell dropdown (Excel data validation, exactly the two
+  values). Every COUNTIFS on the sheet — summary Active/New/Exits, the
+  Overhead Recipients cell, and the headcount-by-cost-centre block —
+  carries the ``"Consider"`` criterion, so the counts, the pool ÷ heads
+  per-employee figure, and the Salary sheet's Overhead rows that chain
+  to it all **recompute live when the operator flips a dropdown**.
+* **Overhead offset re-anchored.** The Salary sheet's negative Office
+  offset was ``−(per-head × recipients)``; with flippable recipients
+  that could drift from the head rows actually written at generation.
+  It is now ``=−SUM(<its own heads block>)`` — it always backs out
+  exactly what the written head rows charge, so the firm total stays
+  balanced through any what-if flip (values identical at generation).
+* **Dashboard** — the headcount-by-cost-centre chart counts considered
+  members only, staying tied to the workbook's figures.
+
+Verified with a 44-check suite (plus the v0.3.105 48-check suite and a
+UI smoke, all green): flags for every case (right location, wrong
+location, untagged employee, unresolved name, office-home staff,
+untagged partner), counts/pool/per-head unchanged vs the strict filter,
+firm-net invariance across none/one/other/both location selections, the
+generated workbook formula-evaluates to the strict figures (via a mini
+Excel evaluator), the roster shows every employee/partner with the right
+flag and the dropdown validation on exactly the Consider range, a
+what-if flip of a "Don't consider" employee live-recomputes Active,
+Recipients and per-head while the overhead still nets to zero, and a
+no-filter run shows everyone as "Consider" with unchanged figures.
 
 ### v0.3.105 — Reimbursements follow the 21st→20th cycle, like the timesheet
 

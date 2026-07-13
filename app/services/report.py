@@ -14,6 +14,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from .. import config
 from ..database import transaction
@@ -1899,12 +1900,37 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     er = _q("Employee Register")
     live = (suffix == "")
 
+    # Row span of each offset row's own heads block. The heads of one
+    # period are written contiguously with their offset row right after
+    # (order guaranteed by _build_labour_facts), so the offset can back
+    # out exactly what those rows charge: -SUM(heads). With the Employee
+    # Register's Consider dropdowns (v0.3.106) a what-if flip changes the
+    # per-head share (col J) on every head row AND the offset together,
+    # keeping the firm total balanced — the old −(share × recipients)
+    # form drifted when recipients moved but the written head rows
+    # didn't.
+    offset_span: dict[int, tuple[int, int]] = {}
+    _block_start = None
+    for _i, _f in enumerate(data.labour_facts):
+        if _f.get("is_overhead") and not _f.get("is_overhead_offset"):
+            if _block_start is None:
+                _block_start = _i
+        else:
+            if _f.get("is_overhead_offset") and _block_start is not None:
+                offset_span[_i + _DATA_FIRST_ROW] = (
+                    _block_start + _DATA_FIRST_ROW,
+                    _i - 1 + _DATA_FIRST_ROW)
+            _block_start = None
+
     def _amount(f, r):
         # Overhead amounts chain LIVE to the Employee Register: per-employee
-        # share = pool ÷ recipients (col J), offset = −(share × recipients)
-        # (col H). Office indirect stays a SUMIFS so editing an office
-        # expense still recomputes the cascade.
+        # share = pool ÷ recipients (col J); the offset backs out the sum
+        # of its own heads block. Office indirect stays a SUMIFS so editing
+        # an office expense still recomputes the cascade.
         if live and f.get("is_overhead_offset"):
+            span = offset_span.get(r)
+            if span:
+                return f"=-SUM($I${span[0]}:$I${span[1]})"
             return (f"=-SUMIFS({er}!$J:$J,{er}!$A:$A,$A{r})"
                     f"*SUMIFS({er}!$H:$H,{er}!$A:$A,$A{r})")
         if live and f.get("is_overhead"):
@@ -1988,35 +2014,44 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     _cell(ws, 1, 1, "Employee Register", font=_TITLE)
     _cell(ws, 2, 1,
           "Active = filed timesheet hours in the period (21st → 20th "
-          "cycle). Overhead pool = Office indirect expenses + office-home "
-          "staff salaries (Pool Source = Yes on the Salary sheet); it is "
-          "spread over the partner-team employees AND the partners "
-          "themselves (Recipients) and charged to their cost centres. The "
-          "Salary sheet's Overhead rows read the per-employee figure "
-          "(column J).",
+          "cycle). The roster shows EVERYONE; the Consider column "
+          "(dropdown) marks who enters the computation — employees/"
+          "partners of the locations selected at generation time. Every "
+          "count on this sheet reads only \"Consider\" rows, so flipping "
+          "a dropdown recomputes them live (the pool's salary leg follows "
+          "the Salary sheet's Pool Source column). Overhead pool = Office "
+          "indirect expenses + office-home staff salaries; it is spread "
+          "over the considered partner-team employees AND partners "
+          "(Recipients) and charged to their cost centres. The Salary "
+          "sheet's Overhead rows read the per-employee figure (column J).",
           font=_SUB)
 
     # ---- Pre-compute the roster rows so the summary COUNTIFS know
     # their range before being written. Partners (from the cost-centre
     # master, not the employee master) get status "Partner": they count
     # as overhead recipients but not as Active employees (v0.3.98).
-    # Roster layout (v0.3.99 — Location added):
+    # Roster layout (v0.3.99 — Location; v0.3.106 — Consider):
     #   A Period  B Employee  C Home CC  D Location  E Status  F Movement
+    #   G Consider
+    def _consider(member) -> str:
+        return ("Consider" if member.get("considered", True)
+                else "Don't consider")
+
     roster_rows: list[list] = []
     for r in reg:
         for emp in r["active"]:
             roster_rows.append([
                 month_label(r["period"]), emp["name"], emp["cc_code"],
                 emp.get("location", "—"), "Active",
-                "New Joiner" if emp["is_new"] else ""])
+                "New Joiner" if emp["is_new"] else "", _consider(emp)])
         for emp in r["exits"]:
             roster_rows.append([
                 month_label(r["period"]), emp["name"], emp["cc_code"],
-                emp.get("location", "—"), "Exited", "Exit"])
+                emp.get("location", "—"), "Exited", "Exit", _consider(emp)])
         for p in r.get("partners", []):
             roster_rows.append([
                 month_label(r["period"]), p["name"], p["cc_code"],
-                p.get("location", "—"), "Partner", ""])
+                p.get("location", "—"), "Partner", "", _consider(p)])
 
     sum_hrow = 4
     sum_first = sum_hrow + 1
@@ -2028,6 +2063,7 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     rC = f"$C${roster_first}:$C${roster_last}"        # Home CC
     rStat = f"$E${roster_first}:$E${roster_last}"     # Status
     rMov = f"$F${roster_first}:$F${roster_last}"      # Movement
+    rCons = f"$G${roster_first}:$G${roster_last}"     # Consider
 
     # ---- 1. Summary -----------------------------------------------------
     for col, w in (("F", 18), ("G", 20), ("H", 16), ("I", 16), ("J", 20)):
@@ -2043,13 +2079,16 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, row, 2, month_label(r["prev_period"])
               + ("" if r["has_prev_data"] else "  (no data)"), border=True)
         _cell(ws, row, 3,
-              f'=COUNTIFS({rA},$A{row},{rStat},"Active")',
+              f'=COUNTIFS({rA},$A{row},{rStat},"Active",'
+              f'{rCons},"Consider")',
               font=_BOLD, border=True, align=_CENTER)
         _cell(ws, row, 4,
-              f'=COUNTIFS({rA},$A{row},{rMov},"New Joiner")',
+              f'=COUNTIFS({rA},$A{row},{rMov},"New Joiner",'
+              f'{rCons},"Consider")',
               border=True, align=_CENTER)
         _cell(ws, row, 5,
-              f'=COUNTIFS({rA},$A{row},{rMov},"Exit")',
+              f'=COUNTIFS({rA},$A{row},{rMov},"Exit",'
+              f'{rCons},"Consider")',
               border=True, align=_CENTER)
         # Office indirect — live SUMIFS so editing an office expense
         # recomputes the cascade.
@@ -2073,11 +2112,13 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
             _cell(ws, row, 7, 0, fmt=INR, border=True)
         # Overhead recipients — live COUNTIFS over the roster (v0.3.98;
         # was a baked value): partner-team Active employees (Active minus
-        # office-home Active) plus the Partner rows.
+        # office-home Active) plus the Partner rows — "Consider" rows
+        # only (v0.3.106).
         _cell(ws, row, 8,
-              f'=COUNTIFS({rA},$A{row},{rStat},"Active")'
-              f'-COUNTIFS({rA},$A{row},{rStat},"Active",{rC},"{office_code}")'
-              f'+COUNTIFS({rA},$A{row},{rStat},"Partner")',
+              f'=COUNTIFS({rA},$A{row},{rStat},"Active",{rCons},"Consider")'
+              f'-COUNTIFS({rA},$A{row},{rStat},"Active",{rC},"{office_code}",'
+              f'{rCons},"Consider")'
+              f'+COUNTIFS({rA},$A{row},{rStat},"Partner",{rCons},"Consider")',
               border=True, align=_CENTER)
         # Pool = office indirect + office staff salary.
         _cell(ws, row, 9, f"=F{row}+G{row}", fmt=INR, border=True)
@@ -2093,12 +2134,25 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     # ---- 2. Roster -------------------------------------------------------
     _header_row(ws, roster_hrow, [
-        "Period", "Employee", "Home CC", "Location", "Status", "Movement"])
+        "Period", "Employee", "Home CC", "Location", "Status", "Movement",
+        "Consider"])
     for i, row_vals in enumerate(roster_rows):
         row = roster_first + i
         for ci, val in enumerate(row_vals, start=1):
             _cell(ws, row, ci, val, border=True,
-                  align=_CENTER if ci in (1, 3, 4, 5, 6) else None)
+                  align=_CENTER if ci in (1, 3, 4, 5, 6, 7) else None)
+    # Consider column is a two-value dropdown (v0.3.106) so the operator
+    # can flip a row in/out of the computation — every COUNTIFS above
+    # carries the "Consider" criterion, so the counts, recipients and
+    # per-head overhead recompute live from the flip.
+    if roster_rows:
+        dv = DataValidation(
+            type="list", formula1='"Consider,Don\'t consider"',
+            allow_blank=False, showDropDown=False)
+        dv.error = 'Pick "Consider" or "Don\'t consider".'
+        dv.errorTitle = "Invalid value"
+        ws.add_data_validation(dv)
+        dv.add(f"G{roster_first}:G{roster_last}")
 
     # ---- 3. Headcount by cost centre -------------------------------------
     # Placed BESIDE the summary (top-right) rather than at the bottom of
@@ -2128,15 +2182,15 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
                       border=True, align=_CENTER)
                 _cell(ws, row, hc_c0 + 2,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
-                      f'{rStat},"Active")',
+                      f'{rStat},"Active",{rCons},"Consider")',
                       border=True, align=_CENTER)
                 _cell(ws, row, hc_c0 + 3,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
-                      f'{rMov},"New Joiner")',
+                      f'{rMov},"New Joiner",{rCons},"Consider")',
                       border=True, align=_CENTER)
                 _cell(ws, row, hc_c0 + 4,
                       f'=COUNTIFS({rA},${perL}{row},{rC},${ccL}{row},'
-                      f'{rMov},"Exit")',
+                      f'{rMov},"Exit",{rCons},"Consider")',
                       border=True, align=_CENTER)
                 row += 1
 

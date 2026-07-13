@@ -466,8 +466,13 @@ def _build_employee_register(data: MISData, options: MISOptions,
         return emp_index.get(norm(name), f"raw:{norm(name)}")
 
     # Location selection (v0.3.98; STRICT since v0.3.101): only employees
-    # of the selected locations enter the register / overhead spread.
-    # Untagged / unresolved names are excluded and reported via a warning.
+    # of the selected locations are CONSIDERED in the overhead spread and
+    # the headline counts. Since v0.3.106 everyone still APPEARS in the
+    # register — each roster member carries a ``considered`` flag, so the
+    # Employee Register sheet can show the full roster with a
+    # Consider / Don't consider column while every count and the overhead
+    # spread keep using only the considered rows. Untagged / unresolved
+    # names are flagged Don't consider and reported via a warning.
     included = _location_filter(masters, options)
     filter_active = options.location_ids is not None
     excluded_untagged: set[str] = set()
@@ -490,15 +495,13 @@ def _build_employee_register(data: MISData, options: MISOptions,
         sal_cc[(r["period"], emp_key(r["employee_name"]))] = r["cost_centre_id"]
 
     # period -> {key: display name}. Master canonical name wins over the
-    # raw timesheet spelling when the employee is resolved. Employees
-    # outside the selected locations are left out entirely (so they are
-    # neither Active nor Exits).
+    # raw timesheet spelling when the employee is resolved. EVERYONE who
+    # filed a timesheet enters the roster (v0.3.106) — the location
+    # selection decides each member's ``considered`` flag, not their
+    # presence.
     roster: dict[str, dict] = {p: {} for p in all_periods}
     for r in ts_rows:
         key = emp_key(r["emp_name"])
-        if not included(key):
-            _note_excluded(key, r["emp_name"])
-            continue
         name = r["emp_name"]
         if isinstance(key, int):
             name = (employees.get(key) or {}).get("name") or name
@@ -524,18 +527,20 @@ def _build_employee_register(data: MISData, options: MISOptions,
         if cc["cc_type"] != "partner" or not cc.get("active", 1):
             continue
         loc_id = cc.get("location_id")
+        considered = True
         if allowed_locs is not None:
             if loc_id is None:
                 excluded_partners_untagged.add(cc["name"])
-                continue
-            if loc_id not in allowed_locs:
-                continue
+                considered = False
+            elif loc_id not in allowed_locs:
+                considered = False
         partners.append({
             "key": f"partner:{cc['code']}",
             "name": cc["name"],
             "cost_centre_id": cc_id,
             "cc_code": cc["code"],
             "location": (locations.get(loc_id) or {}).get("name") or "—",
+            "considered": considered,
         })
 
     def home_cc(period: str, key) -> int | None:
@@ -592,10 +597,14 @@ def _build_employee_register(data: MISData, options: MISOptions,
         active = []
         for key, name in sorted(cur.items(), key=lambda kv: kv[1].lower()):
             cc_id = home_cc(p, key)
+            considered = bool(included(key))
+            if not considered:
+                _note_excluded(key, name)
             active.append({
                 "key": key, "name": name,
                 "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
                 "location": loc_name(key),
+                "considered": considered,
                 # Movement is only meaningful when we actually hold the
                 # previous month's timesheet — otherwise EVERYONE would
                 # read as a "new joiner" on the first ever import.
@@ -607,18 +616,25 @@ def _build_employee_register(data: MISData, options: MISOptions,
                 if key in cur:
                     continue
                 cc_id = home_cc(prev_p, key)
+                considered = bool(included(key))
+                if not considered:
+                    _note_excluded(key, name)
                 exits.append({
                     "key": key, "name": name,
                     "cost_centre_id": cc_id, "cc_code": cc_code(cc_id),
                     "location": loc_name(key),
+                    "considered": considered,
                 })
-        n = len(active)
-        # Overhead recipients = active employees whose home CC is a PARTNER
-        # (office-home staff are the cost SOURCE, not recipients, v0.3.82)
-        # PLUS the partners themselves (v0.3.98) — partners aren't in the
-        # employee master but each active partner is one overhead head.
-        recipients = (sum(1 for a in active if a["cost_centre_id"] != office_id)
-                      + len(partners))
+        n = sum(1 for a in active if a["considered"])
+        # Overhead recipients = CONSIDERED active employees whose home CC
+        # is a PARTNER (office-home staff are the cost SOURCE, not
+        # recipients, v0.3.82) PLUS the considered partners themselves
+        # (v0.3.98) — partners aren't in the employee master but each
+        # active partner is one overhead head.
+        recipients = (sum(1 for a in active
+                          if a["considered"]
+                          and a["cost_centre_id"] != office_id)
+                      + sum(1 for pt in partners if pt["considered"]))
         office_indirect = round(pool_by_period.get(p, 0.0), 2)
         office_salary = round(office_salary_by_period.get(p, 0.0), 2)
         pool = round(office_indirect + office_salary, 2)
@@ -631,8 +647,9 @@ def _build_employee_register(data: MISData, options: MISOptions,
             "exits": exits,
             "partners": partners,
             "active_count": n,
-            "new_count": sum(1 for a in active if a["is_new"]),
-            "exit_count": len(exits),
+            "new_count": sum(1 for a in active
+                             if a["considered"] and a["is_new"]),
+            "exit_count": sum(1 for e in exits if e["considered"]),
             "office_indirect": office_indirect,
             "office_salary": office_salary,
             "recipients_count": recipients,
@@ -645,14 +662,16 @@ def _build_employee_register(data: MISData, options: MISOptions,
                 f"could not be allocated — no active partner-team "
                 f"employees in the period.")
 
-    # Tagging gaps: employees dropped ONLY because they carry no location.
+    # Tagging gaps: employees marked "Don't consider" ONLY because they
+    # carry no location (they still appear in the register roster).
     if excluded_untagged:
         shown = sorted(excluded_untagged)
         names = ", ".join(shown[:8])
         more = len(shown) - 8
         data.warnings.append(
-            f"{len(shown)} employee(s) with NO location assigned were left "
-            f"out of the Employee Register / overhead: {names}"
+            f"{len(shown)} employee(s) with NO location assigned are marked "
+            f"\"Don't consider\" in the Employee Register and left out of "
+            f"the overhead computation: {names}"
             + (f" (+{more} more)" if more > 0 else "")
             + ". Assign locations in Master Data ▸ Employees (or resolve "
               "raw names in Review & Map) to include them.")
@@ -665,8 +684,9 @@ def _build_employee_register(data: MISData, options: MISOptions,
         names = ", ".join(shown[:8])
         more = len(shown) - 8
         data.warnings.append(
-            f"{len(shown)} partner(s) with NO location assigned were left "
-            f"out of the office-overhead recipients: {names}"
+            f"{len(shown)} partner(s) with NO location assigned are marked "
+            f"\"Don't consider\" in the Employee Register and left out of "
+            f"the office-overhead recipients: {names}"
             + (f" (+{more} more)" if more > 0 else "")
             + ". Assign locations in Master Data ▸ Cost Centres to include "
               "them.")
@@ -968,12 +988,16 @@ def _build_labour_facts(data: MISData, options: MISOptions, masters: dict) -> No
         if per_emp <= 0 or recipients <= 0:
             continue
         period = reg["period"]
-        # Recipients: partner-team active employees + the partners
-        # themselves (v0.3.98). Office-home staff are the source of
-        # (part of) the pool, not recipients.
+        # Recipients: CONSIDERED partner-team active employees + the
+        # considered partners themselves (v0.3.98). Office-home staff are
+        # the source of (part of) the pool, not recipients; roster members
+        # outside the location selection appear in the register but get no
+        # share (v0.3.106).
         heads = ([e for e in reg["active"]
-                  if e["cost_centre_id"] != office_id]
-                 + reg.get("partners", []))
+                  if e.get("considered", True)
+                  and e["cost_centre_id"] != office_id]
+                 + [pt for pt in reg.get("partners", [])
+                    if pt.get("considered", True)])
         for emp in heads:
             data.labour_facts.append({
                 "period": period,
