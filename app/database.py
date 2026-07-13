@@ -533,6 +533,24 @@ MIGRATIONS: list[tuple[int, str]] = [
         -- flagged in a Cover warning) whenever the operator narrows the run.
         ALTER TABLE cost_centres ADD COLUMN location_id INTEGER REFERENCES locations(id);
     """),
+    (20, """
+        -- Reimbursements move to the firm's 21st→20th cycle (v0.3.105),
+        -- same as the timesheet: a row dated 21 Apr → 20 May belongs to
+        -- the May MIS. Existing rows were bucketed by calendar month;
+        -- re-bucket every row that carries a transaction date (day ≤ 20 →
+        -- that month, day ≥ 21 → next month). Rows without a date — pivot
+        -- imports and manual entries — keep their stored period: there is
+        -- no day to re-bucket by, and a manual period is the operator's
+        -- explicit choice.
+        UPDATE reimbursements
+           SET period = CASE
+                WHEN CAST(strftime('%d', date(txn_date)) AS INTEGER) <= 20
+                THEN strftime('%Y-%m', date(txn_date))
+                ELSE strftime('%Y-%m', date(txn_date, 'start of month',
+                                             '+1 month'))
+           END
+         WHERE txn_date IS NOT NULL AND date(txn_date) IS NOT NULL;
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

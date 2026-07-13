@@ -1,8 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-06-12
+> Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.104** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.105** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -180,6 +180,11 @@ hourly-rate basis, MIS views, partner remuneration.
   contributes to **Jan MIS** (because the firm's Jan timesheet window
   is 21 Dec → 20 Jan). Hourly-rate labour allocation in Jan MIS uses
   Jan salary ÷ (21 Dec → 20 Jan hours).
+- **2026-07-13** (v0.3.105) — **Reimbursements use the firm's 21st →
+  20th cycle too**, same as the timesheet. A reimbursement row's
+  transaction date drives the bucket: dated 25 Apr → **May MIS**
+  (May's window is 21 Apr → 20 May). Rows without a transaction date
+  (pivot imports, manual entries) stay on their stated calendar month.
 - **2026-05-22** — Managers: only the 4 named managers are treated as managers
   for now; system stays flexible (timesheet "Reporting Manager" stored as-is,
   not all 28 names need mapping).
@@ -331,6 +336,57 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.105 — Reimbursements follow the 21st→20th cycle, like the timesheet
+
+Operator ask: reimbursements should be considered from the **21st of the
+previous month to the 20th of the current month**, exactly like the
+timesheet — a reimbursement dated 25 Apr belongs to the **May MIS**
+(May's window is 21 Apr → 20 May).
+
+* **Parser** — the transaction date drives the bucket
+  (``valueutils.mis_period_for_timesheet_date`` generalised to
+  ``mis_period_for_cycle_date``, shared by both parsers). The date comes
+  from the mapped ``date`` column or from a **date-typed** Period cell —
+  the firm's export carries a "Transaction Date" column that operators
+  map as the period, and those cells are real datetimes. A text month
+  label ("May-26") has no trustworthy day (it text-parses as 26 May), so
+  it keeps plain calendar semantics as the fallback for dateless rows —
+  new ``valueutils.typed_date`` makes that distinction.
+* **Migration 20** — existing reimbursement rows that carry a
+  transaction date are re-bucketed in place (day ≤ 20 → that month,
+  day ≥ 21 → next month). Dateless rows (pivot imports, manual entries)
+  keep their stored period — there's no day to re-bucket by, and a
+  manual period is the operator's explicit choice.
+* **Dedup reworked — and a silent money-loss bug fixed.** The cycle
+  merges rows from two upload files into one MIS month (April file rows
+  dated ≥ 21 Apr + May file rows dated ≤ 20 May), so the transaction
+  date joins the duplicate key. Testing against the real April export
+  surfaced that the v0.3.90 set-dedup was silently dropping **32
+  genuine rows** — same employee/client/amount/date but distinct
+  expenses (two ₹20 metro rides the same day; "MGT 7A fees" vs "AOC4
+  FEES") that the file's own pivot total counts. Dated rows now dedup
+  as a **multiset**: a file's N identical rows all import, a re-import
+  still inserts 0, and a corrected file with one more occurrence
+  inserts exactly the extra one. Dateless pivot rows keep the strict
+  v0.3.90 behaviour. **Re-importing past reimbursement files therefore
+  restores the previously-dropped rows.**
+* The batch's period label now also counts reimbursement rows
+  (``_dominant_period``), so a reimbursement-only upload shows its
+  period on the Records page.
+
+Verified with a 48-check suite: cycle arithmetic (month/Dec→Jan
+rollovers, 20th/21st boundary), typed-vs-text period cells, parser
+precedence (date beats label; dateless rows fall back to the label),
+timesheet parser regression, all dedup shapes (cross-file merge,
+in-file genuine repeats, pivot files, re-import idempotence), the
+migration on a v19 database (dated rows re-bucket, NULL/garbage dates
+untouched, idempotent re-run) — and end-to-end on the REAL April + May
+exports: all 1,198 rows import (0 lost), every bucket ties to an
+independent recomputation from the raw files, a 25-Mar row in the April
+file lands in April MIS, ``calc.compute`` for May equals the 21 Apr →
+20 May outlays to the paisa, and the generated workbook's
+Reimbursements sheet carries the right period labels.
 
 ### v0.3.104 — Partners are location-mapped in the office-overhead spread
 

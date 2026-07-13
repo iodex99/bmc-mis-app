@@ -74,13 +74,14 @@ def period_of(value: Any) -> str | None:
     return f"{d.year:04d}-{d.month:02d}" if d else None
 
 
-def mis_period_for_timesheet_date(value: Any) -> str | None:
-    """Return the MIS month a timesheet date contributes to.
+def mis_period_for_cycle_date(value: Any) -> str | None:
+    """Return the MIS month a 21st→20th-cycle date contributes to.
 
-    The firm's timesheet cycle runs 21st of the previous month → 20th of the
-    current month, while salary is on the calendar month. So a timesheet
-    entry on **20 Jan** belongs to **Jan MIS**, and one on **25 Dec** also
-    belongs to **Jan MIS** (because it falls in Jan's 21-Dec → 20-Jan window).
+    The firm's timesheet AND reimbursement cycles run 21st of the previous
+    month → 20th of the current month, while vouchers and salary are on the
+    calendar month. So an entry on **20 Jan** belongs to **Jan MIS**, and one
+    on **25 Dec** also belongs to **Jan MIS** (because it falls in Jan's
+    21-Dec → 20-Jan window).
 
     Implementation: day ≤ 20 → current month; day ≥ 21 → next month.
     """
@@ -91,6 +92,22 @@ def mis_period_for_timesheet_date(value: Any) -> str | None:
         return f"{d.year:04d}-{d.month:02d}"
     year, month = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
     return f"{year:04d}-{month:02d}"
+
+
+def typed_date(value: Any) -> _dt.date | None:
+    """Return a date ONLY for cells that unambiguously carry a real day —
+    datetime/date objects or Excel date serials. Text returns None.
+
+    Needed to tell a transaction date apart from a month label when both
+    can land in the same mapped column: "May-26" (the firm's label for
+    May 2026) text-parses to day 26, so day-sensitive bucketing (the
+    21st→20th cycle) must never trust a text-parsed day.
+    """
+    if isinstance(value, (_dt.datetime, _dt.date)) \
+            or (isinstance(value, (int, float))
+                and 25000 < float(value) < 70000):
+        return to_date(value)
+    return None
 
 
 def is_tax_head(particulars: str) -> bool:

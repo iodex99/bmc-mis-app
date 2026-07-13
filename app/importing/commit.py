@@ -50,6 +50,9 @@ def _dominant_period(result: ParseResult) -> str | None:
     for s in result.salary:
         if s.period:
             counts[s.period] += 1
+    for r in result.reimbursements:
+        if r.period:
+            counts[r.period] += 1
     return counts.most_common(1)[0][0] if counts else None
 
 
@@ -346,30 +349,50 @@ def commit_result(result: ParseResult, entity_id: int | None,
             if progress_cb:
                 progress_cb("Importing reimbursement rows",
                              0, len(result.reimbursements))
-            # Dedup (v0.3.90): reimbursement pivots carry one row per
-            # (period, employee, client), so an identical row is always a
-            # duplicate — from a re-import, or a two-block side-by-side
-            # pivot file. Skip rows already in the DB AND exact repeats
-            # within this batch, so reimbursements never double-count.
-            def _rk(period, name, client, amount):
+            # Dedup, reworked for the 21st→20th cycle (v0.3.105).
+            #
+            # DATELESS rows (pivot files, one row per employee/client):
+            # v0.3.90 set semantics — an identical row is always a
+            # duplicate, whether from a re-import or a two-block
+            # side-by-side pivot file.
+            #
+            # DATED rows (the flat per-expense export): the transaction
+            # date joins the key — the cycle merges rows from two upload
+            # files into one MIS month (April file rows dated ≥21 Apr +
+            # May file rows dated ≤20 May), so same-amount expenses on
+            # the same client are only duplicates when the date matches
+            # too. And the count matters: a file legitimately carries N
+            # identical rows (two ₹20 metro rides the same day — the
+            # export's own pivot total counts both), so occurrences are
+            # matched as a MULTISET — only rows beyond what the DB
+            # already holds for that key are new. A re-import therefore
+            # still inserts nothing, but real same-day repeats are never
+            # silently dropped.
+            def _rk(period, name, client, amount, date=None):
                 return (period or "", (name or "").strip().lower(),
                         (client or "").strip().lower(),
-                        round(float(amount or 0.0), 2))
-            existing = {
+                        round(float(amount or 0.0), 2),
+                        str(date or "")[:10])
+            existing: Counter = Counter(
                 _rk(x["period"], x["employee_name"], x["client_raw"],
-                    x["amount"])
+                    x["amount"], x["txn_date"])
                 for x in conn.execute(
-                    "SELECT period, employee_name, client_raw, amount "
-                    "FROM reimbursements")}
+                    "SELECT period, txn_date, employee_name, client_raw, "
+                    "amount FROM reimbursements"))
             rb_params = []
-            seen: set = set()
+            seen: Counter = Counter()
             skipped_dupes = 0
             for r in result.reimbursements:
-                key = _rk(r.period, r.employee_name, r.client_raw, r.amount)
-                if key in existing or key in seen:
+                key = _rk(r.period, r.employee_name, r.client_raw, r.amount,
+                          r.date.isoformat() if r.date else None)
+                seen[key] += 1
+                if r.date:
+                    dup = seen[key] <= existing[key]
+                else:
+                    dup = bool(existing[key]) or seen[key] > 1
+                if dup:
                     skipped_dupes += 1
                     continue
-                seen.add(key)
                 rb_params.append((
                     batch_id, r.period,
                     r.date.isoformat() if r.date else None,

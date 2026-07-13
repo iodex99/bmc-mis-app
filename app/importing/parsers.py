@@ -21,10 +21,11 @@ from .valueutils import (
     clean,
     hours_from_duration,
     is_tax_head,
-    mis_period_for_timesheet_date,
+    mis_period_for_cycle_date,
     period_of,
     to_date,
     to_number,
+    typed_date,
 )
 
 ColMap = dict[str, int]
@@ -403,7 +404,7 @@ def parse_timesheet(grid: list[list[Any]], colmap: ColMap,
             date=date,
             # Timesheet uses the firm's 21st→20th cycle: day ≤ 20 is the
             # current MIS month, day ≥ 21 rolls into next month's MIS.
-            period=mis_period_for_timesheet_date(date),
+            period=mis_period_for_cycle_date(date),
             client_raw=client,
             task=clean(_cell(row, colmap.get("task"))),
             hours=hours,
@@ -450,11 +451,19 @@ def parse_reimbursement(grid: list[list[Any]], colmap: ColMap,
     Expected columns (matched by header label, see sniffer mapping):
 
     * ``period`` — YYYY-MM or any parseable date / month text
-    * ``date`` — optional, falls back to ``period`` for the day
+    * ``date`` — optional transaction date
     * ``name`` — employee name
     * ``amount`` — reimbursement amount in ₹
     * ``client`` — raw client name (resolved at MIS-build time)
     * ``client_reimbursable`` — yes / no / 1 / 0 / true / false
+
+    Reimbursements follow the firm's 21st→20th cycle, like the timesheet:
+    a row dated 25 Apr belongs to **May MIS** (May's window is 21 Apr →
+    20 May). The transaction date drives the bucket — from the ``date``
+    column, or from a date-typed ``period`` cell (the firm's export has a
+    "Transaction Date" column that operators map as the period). A text
+    month label ("May-26") carries no trustworthy day, so it keeps plain
+    calendar-month semantics as a fallback for rows with no real date.
 
     Each non-blank row becomes one ``ParsedReimbursement``. Truly empty
     rows are skipped silently; rows missing only the amount get a
@@ -467,9 +476,10 @@ def parse_reimbursement(grid: list[list[Any]], colmap: ColMap,
         name = clean(_cell(row, colmap.get("name")))
         if not name or _is_total_name(name):   # skip pivot Grand Total rows
             continue
-        date = to_date(_cell(row, colmap.get("date")))
-        period = (period_of(_cell(row, colmap.get("period")))
-                   or (period_of(date) if date else None))
+        date = (to_date(_cell(row, colmap.get("date")))
+                or typed_date(_cell(row, colmap.get("period"))))
+        period = (mis_period_for_cycle_date(date)
+                   or period_of(_cell(row, colmap.get("period"))))
         amount = to_number(_cell(row, colmap.get("amount"))) or 0.0
         if abs(amount) < 0.01:
             continue
