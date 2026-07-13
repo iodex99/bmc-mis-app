@@ -7,8 +7,14 @@ per-batch delete so a wrong import can be undone without nuking everything.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,8 +27,10 @@ from PySide6.QtWidgets import (
 )
 
 from .. import repository as repo
+from ..importing.valueutils import mis_period_for_cycle_date
 from ..services import records
 from ..util import fmt_inr
+from .master_data import _month_year_combos, _period_from
 from .widgets import (
     NoScrollComboBox,
     fill_table_with_actions,
@@ -363,6 +371,121 @@ class TimesheetTab(QWidget):
 
 # --- Reimbursements tab -------------------------------------------------------
 
+class EditReimbursementDialog(QDialog):
+    """Edit one stored reimbursement row.
+
+    The transaction date drives the MIS month (the firm's 21st → 20th
+    cycle, v0.3.105), so while a date is set the Month/Year dropdowns are
+    disabled and a label shows the derived period; untick "has a
+    transaction date" to pick the month by hand (pivot/manual rows).
+
+    Retyping the client re-matches the new text against the client
+    master — a recognised name relinks immediately, an unknown one
+    surfaces in Review & Map. Leaving the client text untouched keeps
+    the existing link exactly as it was.
+    """
+
+    def __init__(self, row: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._row = row
+        self.setWindowTitle("Edit — Reimbursement")
+        self.setMinimumWidth(420)
+        form = QFormLayout()
+
+        self.has_date = QCheckBox("has a transaction date")
+        self.has_date.setChecked(bool(row.get("txn_date")))
+        self.has_date.toggled.connect(self._sync_period_mode)
+        self.date = QDateEdit()
+        self.date.setCalendarPopup(True)
+        self.date.setDisplayFormat("dd-MMM-yyyy")
+        d = QDate.fromString((row.get("txn_date") or "")[:10], "yyyy-MM-dd")
+        self.date.setDate(d if d.isValid() else QDate.currentDate())
+        self.date.dateChanged.connect(self._sync_period_mode)
+
+        self.month, self.year = _month_year_combos(row.get("period"))
+        self.period_note = QLabel("")
+        self.period_note.setObjectName("pageNote")
+
+        self.employee = QLineEdit(row.get("employee_name") or "")
+        self._client_original = (row.get("client_name")
+                                 or row.get("client_raw") or "")
+        self.client = QLineEdit(self._client_original)
+        self.client.setPlaceholderText("optional — client this was spent for")
+        self.amount = QDoubleSpinBox()
+        self.amount.setRange(-1_000_000_000, 1_000_000_000)
+        self.amount.setGroupSeparatorShown(True)
+        self.amount.setDecimals(2)
+        self.amount.setValue(float(row.get("amount") or 0))
+        self.reimbursable = QCheckBox("client refunds this to the firm")
+        self.reimbursable.setChecked(bool(row.get("client_reimbursable")))
+
+        form.addRow("", self.has_date)
+        form.addRow("Date:", self.date)
+        form.addRow("Month:", self.month)
+        form.addRow("Year:", self.year)
+        form.addRow("", self.period_note)
+        form.addRow("Employee *:", self.employee)
+        form.addRow("Client:", self.client)
+        form.addRow("Amount *:", self.amount)
+        form.addRow("Client reimbursable:", self.reimbursable)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self._sync_period_mode()
+
+    # -- period handling ------------------------------------------------------
+    def _sync_period_mode(self) -> None:
+        dated = self.has_date.isChecked()
+        self.date.setEnabled(dated)
+        self.month.setEnabled(not dated)
+        self.year.setEnabled(not dated)
+        if dated:
+            self.period_note.setText(
+                f"MIS month from the date (21st → 20th cycle): "
+                f"{self._period()}")
+        else:
+            self.period_note.setText(
+                "No date — the row stays in the month picked above.")
+
+    def _period(self) -> str:
+        if self.has_date.isChecked():
+            return mis_period_for_cycle_date(self.date.date().toPython())
+        return _period_from(self.month, self.year)
+
+    # -- save -----------------------------------------------------------------
+    def _on_accept(self) -> None:
+        if self.save():
+            self.accept()
+
+    def save(self) -> bool:
+        name = self.employee.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Employee required",
+                                "Enter the employee's name.")
+            return False
+        client_text = self.client.text().strip()
+        client_changed = client_text != self._client_original.strip()
+        records.update_reimbursement(
+            self._row["id"],
+            period=self._period(),
+            txn_date=(self.date.date().toPython().isoformat()
+                      if self.has_date.isChecked() else None),
+            employee_name=name,
+            amount=self.amount.value(),
+            client_reimbursable=self.reimbursable.isChecked(),
+            client_raw=(client_text or None) if client_changed
+            else self._row.get("client_raw"),
+            client_id=self._row.get("client_id"),
+            relink_client=client_changed,
+        )
+        return True
+
+
 class ReimbursementsTab(QWidget):
     """Every reimbursement row — Excel imports and manual entries alike —
     so the operator can review what's stored before generating the MIS."""
@@ -371,6 +494,7 @@ class ReimbursementsTab(QWidget):
         super().__init__()
         self._first_load = True
         self._show_all = False
+        self._rows: list[dict] = []
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.addWidget(_hint(
@@ -380,7 +504,9 @@ class ReimbursementsTab(QWidget):
             "firm's <b>21st → 20th cycle</b>: a row dated 25 Apr shows "
             "under <b>2026-05</b> (May MIS); rows without a transaction "
             "date keep their stated month. Defaults to the latest period — "
-            "switch the dropdown to a different period or '(all periods)'."))
+            "switch the dropdown to a different period or '(all periods)'. "
+            "Use <b>Edit</b> / <b>Delete</b> on a row to fix or remove a "
+            "single entry."))
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
@@ -428,6 +554,7 @@ class ReimbursementsTab(QWidget):
         cli_q = self.client_search.text().strip()
         limit = None if self._show_all else _PAGE_LIMIT
         rows = records.list_reimbursements(period, emp_q, cli_q, limit=limit)
+        self._rows = rows
         totals = records.reimbursement_totals(period, emp_q, cli_q)
         total_n = totals.get("n", 0)
         showing = len(rows)
@@ -460,7 +587,39 @@ class ReimbursementsTab(QWidget):
             ["Period", "Date", "Employee", "Client", "Amount",
              "Client reimbursable", "Source"],
             body, stretch_col=3,
+            action_label="Edit",
+            action_callback=self._edit,
+            secondary_label="Delete",
+            secondary_callback=self._delete,
+            secondary_object_name="rowActionDanger",
         )
+
+    def _edit(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        dlg = EditReimbursementDialog(self._rows[idx], self)
+        if dlg.exec() == QDialog.Accepted:
+            self.reload()
+
+    def _delete(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        r = self._rows[idx]
+        client = r["client_name"] or r["client_raw"] or "(no client)"
+        confirm = QMessageBox.warning(
+            self, "Delete reimbursement?",
+            f"Permanently delete this entry?\n\n"
+            f"{r['period'] or '—'} · {r['employee_name']} · {client} · "
+            f"₹ {fmt_inr(r['amount'] or 0, 2)}\n\nThis cannot be undone.",
+            QMessageBox.Cancel | QMessageBox.Yes, QMessageBox.Cancel)
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            records.delete_reimbursement(r["id"])
+        except Exception as exc:
+            QMessageBox.critical(self, "Failed", str(exc))
+            return
+        self.reload()
 
     def _refill_periods(self) -> None:
         keep = self.period_combo.currentData()

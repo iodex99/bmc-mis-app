@@ -1,8 +1,10 @@
-"""Read-only queries that power the Records page.
+"""Queries that power the Records page.
 
 The Records page is the operator's window into the historical data stored in
-``mis.db``: every imported salary row, every timesheet line, every import
-batch — period-tagged and fully searchable.
+``mis.db``: every imported salary row, every timesheet line, every
+reimbursement, every import batch — period-tagged and fully searchable.
+Mostly read-only; the page also exposes batch delete and the per-row
+edit / delete actions on reimbursements, which live here too.
 """
 
 from __future__ import annotations
@@ -172,8 +174,8 @@ def list_reimbursements(period: str | None = None, employee_q: str = "",
     the same table, so both show. The client shows its canonical master
     name once resolved, falling back to the raw uploaded text."""
     sql = (
-        "SELECT r.period, r.txn_date, r.employee_name, r.client_raw, "
-        "  c.canonical_name AS client_name, "
+        "SELECT r.id, r.period, r.txn_date, r.employee_name, r.client_raw, "
+        "  r.client_id, c.canonical_name AS client_name, "
         "  r.amount, r.client_reimbursable, "
         "  b.file_name AS source "
         "FROM reimbursements r "
@@ -226,3 +228,37 @@ def reimbursement_totals(period: str | None = None, employee_q: str = "",
             f"LEFT JOIN clients c ON c.id = r.client_id "
             f"{sql_where}", params).fetchone()
     return dict(row) if row else {}
+
+
+def update_reimbursement(row_id: int, *, period: str | None,
+                         txn_date: str | None, employee_name: str,
+                         amount: float, client_reimbursable: bool,
+                         client_raw: str | None = None,
+                         client_id: int | None = None,
+                         relink_client: bool = False) -> None:
+    """Update one reimbursement row from the Records page's Edit dialog.
+
+    When the operator retypes the client (*relink_client*), the resolved
+    ``client_id`` is cleared and the new raw text is re-matched against
+    the client master / aliases immediately — same chain an import uses —
+    so a recognised name shows its canonical form straight away and an
+    unknown one surfaces in Review & Map. Otherwise the stored client
+    link is preserved untouched.
+    """
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE reimbursements SET period = ?, txn_date = ?, "
+            "employee_name = ?, amount = ?, client_reimbursable = ?, "
+            "client_raw = ?, client_id = ? WHERE id = ?",
+            (period, txn_date, employee_name, float(amount or 0.0),
+             1 if client_reimbursable else 0, client_raw,
+             None if relink_client else client_id, row_id))
+    if relink_client and (client_raw or "").strip():
+        from .resolution import apply_known_client_aliases
+        apply_known_client_aliases()
+
+
+def delete_reimbursement(row_id: int) -> None:
+    """Permanently delete one reimbursement row (Records page action)."""
+    with transaction() as conn:
+        conn.execute("DELETE FROM reimbursements WHERE id = ?", (row_id,))

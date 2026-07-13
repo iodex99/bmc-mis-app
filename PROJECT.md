@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.107** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.108** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,38 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.108 — Records ▸ Reimbursements: per-row Edit / Delete actions
+
+Follow-up to the v0.3.107 tab: each reimbursement row now carries
+**Edit** and **Delete** buttons (matching the Review & Map tabs' inline
+actions), so a single wrong entry can be fixed or removed without
+deleting the whole import batch.
+
+* **Edit dialog** (``EditReimbursementDialog``) — Date (with a "has a
+  transaction date" toggle), Month/Year, Employee, Client, Amount and
+  the client-reimbursable flag. The period follows the system's own
+  rules: while a date is set the Month/Year dropdowns are disabled and
+  a live note shows the MIS month the 21st→20th cycle derives from that
+  date (edit the date, the note re-derives); untick the date to pick
+  the month by hand (pivot/manual rows). **Retyping the client**
+  clears the stored link and re-matches the new text against the client
+  master / aliases immediately — a recognised name shows its canonical
+  form straight away, an unknown one surfaces in Review & Map. Leaving
+  the client text untouched preserves the existing link exactly.
+* **Delete** — confirm dialog quoting the row (period · employee ·
+  client · amount), then removes just that row.
+* New ``records.update_reimbursement`` / ``delete_reimbursement``
+  services; the listing query now carries the row id and client id.
+
+Verified (suite now 69 checks, all green, plus the v0.3.105 cycle suite
+and a UI smoke): every row renders Edit + Delete buttons; the dialog
+prefills a dated row correctly and disables Month/Year while dated;
+moving the date from 25 Apr to 25 May re-buckets the row to the June
+MIS on save; amount/flag edits persist; an untouched client keeps its
+raw text and link; a retyped client auto-relinks to the master and the
+tab immediately shows the canonical name; a dateless manual row edits
+via Month/Year with no date stored; delete removes exactly the one row.
 
 ### v0.3.107 — Consider gates only the overhead; Records gains a Reimbursements tab
 
