@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.110** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.111** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,58 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.111 — Performance at scale: indexes, lazy navigation, capped rendering
+
+Operator ask: the data will grow over time — make sure the app never
+hangs or slows down, especially navigation, without touching any data.
+A full audit found three compounding costs; all fixes are read-path
+only (indexes + UI laziness), so every stored row is untouched
+(verified: row counts and amounts identical through the migration).
+
+**1. Migration 21 — eleven indexes on the hot queries** (pure DDL):
+* ``batch_id`` on vouchers / timesheet / salary / reimbursements — the
+  Records ▸ Import batches tab runs one correlated COUNT per batch × 4
+  tables; each was a full table scan.
+* **Partial indexes** on the unresolved rows (``WHERE client_id IS
+  NULL`` on vouchers/timesheet/reimbursements; ``WHERE cost_centre_id
+  IS NULL`` on voucher_splits) — the Review queues, tab badges and
+  Dashboard review tiles scan only still-unresolved rows, so these
+  stay tiny however large the resolved history grows.
+* **Expression indexes** on ``lower(trim(emp_name))`` (timesheet) and
+  ``lower(trim(employee_name))`` (salary) — the unknown-employee queue
+  grouped the entire timesheet (the largest table) on every refresh.
+* ``vouchers(client_id)`` — Client Register first-billing GROUP BY.
+Verified with EXPLAIN QUERY PLAN that each hot query actually uses its
+index. (WAL / synchronous=NORMAL / 64MB cache were already in place.)
+
+**2. Review & Map navigates lazily.** Showing the page used to run the
+three auto-mapping passes AND rebuild all four tabs — including the
+voucher tab's widget-heavy table over every voucher ever imported.
+Now only the CURRENT tab loads; every tab reloads fresh from the DB
+the moment it's activated, so nothing shown is ever stale. The tab
+badges come from the (now-indexed) unresolved-count queries instead of
+each tab's loaded rows — correct even for never-visited tabs. The
+import/manual-entry ``refresh()`` hook keeps the auto-mapping passes
+but no longer builds hidden tables. The voucher tab also no longer
+loads in its constructor.
+
+**3. Vouchers tab render cap.** Each table row carries five widgets
+(status pill, two buttons, …) — thousands of rows froze the tab. The
+DB fetch and Python-side filtering still cover EVERYTHING (the totals
+bar, the "n of m" summary and the unassigned badge are exact over the
+full filtered set, and search reaches every row), but only the first
+1,000 rows get widgets, with a "Show all N rows" button (summary notes
+the truncation). Edit/Delete index mapping stays safe because the
+rendered set is a strict prefix of the filtered rows.
+
+Verified with a 28-check suite on a 2,500-voucher / 3,000-timesheet-row
+database: migration integrity (every table's row count and the voucher
+sum unchanged, idempotent re-run, all 11 indexes present), six query
+plans, the capped-render behaviours, lazy navigation (voucher tab not
+loaded on page show OR hidden refresh; badges right without loading;
+activation loads fresh), and a calc + workbook smoke. All four prior
+suites (70 + 48 + 34 + 30 checks) and the UI smoke stay green.
 
 ### v0.3.110 — Review & Map ▸ Vouchers: search by amount
 

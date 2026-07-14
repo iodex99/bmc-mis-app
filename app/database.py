@@ -551,6 +551,44 @@ MIGRATIONS: list[tuple[int, str]] = [
            END
          WHERE txn_date IS NOT NULL AND date(txn_date) IS NOT NULL;
     """),
+    (21, """
+        -- Performance indexes (v0.3.111) — pure DDL, no data changes.
+        -- The app must stay responsive as years of data accumulate.
+
+        -- Records ▸ Import batches lists every batch with one correlated
+        -- COUNT per batch across four tables; without batch indexes each
+        -- count is a full table scan (batches × 4 scans per page view).
+        CREATE INDEX IF NOT EXISTS idx_vouchers_batch  ON vouchers(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_timesheet_batch ON timesheet_entries(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_salary_batch    ON salary_entries(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_reimb_batch     ON reimbursements(batch_id);
+
+        -- Unresolved-queue scans: the Review & Map queues, the tab
+        -- badges and the Dashboard review tiles all ask "which rows have
+        -- no client link yet?". Partial indexes hold ONLY those rows, so
+        -- they stay tiny however large the resolved history grows.
+        CREATE INDEX IF NOT EXISTS idx_vch_unresolved
+            ON vouchers(kind, party_name) WHERE client_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_ts_unresolved
+            ON timesheet_entries(client_raw) WHERE client_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_reimb_unresolved
+            ON reimbursements(client_raw) WHERE client_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_splits_unassigned
+            ON voucher_splits(voucher_id) WHERE cost_centre_id IS NULL;
+
+        -- The unknown-employee queue groups the WHOLE timesheet (the
+        -- largest table) by the normalised name on every Review /
+        -- Dashboard refresh; expression indexes let SQLite satisfy the
+        -- GROUP BY from the index instead of sorting the full table.
+        CREATE INDEX IF NOT EXISTS idx_ts_emp_norm
+            ON timesheet_entries(lower(trim(emp_name)));
+        CREATE INDEX IF NOT EXISTS idx_salary_emp_norm
+            ON salary_entries(lower(trim(employee_name)));
+
+        -- Client Register (first-ever billing month per client) and
+        -- client-wise groupings GROUP BY client_id over all vouchers.
+        CREATE INDEX IF NOT EXISTS idx_vouchers_client ON vouchers(client_id);
+    """),
     # When you change the schema, append a new (version, sql) tuple here.
 ]
 

@@ -737,11 +737,15 @@ def _amount_query_predicate(text: str):
     return mk(lambda x: abs(x - target) <= 0.5)
 
 
+_VCH_RENDER_LIMIT = 1000    # rows rendered at once — each carries widgets
+
+
 class VoucherTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._all_rows: list[dict] = []   # everything from the DB query
-        self._rows: list[dict] = []       # post-filter, what the table shows
+        self._rows: list[dict] = []       # post-filter (totals use ALL of it)
+        self._show_all = False            # render past _VCH_RENDER_LIMIT
         self._loading = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -833,7 +837,23 @@ class VoucherTab(QWidget):
         self.empty.setVisible(False)
         layout.addWidget(self.empty, 1)
 
-        self._reload_filters()
+        # Render cap (v0.3.111): every FILTERED row still counts toward
+        # the totals bar and the summary, but only the first
+        # _VCH_RENDER_LIMIT rows get table widgets — beyond that the
+        # operator clicks "Show all" (or narrows the filters).
+        self.show_all_btn = QPushButton("")
+        self.show_all_btn.setVisible(False)
+        self.show_all_btn.clicked.connect(self._show_all_rows)
+        layout.addWidget(self.show_all_btn, alignment=Qt.AlignLeft)
+
+        # No eager load (v0.3.111): the tab fetches and renders when it's
+        # activated (ReviewPage._refresh calls _reload_filters), so
+        # constructing the Review page stays instant however many
+        # vouchers the DB holds.
+
+    def _show_all_rows(self) -> None:
+        self._show_all = True
+        self._refilter()
 
     def count(self) -> int:
         # The badge shows vouchers still needing attention (unassigned splits).
@@ -870,6 +890,7 @@ class VoucherTab(QWidget):
         refilter in Python (status + search)."""
         if self._loading:
             return
+        self._show_all = False
         self._all_rows = vsvc.list_vouchers(
             self.entity_combo.currentData(),
             self.period_combo.currentData(),
@@ -907,6 +928,18 @@ class VoucherTab(QWidget):
         if unassigned:
             parts.append(
                 f"<span style='color:#B91C1C;'>{unassigned} unassigned</span>")
+        # Render cap: totals/summary above cover EVERY filtered row; only
+        # the rendered prefix gets table widgets (they're what's slow).
+        shown = self._rows if self._show_all \
+            else self._rows[:_VCH_RENDER_LIMIT]
+        truncated = len(shown) < n
+        if truncated:
+            parts.append(
+                f"<span style='color:#92400E;'>showing first "
+                f"{len(shown):,}</span>")
+        self.show_all_btn.setVisible(truncated)
+        self.show_all_btn.setText(
+            f"Show all {n:,} rows" if truncated else "")
         self.summary.setText("  ·  ".join(parts))
         self._update_totals()
         self.empty.setVisible(n == 0)
@@ -916,7 +949,7 @@ class VoucherTab(QWidget):
 
         rows_body = []
         labels = []
-        for v in self._rows:
+        for v in shown:
             rows_body.append([
                 v["txn_date"] or "",
                 v["vch_no"], v["party_name"],
@@ -1041,26 +1074,34 @@ class ReviewPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        self.refresh()
+        # Lazy navigation (v0.3.111): apply the auto-mapping passes (the
+        # unresolved sets they scan are small thanks to the partial
+        # indexes) but reload ONLY the tab the operator is looking at —
+        # loading all four (the voucher tab in particular renders a
+        # widget-heavy table) made navigating here sluggish once years of
+        # data accumulated. Every tab reloads fresh from the DB the
+        # moment it's activated, so nothing shown is ever stale.
+        self._apply_auto_mappings()
+        self._refresh(self.tabs.currentIndex())
 
     def refresh(self) -> None:
-        """Apply auto-mappings + reload every tab from the DB.
+        """Apply auto-mappings + reload what's on screen.
 
-        Called on ``showEvent`` (operator navigates to the page) and also
-        fired by the Import page after every successful Tally pull or
-        Excel commit, so newly-imported vouchers / clients / CC strings
-        appear immediately without the operator having to re-navigate.
+        Fired by the Import page after every successful Tally pull or
+        Excel commit (and by Manual Entry on save), so newly-imported
+        vouchers / clients / CC strings resolve immediately. Tabs load
+        lazily: only the visible tab is (re)built — a hidden tab always
+        reloads from the DB when activated, so it can't go stale.
         """
+        self._apply_auto_mappings()
+        if self.isVisible():
+            self._refresh(self.tabs.currentIndex())
+
+    @staticmethod
+    def _apply_auto_mappings() -> None:
         resolution.apply_known_client_aliases()
         resolution.apply_known_cc_string_mappings()
         resolution.auto_match_cc_strings()
-        for i in range(self.tabs.count()):
-            tab = self.tabs.widget(i)
-            if hasattr(tab, "_reload_filters"):
-                tab._reload_filters()
-            elif hasattr(tab, "reload"):
-                tab.reload()
-        self._refresh_badges()
 
     def _refresh(self, index: int) -> None:
         widget = self.tabs.widget(index)
@@ -1071,8 +1112,15 @@ class ReviewPage(QWidget):
         self._refresh_badges()
 
     def _refresh_badges(self) -> None:
-        for i, name in enumerate(_TAB_BASE_NAMES):
-            tab = self.tabs.widget(i)
-            n = tab.count() if hasattr(tab, "count") else 0
-            label = f"{name}  ({n})" if n else name
-            self.tabs.setTabText(i, label)
+        """Tab badges from the (indexed) unresolved-queue queries —
+        independent of which tabs have been loaded, since tabs load
+        lazily (v0.3.111). Previously each badge read its tab's loaded
+        rows, which would show 0 for a tab not yet visited."""
+        counts = [
+            len(resolution.unresolved_clients()),
+            len(resolution.unresolved_employees()),
+            len(resolution.unresolved_cc_strings()),
+            vsvc.split_stats()["vouchers_unassigned"],
+        ]
+        for i, (name, n) in enumerate(zip(_TAB_BASE_NAMES, counts)):
+            self.tabs.setTabText(i, f"{name}  ({n})" if n else name)
