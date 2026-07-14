@@ -618,9 +618,10 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
               f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r},'
               f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")',
               fmt=INR, border=True)
-        # Reimbursement Expenses: reimbursement-sheet outlays (Amount=I,
-        # CostCentre=C).
-        _cell(ws, r, 9, f"=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,$A{r})",
+        # Reimbursement Expenses: reimbursement-sheet outlays (Amount=I)
+        # by the BOOKED Employee CC column (E, v0.3.109) — the cost
+        # follows the employee's own cost centre, not the client's.
+        _cell(ws, r, 9, f"=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,$A{r})",
               fmt=INR, border=True)
         # Provisions: outstanding provision remaining (Remaining=G, CC=C).
         _cell(ws, r, 10, f"=SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
@@ -1107,13 +1108,13 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                     formula = exp_sumifs(cc_code, mgr_filter,
                                          EXPENSE_TYPE_INDIRECT)
                 elif kind == "reimb_exp":
-                    # Reimbursement outlays land on the client's partner —
-                    # no manager dimension on that sheet, so partner-level
-                    # ("Self" column) only. Keeps the P&L tying with the
-                    # Cost Centre P&L's Direct Expense column.
+                    # Reimbursement outlays land on the EMPLOYEE's own
+                    # cost centre (Employee CC = E, v0.3.109) — partner-
+                    # level ("Self" column) only. Keeps the P&L tying
+                    # with the Cost Centre P&L's Reimbursement Expenses.
                     if offset == 0:
                         formula = (f'=SUMIFS({reimb}!$I:$I,'
-                                   f'{reimb}!$C:$C,"{cc_code}")')
+                                   f'{reimb}!$E:$E,"{cc_code}")')
                     else:
                         formula = 0
                 elif kind == "provisions":
@@ -1256,7 +1257,9 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
         return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
                 f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")')
     if kind == "reimb_exp":
-        return f'=SUMIFS({reimb}!$I:$I,{reimb}!$C:$C,"{cc_code}")'
+        # Booked by the Employee CC column (E, v0.3.109) — same criterion
+        # on the current, (Cmp) and (FY) editions of the sheet.
+        return f'=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,"{cc_code}")'
     if kind == "provisions":
         return f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}")'
     if kind == "overhead":
@@ -1462,18 +1465,20 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
 
     One row per client (canonical name from the master, or ``(unmapped)``
     when the voucher's party didn't resolve). Columns: Client | Grand
-    Total | Cum <FY window> | one per selected period. The cumulative
-    column (v0.3.103) shows the client's billing over the FY months
-    BEFORE the selected period — a live SUMIFS over the "Revenue (FY)"
-    data sheet. Clients billed only in that prior window still get a row
-    (0 current), so the cumulative total never undercounts. Credit /
-    Debit Notes flow through with signs intact. Sorted by Grand Total
-    descending.
+    Total | one per FY month BEFORE the selected period | one per
+    selected period. The prior-FY columns (v0.3.109, replacing the single
+    cumulative column of v0.3.103) show each earlier FY month's billing
+    separately — live SUMIFS over the "Revenue (FY)" data sheet's Client
+    + Period columns. Clients billed only in that prior window still get
+    a row (0 current), so the history never undercounts. The Grand Total
+    sums ONLY the selected period's columns. Credit / Debit Notes flow
+    through with signs intact. Sorted by Grand Total descending.
     """
     if not data.options.periods:
         return
     periods = sorted(data.options.periods)
     has_fy = bool(fy_label and fy_data is not None)
+    fy_months = sorted(fy_data.options.periods) if has_fy else []
 
     # Group by resolved client; unresolved parties group by their raw
     # party name (one row per distinct vendor/client as Tally spells it)
@@ -1514,28 +1519,27 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
         rows.append((names[key], total, amounts))
     rows.sort(key=lambda r: -r[1])
 
-    # Layout: A Client, B Grand Total, then (optionally) the cumulative
-    # column, then one column per period.
-    cum_col = 3 if has_fy else None
-    p0 = 4 if has_fy else 3          # first period column
+    # Layout: A Client, B Grand Total, then one column per FY month
+    # before the selected period, then one column per selected period.
+    fy0 = 3                              # first prior-FY month column
+    p0 = 3 + len(fy_months)              # first current-period column
 
     ws = wb.create_sheet("Client Billing")
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 36
     ws.column_dimensions["B"].width = 16
-    if has_fy:
-        ws.column_dimensions["C"].width = 20
-    for i in range(len(periods)):
-        ws.column_dimensions[get_column_letter(p0 + i)].width = 13
+    for i in range(len(fy_months) + len(periods)):
+        ws.column_dimensions[get_column_letter(fy0 + i)].width = 13
 
     _cell(ws, 1, 1, "Client-wise Billing", font=_TITLE)
     _cell(ws, 2, 1, "Period(s): " + periods_label(periods)
-          + (f".  'Cum {fy_label}' = the client's billing over the FY "
-             "months before the selected period." if has_fy else ""),
+          + (f".  Columns {fy_label} show each FY month before the "
+             "selected period, month by month; the Grand Total sums only "
+             "the selected period's columns." if has_fy else ""),
           font=_SUB)
     hrow = 4
     headers = (["Client", "Grand Total"]
-               + ([f"Cum {fy_label}"] if has_fy else [])
+               + [_month_short(p) for p in fy_months]
                + [_month_short(p) for p in periods])
     _header_row(ws, hrow, headers)
 
@@ -1546,19 +1550,21 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     rev_fy = _q("Revenue" + FYS)
     for name, _total, amounts in rows:
         _cell(ws, r, 1, name, border=True)
-        # Grand Total is a SUM formula across the period columns —
+        # Grand Total is a SUM formula across the CURRENT period columns —
         # not a baked-in value — so the operator can edit a cell and
-        # the total updates live. (The cumulative column is context and
-        # is NOT part of the Grand Total.)
+        # the total updates live. (The prior-FY month columns are context
+        # and are NOT part of the Grand Total.)
         _cell(ws, r, 2,
               f"=SUM({first_period_col}{r}:{last_period_col}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
-        if has_fy:
-            # Live SUMIFS over the Revenue (FY) sheet's Client column —
-            # both sheets name clients identically (master canonical
-            # name, raw party fallback), so the criterion always matches.
-            _cell(ws, r, cum_col,
-                  f"=SUMIFS({rev_fy}!$H:$H,{rev_fy}!$G:$G,$A{r})",
+        # One live SUMIFS per prior-FY month over the Revenue (FY)
+        # sheet's Client (G) + Period (J) columns — both sheets name
+        # clients identically (master canonical name, raw party
+        # fallback), so the criteria always match.
+        for i, p in enumerate(fy_months):
+            _cell(ws, r, fy0 + i,
+                  f'=SUMIFS({rev_fy}!$H:$H,{rev_fy}!$G:$G,$A{r},'
+                  f'{rev_fy}!$J:$J,"{month_label(p)}")',
                   fmt=INR, border=True)
         for i, amt in enumerate(amounts):
             _cell(ws, r, p0 + i, amt, fmt=INR, border=True)
@@ -1577,7 +1583,9 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
                          list(range(2, p0 + len(periods))),
                          last_col=p0 + len(periods) - 1)
 
-    ws.freeze_panes = f"{get_column_letter(p0)}{body_start}"
+    # Freeze Client + Grand Total; the month columns (prior-FY and
+    # current alike) scroll.
+    ws.freeze_panes = f"C{body_start}"
 
 
 def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
@@ -1717,6 +1725,9 @@ def _client_or_party(lbl: dict, f: dict) -> str:
 
 
 def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
+    # Period (J, v0.3.109) lets the Client Billing sheet split the FY
+    # months before the selected period into one live SUMIFS column per
+    # month (was a single cumulative column).
     rows = []
     for f in data.revenue_facts:
         svc_name = lbl["svc"].get(f["service_id"], "(unspecified)")
@@ -1730,12 +1741,13 @@ def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
             _client_or_party(lbl, f),
             round(f["amount"], 2),
             _service_category(svc_name),
+            month_label(f.get("period")) if f.get("period") else "",
         ])
     _write_data_sheet(
         wb, "Revenue" + suffix,
         ["Date", "Invoice No", "Entity", "CostCentre", "Manager",
-         "Service", "Client", "Amount", "Category"],
-        [12, 16, 24, 12, 12, 22, 28, 14, 14], rows)
+         "Service", "Client", "Amount", "Category", "Period"],
+        [12, 16, 24, 12, 12, 22, 28, 14, 14, 10], rows)
 
 
 def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
@@ -1815,17 +1827,23 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
                             suffix: str = "") -> None:
     """Per-row reimbursement detail. One row per uploaded entry.
 
-    Columns: Period | Date | CostCentre | Employee | Employee CC | Manager |
-             Client | Client Reimbursable | Amount
+    Columns: Period | Date | Client CC | Employee | Employee CC | Manager |
+             Client | Client Reimbursable | Amount | Pool Source
 
-    ``CostCentre`` (the booking CC) comes from the client master (the
-    partner serving that client); ``Employee CC`` is the employee's own
-    home cost centre and ``Manager`` the employee's manager, both from the
-    employee master. CostCentre and Employee CC can differ when an employee
-    of one partner incurs a reimbursement for another partner's client.
+    ``Employee CC`` (E) is the BOOKED cost centre — the employee's own
+    home cost centre from the master (v0.3.109), falling back to the
+    client's partner, then Office, when the employee isn't resolved yet.
+    ``Client CC`` (C) is informational: the partner serving the client
+    this was spent for. The two differ when an employee of one partner
+    incurs a reimbursement for another partner's client.
 
-    Cost Centre P&L SUMIFs against this sheet's Amount column (I) via
-    CostCentre (C) so the partner-level totals include reimbursements.
+    Cost Centre P&L / Partner-Manager P&L SUMIFS this sheet's Amount
+    column (I) via **Employee CC (E)** — the cost follows the employee.
+
+    ``Pool Source`` (J, v0.3.109) is "Yes" on rows of office-home staff
+    within the selected locations: their outlays join the office-overhead
+    pool, and the Employee Register's Office Staff Reimbursement column
+    SUMIFS this column, keeping the overhead cascade formula-driven.
     """
     def _client_label(f):
         cid = f.get("client_id")
@@ -1837,19 +1855,20 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
         return "(no client)"
     rows = [[
         month_label(f["period"]), _fmt_date(f.get("txn_date")),
-        lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+        lbl["cc"].get(f.get("client_cost_centre_id"), "—"),
         f["employee_name"],
-        lbl["cc"].get(f.get("employee_cost_centre_id"), "—"),
+        lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
         lbl["mgr"].get(f.get("employee_manager_id"), "(unassigned)"),
         _client_label(f),
         "Yes" if f["client_reimbursable"] else "No",
         round(f["amount"], 2),
+        "Yes" if f.get("is_pool_source") else "",
     ] for f in data.reimbursement_facts]
     _write_data_sheet(
         wb, "Reimbursements" + suffix,
-        ["Period", "Date", "CostCentre", "Employee", "Employee CC", "Manager",
-         "Client", "Client Reimbursable", "Amount"],
-        [10, 12, 12, 26, 12, 16, 28, 16, 14], rows)
+        ["Period", "Date", "Client CC", "Employee", "Employee CC", "Manager",
+         "Client", "Client Reimbursable", "Amount", "Pool Source"],
+        [10, 12, 12, 26, 12, 16, 28, 16, 14, 12], rows)
 
 
 def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
@@ -1924,17 +1943,17 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
 
     def _amount(f, r):
         # Overhead amounts chain LIVE to the Employee Register: per-employee
-        # share = pool ÷ recipients (col J); the offset backs out the sum
+        # share = pool ÷ recipients (col K); the offset backs out the sum
         # of its own heads block. Office indirect stays a SUMIFS so editing
         # an office expense still recomputes the cascade.
         if live and f.get("is_overhead_offset"):
             span = offset_span.get(r)
             if span:
                 return f"=-SUM($I${span[0]}:$I${span[1]})"
-            return (f"=-SUMIFS({er}!$J:$J,{er}!$A:$A,$A{r})"
-                    f"*SUMIFS({er}!$H:$H,{er}!$A:$A,$A{r})")
+            return (f"=-SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
+                    f"*SUMIFS({er}!$I:$I,{er}!$A:$A,$A{r})")
         if live and f.get("is_overhead"):
-            return f"=SUMIFS({er}!$J:$J,{er}!$A:$A,$A{r})"
+            return f"=SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
         return round(f["amount"], 2)
 
     def _billable(f):
@@ -1979,9 +1998,11 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     1. **Summary** — one row per period: active employees, new joiners,
        exits (COUNTIFS over the roster), the office indirect pool
-       (SUMIFS over the Expenses sheet) and the per-employee overhead
-       (pool ÷ active). The Salary sheet's Overhead rows SUMIFS into
-       column G here, so the whole overhead cascade is live.
+       (SUMIFS over the Expenses sheet), the office staff salary and
+       reimbursement pool legs (SUMIFS over the Salary / Reimbursements
+       sheets' Pool Source columns) and the per-employee overhead
+       (pool ÷ recipients). The Salary sheet's Overhead rows SUMIFS into
+       column K here, so the whole overhead cascade is live.
     2. **Roster** — one row per (period, employee): home cost centre,
        Active/Exited status, and the movement vs the previous month.
        "Active" = filed timesheet hours in the period. Exited = was in
@@ -2002,6 +2023,7 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         "Office")
     exp = _q("Expenses")
     lab = _q("Salary")
+    rmb = _q("Reimbursements")
     # Salary-only row window on the Salary sheet. Salary facts are written
     # first and Overhead facts appended after them (order guaranteed by
     # _build_labour_facts), so bounding the Office-Staff-Salary SUMIFS to
@@ -2020,12 +2042,13 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
           "ONLY the office-overhead computation: Overhead Recipients "
           "counts \"Consider\" rows, so flipping a dropdown recomputes "
           "the recipients and per-head figures live (the pool's salary "
-          "leg follows the Salary sheet's Pool Source column). Overhead "
-          "pool = Office indirect expenses + office-home staff salaries; "
-          "it is spread over the considered partner-team employees AND "
-          "partners (Recipients) and charged to their cost centres. The "
-          "Salary sheet's Overhead rows read the per-employee figure "
-          "(column J).",
+          "and reimbursement legs follow the Pool Source columns on the "
+          "Salary / Reimbursements sheets). Overhead pool = Office "
+          "indirect expenses + office-home staff salaries + office-home "
+          "staff reimbursements; it is spread over the considered "
+          "partner-team employees AND partners (Recipients) and charged "
+          "to their cost centres. The Salary sheet's Overhead rows read "
+          "the per-employee figure (column K).",
           font=_SUB)
 
     # ---- Pre-compute the roster rows so the summary COUNTIFS know
@@ -2068,11 +2091,13 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     rCons = f"$G${roster_first}:$G${roster_last}"     # Consider
 
     # ---- 1. Summary -----------------------------------------------------
-    for col, w in (("F", 18), ("G", 20), ("H", 16), ("I", 16), ("J", 20)):
+    for col, w in (("F", 18), ("G", 20), ("H", 22), ("I", 16), ("J", 16),
+                   ("K", 20)):
         ws.column_dimensions[col].width = w
     _header_row(ws, sum_hrow, [
         "Period", "Prev Month", "Active Employees", "New Joiners", "Exits",
         "Office Indirect (₹)", "Office Staff Salary (₹)",
+        "Office Staff Reimbursement (₹)",
         "Overhead Recipients", "Overhead Pool (₹)", "Overhead / Employee (₹)"])
     notes = []
     for i, r in enumerate(reg):
@@ -2111,21 +2136,30 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
                   fmt=INR, border=True)
         else:
             _cell(ws, row, 7, 0, fmt=INR, border=True)
+        # Office staff reimbursement (v0.3.109) — live SUMIFS over the
+        # Reimbursements sheet's Pool Source rows (office-home staff
+        # within the selected locations). Static values there, so the
+        # full-column reference can't go circular.
+        _cell(ws, row, 8,
+              f'=SUMIFS({rmb}!$I:$I,{rmb}!$A:$A,$A{row},'
+              f'{rmb}!$J:$J,"Yes")',
+              fmt=INR, border=True)
         # Overhead recipients — live COUNTIFS over the roster (v0.3.98;
         # was a baked value): partner-team Active employees (Active minus
         # office-home Active) plus the Partner rows — "Consider" rows
         # only (v0.3.106).
-        _cell(ws, row, 8,
+        _cell(ws, row, 9,
               f'=COUNTIFS({rA},$A{row},{rStat},"Active",{rCons},"Consider")'
               f'-COUNTIFS({rA},$A{row},{rStat},"Active",{rC},"{office_code}",'
               f'{rCons},"Consider")'
               f'+COUNTIFS({rA},$A{row},{rStat},"Partner",{rCons},"Consider")',
               border=True, align=_CENTER)
-        # Pool = office indirect + office staff salary.
-        _cell(ws, row, 9, f"=F{row}+G{row}", fmt=INR, border=True)
+        # Pool = office indirect + office staff salary + office staff
+        # reimbursement.
+        _cell(ws, row, 10, f"=F{row}+G{row}+H{row}", fmt=INR, border=True)
         # Per-employee overhead = pool ÷ recipients.
-        _cell(ws, row, 10,
-              f"=IF(H{row}=0,0,IF(I{row}<=0,0,ROUND(I{row}/H{row},2)))",
+        _cell(ws, row, 11,
+              f"=IF(I{row}=0,0,IF(J{row}<=0,0,ROUND(J{row}/I{row},2)))",
               font=_BOLD, fmt=INR, border=True)
         if not r["has_prev_data"]:
             notes.append(
@@ -2158,15 +2192,15 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     # ---- 3. Headcount by cost centre -------------------------------------
     # Placed BESIDE the summary (top-right) rather than at the bottom of
     # the sheet, so the operator reads both summary tables at a glance
-    # without scrolling past the full roster. Starts at column L — one gap
-    # after the summary's overhead columns (which now run through J).
+    # without scrolling past the full roster. Starts at column M — one gap
+    # after the summary's overhead columns (which now run through K).
     cc_codes: list[str] = []
     for rr in roster_rows:
         if rr[2] not in cc_codes:
             cc_codes.append(rr[2])
     cc_codes.sort()
     if cc_codes:
-        hc_c0 = 12                               # column L (one gap after J)
+        hc_c0 = 13                               # column M (one gap after K)
         ccL = get_column_letter(hc_c0)           # Cost Centre column
         perL = get_column_letter(hc_c0 + 1)      # Period column
         for off, w in enumerate((20, 12, 10, 13, 10)):

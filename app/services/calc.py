@@ -461,6 +461,12 @@ def _build_employee_register(data: MISData, options: MISOptions,
             f"SELECT period, employee_name, salary_paid, reimbursement "
             f"FROM salary_entries WHERE period IN ({_placeholders(periods)})",
             periods).fetchall()
+        # Reimbursement-sheet outlays — office-home employees' expense
+        # claims join the overhead pool too (v0.3.109), like their pay.
+        reimb_rows = conn.execute(
+            f"SELECT period, employee_name, amount "
+            f"FROM reimbursements WHERE period IN ({_placeholders(periods)})",
+            periods).fetchall()
 
     def emp_key(name: str):
         return emp_index.get(norm(name), f"raw:{norm(name)}")
@@ -591,6 +597,28 @@ def _build_employee_register(data: MISData, options: MISOptions,
             amt += float(r["reimbursement"] or 0.0)
         office_salary_by_period[p] += amt
 
+    # Office-home employees' reimbursement-sheet outlays also feed the
+    # pool (v0.3.109). The condition MUST mirror the reimbursement fact's
+    # ``is_pool_source`` (master home CC = Office, employee resolved and
+    # within the location selection) — the Employee Register's new
+    # Office Staff Reimbursement column SUMIFS those flagged rows, and
+    # the pool offset backs out exactly what those facts book to Office.
+    office_reimb_by_period: dict[str, float] = {p: 0.0 for p in periods}
+    for r in reimb_rows:
+        p = r["period"]
+        if p not in office_reimb_by_period:
+            continue
+        key = emp_key(r["employee_name"])
+        if not isinstance(key, int):
+            continue
+        if (employees.get(key) or {}).get("default_cost_centre_id") \
+                != office_id:
+            continue
+        if not included(key):
+            _note_excluded(key, r["employee_name"])
+            continue
+        office_reimb_by_period[p] += float(r["amount"] or 0.0)
+
     for p in periods:
         prev_p = prev_map[p]
         cur = roster.get(p, {})
@@ -642,7 +670,8 @@ def _build_employee_register(data: MISData, options: MISOptions,
                       + sum(1 for pt in partners if pt["considered"]))
         office_indirect = round(pool_by_period.get(p, 0.0), 2)
         office_salary = round(office_salary_by_period.get(p, 0.0), 2)
-        pool = round(office_indirect + office_salary, 2)
+        office_reimb = round(office_reimb_by_period.get(p, 0.0), 2)
+        pool = round(office_indirect + office_salary + office_reimb, 2)
         per_emp = round(pool / recipients, 2) if recipients and pool > 0 else 0.0
         data.employee_register.append({
             "period": p,
@@ -656,6 +685,7 @@ def _build_employee_register(data: MISData, options: MISOptions,
             "exit_count": len(exits),
             "office_indirect": office_indirect,
             "office_salary": office_salary,
+            "office_reimbursement": office_reimb,
             "recipients_count": recipients,
             "pool": pool,
             "per_employee": per_emp,
@@ -1045,11 +1075,20 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
                                 masters: dict) -> None:
     """Build one fact per uploaded reimbursement row.
 
-    Each fact's cost-centre is the CLIENT'S cost centre from the master
-    (the partner who serves that client bears the cost). When the
-    client_id hasn't been resolved yet (raw text not matched to master),
-    the fact falls back to the employee's home cost centre — same chain
-    the labour facts use, so it doesn't silently land on Office.
+    Each fact's cost-centre is the EMPLOYEE'S home cost centre from the
+    master (v0.3.109, operator ask) — the partner whose team member spent
+    the money bears the cost. When the employee isn't in the master yet
+    (raw name unresolved), the fact falls back to the CLIENT's cost
+    centre, then Office — so no outlay silently vanishes. The client's
+    partner is kept on the fact (``client_cost_centre_id``) for the
+    Reimbursements sheet's informational Client CC column.
+
+    An OFFICE-home employee's reimbursement therefore lands on Office —
+    and, like their salary, feeds the office-overhead pool (v0.3.109):
+    the fact carries ``is_pool_source`` (office-home AND within the
+    selected locations), the Employee Register adds it to the pool, and
+    the pool's negative offset backs it out of Office, spreading it over
+    the recipient heads.
 
     Whether the firm recovers the cost from the client (the
     ``client_reimbursable`` flag) is preserved on the fact but does
@@ -1065,6 +1104,7 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
     emp_index = masters["emp_index"]
     office_id = masters["office_id"]
     fold_mgr = _mgr_folder(masters)
+    included = _location_filter(masters, options)
     ph = _placeholders(options.periods)
     with transaction() as conn:
         rows = conn.execute(
@@ -1075,29 +1115,33 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
             options.periods).fetchall()
     for r in rows:
         client = clients.get(r["client_id"])
-        # The EMPLOYEE's home cost centre (from the master) — shown on the
-        # Reimbursements sheet; also the booking-CC fallback when the
-        # client isn't mapped.
+        client_cc = client["cost_centre_id"] if client else None
         emp_id = emp_index.get(norm(r["employee_name"]))
         emp_rec = employees.get(emp_id) if isinstance(emp_id, int) else None
         emp_cc = (emp_rec or {}).get("default_cost_centre_id")
         # Fold a deactivated manager to None so the Reimbursements sheet's
         # Manager column matches the rest of the MIS (v0.3.97).
         emp_mgr = fold_mgr((emp_rec or {}).get("manager_id"))
-        # Booking CC: client's partner bears the cost; fall back to the
-        # employee's home CC, then Office.
-        cc = (client["cost_centre_id"] if client else None) or emp_cc \
-            or office_id
+        # Booking CC: the employee's own cost centre bears the cost
+        # (v0.3.109); fall back to the client's partner, then Office.
+        cc = emp_cc or client_cc or office_id
+        # Pool source: an office-home employee's outlay joins the overhead
+        # pool — mirroring the salary Pool Source rule (master says home
+        # CC = Office, and the employee is within the location selection).
+        is_pool_source = (emp_cc == office_id and isinstance(emp_id, int)
+                          and bool(included(emp_id)))
         data.reimbursement_facts.append({
             "period": r["period"],
             "txn_date": r["txn_date"],
             "cost_centre_id": cc,
+            "client_cost_centre_id": client_cc,
             "employee_cost_centre_id": emp_cc,
             "employee_manager_id": emp_mgr,
             "employee_name": r["employee_name"],
             "client_id": r["client_id"],
             "client_raw": r["client_raw"],
             "client_reimbursable": bool(r["client_reimbursable"]),
+            "is_pool_source": is_pool_source,
             "amount": float(r["amount"] or 0.0),
         })
 

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.108** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.109** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,62 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.109 — Reimbursements follow the employee; month-wise billing history; reimbursements in the overhead pool
+
+Three operator asks in one release:
+
+**1. Reimbursement outlays book to the EMPLOYEE's cost centre.** The
+Cost Centre P&L / Partner-Manager P&L reimbursement SUMIFS now key on
+the Reimbursements sheet's **Employee CC column (E)** instead of the
+client's partner (C) — the cost follows the team member who spent the
+money. Changed at the SOURCE so everything stays tied: calc's
+reimbursement facts book ``employee CC → client's CC → Office``
+(employee first; the old chain was client-first), and the sheet's
+column E now shows that booked CC while column C (renamed **Client
+CC**) keeps the client's partner for reference. Repointed everywhere
+the formula appears: the CC P&L, the PM P&L partner columns, and —
+via the shared ``_pm_leaf_formula`` — the **(FY)** cumulative and
+**(Cmp)** comparison editions, whose sheets share the same writer so
+their column layout moves in lockstep. Dashboard and Comparatives read
+the calc lines, so they follow automatically.
+
+**2. Client Billing: month-wise FY history, not a cumulative.** The
+single "Cum Apr-26 to May-26" column becomes **one column per FY month
+before the selected period** — a June MIS shows Apr-26 and May-26
+columns, each a live SUMIFS over the "Revenue (FY)" data sheet by
+Client + its new **Period column (J)**. Grand Total still sums ONLY
+the selected period's columns; clients billed only in the earlier
+months still get a row; freeze pane holds Client + Grand Total.
+
+**3. Office staff reimbursements join the overhead pool.** The
+Employee Register summary gains **"Office Staff Reimbursement (₹)"**
+(column H): the reimbursement-sheet outlays of employees whose home
+cost centre is Office, which now feed the overhead pool exactly like
+office-home salaries — Pool = Office Indirect + Office Staff Salary +
+Office Staff Reimbursement, spread over the recipients. Formula-driven
+via a new **Pool Source column (J)** on the Reimbursements sheet
+("Yes" on office-home rows within the selected locations — the same
+strict rule as the Salary sheet's Pool Source; a location-excluded
+office employee's outlay stays on Office). Since those rows also book
+to Office under ask 1, the pool's offset backs them out — the firm
+total is invariant, verified with and without a location filter.
+Summary columns shift right (Recipients I, Pool J, Per-head K; the
+Salary sheet's overhead rows repointed; headcount block moves to M).
+
+Verified with a new 34-check suite (plus the updated 70-check ER/
+Records suite, the 48-check cycle suite and a UI smoke, all green):
+a KS employee's outlay for PM's client lands on KS with PM kept as
+Client CC; an unknown employee falls back to the client's CC; CC P&L
+rows formula-evaluate to 500/200/700 per the new booking; every
+reimbursement SUMIFS across the main, (FY) and (Cmp) sheets keys on
+$E:$E; the ER pool cascade evaluates 12,000+5,000+700 → 17,700 ÷ 10
+heads = 1,770 per head with the Salary sheet's overhead netting to
+zero; a Mumbai-only run feeds only the Mumbai office employee's 300
+into the pool with the firm net identical; Client Billing shows
+Apr/May/Jun columns with ClientP 100,000/50,000/25,000, a zero-current
+ClientQ row, no Cum column, and Grand Total = current only; the
+comparative workbook builds with matching (Cmp) columns.
 
 ### v0.3.108 — Records ▸ Reimbursements: per-row Edit / Delete actions
 
