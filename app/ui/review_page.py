@@ -678,6 +678,65 @@ class CcStringTab(QWidget):
 
 # --- Voucher review tab ------------------------------------------------------
 
+def _amount_query_predicate(text: str):
+    """Parse the Vouchers tab's amount filter into a predicate.
+
+    Accepted forms (commas / ₹ / spaces ignored):
+
+    * ``50000`` or ``=50000`` — exact amount (±0.50 tolerance, so paise
+      rounding never hides a match; sign-insensitive, so a −11,800
+      credit note matches ``11800``)
+    * ``>10000`` ``>=10000`` ``<5000`` ``<=5000`` — comparisons on the
+      magnitude
+    * ``10000-20000`` — inclusive range on the magnitude
+
+    A voucher matches when its NET or GROSS amount satisfies the query —
+    the operator may type either the P&L figure or Tally's total
+    including tax. A zero (unset) component is ignored so it can't
+    trivially satisfy a ``<`` query. Returns ``None`` for blank /
+    not-yet-parseable text (filter inactive — the operator may still be
+    typing).
+    """
+    t = (text or "").replace(",", "").replace("₹", "").replace(" ", "")
+    if not t:
+        return None
+
+    def num(s):
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    def mk(test):
+        def pred(net, gross):
+            mags = [abs(x) for x in (net, gross) if abs(x) > 0.005]
+            return any(test(m) for m in (mags or [0.0]))
+        return pred
+
+    for op in (">=", "<=", ">", "<"):
+        if t.startswith(op):
+            v = num(t[len(op):])
+            if v is None:
+                return None
+            return mk({">": lambda x: x > v, ">=": lambda x: x >= v,
+                       "<": lambda x: x < v, "<=": lambda x: x <= v}[op])
+    if t.startswith("="):
+        t = t[1:]
+    # Range "a-b" — the dash must not be a leading minus sign.
+    if "-" in t[1:]:
+        i = t.index("-", 1)
+        a, b = num(t[:i]), num(t[i + 1:])
+        if a is None or b is None:
+            return None
+        lo, hi = min(a, b) - 0.005, max(a, b) + 0.005
+        return mk(lambda x: lo <= x <= hi)
+    v = num(t)
+    if v is None:
+        return None
+    target = abs(v)
+    return mk(lambda x: abs(x - target) <= 0.5)
+
+
 class VoucherTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -733,9 +792,25 @@ class VoucherTab(QWidget):
         self._sched_filter, self._search_timer = debounced(
             self._refilter, ms=200)
         self.search.textChanged.connect(self._sched_filter)
+        # Amount filter (v0.3.110): matches the voucher's net OR gross,
+        # so the operator can type either the P&L figure or Tally's
+        # tax-inclusive total. Exact / >x / <=x / a-b forms — see
+        # _amount_query_predicate.
+        self.amount_search = QLineEdit()
+        self.amount_search.setPlaceholderText(
+            "Amount: 50000 · >10000 · 10000-20000")
+        self.amount_search.setMaximumWidth(230)
+        self.amount_search.setToolTip(
+            "Filter by amount (net or gross). Examples:\n"
+            "  50000 — exact amount (commas / ₹ fine)\n"
+            "  >10000, >=10000, <5000, <=5000\n"
+            "  10000-20000 — range (inclusive)")
+        self.amount_search.textChanged.connect(self._sched_filter)
         bar2.addWidget(QLabel("Status:"))
         bar2.addWidget(self.status_combo)
         bar2.addWidget(self.search, 1)
+        bar2.addWidget(QLabel("Amount:"))
+        bar2.addWidget(self.amount_search)
         layout.addLayout(bar2)
 
         # --- totals bar: live sum over whatever the filters show, so the
@@ -816,6 +891,11 @@ class VoucherTab(QWidget):
                     if q in (v.get("party_name") or "").lower()
                     or q in (v.get("client_name") or "").lower()
                     or q in (v.get("vch_no") or "").lower()]
+        amount_ok = _amount_query_predicate(self.amount_search.text())
+        if amount_ok is not None:
+            rows = [v for v in rows
+                    if amount_ok(float(v.get("net_amount") or 0.0),
+                                 float(v.get("gross_amount") or 0.0))]
         self._rows = rows
 
         n = len(self._rows)

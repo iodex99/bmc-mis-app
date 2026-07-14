@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.109** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.110** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,34 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.110 — Review & Map ▸ Vouchers: search by amount
+
+Operator ask: find a voucher by its amount. The Vouchers tab gains an
+**Amount** filter box beside the text search (they combine):
+
+* ``50000`` / ``₹ 50,000`` / ``=50000`` — exact amount, ±0.50 paise
+  tolerance, sign-insensitive (a −11,800 credit note matches
+  ``11800``)
+* ``>10000`` ``>=10000`` ``<5000`` ``<=5000`` — comparisons on the
+  magnitude
+* ``10000-20000`` — inclusive range (order-insensitive)
+
+A voucher matches when its **net or gross** amount satisfies the query,
+so the operator can type either the P&L figure or Tally's tax-inclusive
+total; a zero/unset component is ignored so it can't trivially satisfy
+a ``<`` query. Blank or still-being-typed text leaves the filter
+inactive. Debounced like the text search; the live totals bar and the
+"n of m" summary follow the narrowed set (parser:
+``review_page._amount_query_predicate``).
+
+Verified with a 30-check suite: 16 parser cases (blank/partial input
+inactive, comma/₹ stripping, gross matching, boundaries on every
+operator, range order, leading-minus vs range) and a headless
+VoucherTab drive over planted vouchers — exact by net, exact by gross,
+credit-note magnitude match, lakh-formatted input, comparisons, range,
+AND-combination with the text search, filter clearing, and the
+summary/totals bar following. UI smoke + full compile green.
 
 ### v0.3.109 — Reimbursements follow the employee; month-wise billing history; reimbursements in the overhead pool
 
