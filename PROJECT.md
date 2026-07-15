@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.111** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.112** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,52 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.112 — Review & Map no longer hangs; CC-strings tab crash fixed
+
+Operator report: the app still lagged when navigating to Review & Map ▸
+Vouchers after v0.3.111. Profiled on a realistic 2-year dataset (24k
+vouchers, 100k timesheet rows, 1.5k clients, 2k permanently-unmapped
+vendors): opening Review & Map took ~2.9s and every keystroke in the
+Clients search ~1.6s. After this release the page opens in ~0.36s and
+keystrokes are instant — and a long-standing crash was found and fixed.
+
+* **Bug fix: the Cost Centres tab has been silently broken.**
+  ``CcStringTab.reload`` used ``transaction()`` without importing it —
+  a ``NameError`` on every reload since at least v0.3.94 (PySide6
+  prints the traceback and carries on, so the tab just showed stale /
+  empty data, and under the old eager refresh the exception also
+  aborted the voucher-tab reload behind it). Import added; the tab
+  works again.
+* **The fuzzy client-name pass ran twice per navigation** — once at
+  page level and AGAIN inside ``ClientTab.reload`` (1.1s each at this
+  scale, re-scoring every unmapped vendor against the whole client
+  master), plus on every search keystroke. Navigation now runs the
+  exact-match pass only (0.06s — it finds everything a master edit can
+  make matchable); the FULL fuzzy pass still runs where it can find
+  new links: after every import / manual-entry save, and via the
+  Clients tab's ⚡ Auto-resolve button.
+* **Search keystrokes refilter in memory.** The three queue tabs
+  (Clients / Employees / Cost Centres) cached nothing — each keypress
+  re-ran resolution + re-queried + re-rendered. They now fetch once on
+  activation and refilter the cached queue per keystroke.
+* **Render caps everywhere widgets grow with data.** Queue tabs and
+  the voucher tab render the first 400 rows (v0.3.111's 1,000 was
+  still sluggish on modest hardware) with a "Show all N rows" button;
+  counts, totals, info labels, badges, search and the bulk actions
+  ("Create all as new", Confirm suggested) always cover the FULL
+  queue. Records ▸ Reimbursements (Edit/Delete widgets per row) pages
+  at 500 with the existing Load-all.
+
+Measured after: Review page open 2.88s → 0.36s, Clients reload 1.64s →
+0.16s, CC tab crash → 0.015s, voucher tab activation 0.65s → 0.53s
+(query-bound), Records Reimbursements 0.06s. Verified with a new
+21-check suite (spy asserts nav runs skip_fuzzy while the import hook
+runs full fuzzy; CC tab loads 600 strings with suggestions; caps +
+Show-all on every tab; keystroke refilter provably does NOT hit the DB;
+search reaches rows beyond the render window; row counts across all
+tables byte-identical after the whole UI drive) — plus all five prior
+suites (28+70+48+34+30 checks) and the UI smoke, all green.
 
 ### v0.3.111 — Performance at scale: indexes, lazy navigation, capped rendering
 

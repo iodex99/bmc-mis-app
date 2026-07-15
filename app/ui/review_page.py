@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config, repository as repo
+from ..database import transaction
 from ..services import resolution
 from ..services import vouchers as vsvc
 from ..util import fmt_inr
@@ -38,6 +39,22 @@ def _warn_pill(_: int) -> tuple[str, str]:
     return "Unmapped", "statusWarn"
 
 
+# Rows rendered at once in the review queues / voucher table. Every row
+# carries widgets (status pill + two buttons), which is what makes big
+# tables freeze the UI — the underlying row lists, counts and bulk
+# actions always cover EVERYTHING; only the widgets are capped.
+_QUEUE_RENDER_LIMIT = 400
+
+
+def _capped_rows(rows: list, show_all: bool, btn: QPushButton) -> list:
+    """Prefix of *rows* to render; wires the "Show all" button."""
+    shown = rows if show_all else rows[:_QUEUE_RENDER_LIMIT]
+    truncated = len(shown) < len(rows)
+    btn.setVisible(truncated)
+    btn.setText(f"Show all {len(rows):,} rows" if truncated else "")
+    return shown
+
+
 def _empty_state(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("emptyState")
@@ -51,7 +68,9 @@ def _empty_state(text: str) -> QLabel:
 class ClientTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self._rows: list[dict] = []
+        self._rows: list[dict] = []       # post-search (actions use this)
+        self._all_rows: list[dict] = []   # full unresolved queue
+        self._show_all = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
@@ -87,7 +106,9 @@ class ClientTab(QWidget):
         search_bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by name…")
-        self._sched_reload, self._search_timer = debounced(self.reload)
+        # Keystrokes refilter the already-fetched queue (v0.3.112) —
+        # no DB re-query, no resolution pass per keypress.
+        self._sched_reload, self._search_timer = debounced(self._refilter)
         self.search.textChanged.connect(self._sched_reload)
         search_bar.addWidget(self.search)
         layout.addLayout(search_bar)
@@ -99,6 +120,11 @@ class ClientTab(QWidget):
         self.table.itemSelectionChanged.connect(self._update_bulk_button)
         layout.addWidget(self.table, 1)
 
+        self.show_all_btn = QPushButton("")
+        self.show_all_btn.setVisible(False)
+        self.show_all_btn.clicked.connect(self._show_all_rows)
+        layout.addWidget(self.show_all_btn, alignment=Qt.AlignLeft)
+
         self.empty = _empty_state(
             "✓  Every client name is mapped.<br>"
             "<span style='color:#64748B;'>Once you import more files, any new "
@@ -109,10 +135,23 @@ class ClientTab(QWidget):
     def count(self) -> int:
         return len(self._rows)
 
+    def _show_all_rows(self) -> None:
+        self._show_all = True
+        self._refilter()
+
     def reload(self) -> None:
-        # Always re-apply known aliases first — picks up newly-imported rows.
-        resolution.apply_known_client_aliases()
-        all_rows = resolution.unresolved_clients()
+        """Fetch the unresolved queue from the DB, then render.
+
+        The alias auto-apply that used to run here happens at page level
+        (showEvent / import refresh) — running it on every tab reload,
+        including every search keystroke, was a major navigation cost."""
+        self._all_rows = resolution.unresolved_clients()
+        self._show_all = False
+        self._refilter()
+
+    def _refilter(self) -> None:
+        """Search + render over the already-fetched queue."""
+        all_rows = self._all_rows
         q = self.search.text().strip().lower()
         if q:
             self._rows = [r for r in all_rows if q in r["raw"].lower()]
@@ -129,9 +168,10 @@ class ClientTab(QWidget):
                 f"{n} of {total} match{'es' if n != 1 else ''} your search")
         self.empty.setVisible(total == 0)
         self.table.setVisible(n > 0 or total > 0)
+        shown = _capped_rows(self._rows, self._show_all, self.show_all_btn)
         if n:
             rows = [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
-                    for r in self._rows]
+                    for r in shown]
             fill_table_with_actions(
                 self.table,
                 ["Raw client name", "Seen in", "Rows"],
@@ -233,6 +273,8 @@ class EmployeeTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rows: list[dict] = []
+        self._all_rows: list[dict] = []
+        self._show_all = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
@@ -264,7 +306,7 @@ class EmployeeTab(QWidget):
         search_bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by name…")
-        self._sched_reload, self._search_timer = debounced(self.reload)
+        self._sched_reload, self._search_timer = debounced(self._refilter)
         self.search.textChanged.connect(self._sched_reload)
         search_bar.addWidget(self.search)
         layout.addLayout(search_bar)
@@ -276,6 +318,11 @@ class EmployeeTab(QWidget):
         self.table.itemSelectionChanged.connect(self._update_bulk_button)
         layout.addWidget(self.table, 1)
 
+        self.show_all_btn = QPushButton("")
+        self.show_all_btn.setVisible(False)
+        self.show_all_btn.clicked.connect(self._show_all_rows)
+        layout.addWidget(self.show_all_btn, alignment=Qt.AlignLeft)
+
         self.empty = _empty_state(
             "✓  Every employee is mapped.<br>"
             "<span style='color:#64748B;'>New employees from future timesheet "
@@ -286,8 +333,17 @@ class EmployeeTab(QWidget):
     def count(self) -> int:
         return len(self._rows)
 
+    def _show_all_rows(self) -> None:
+        self._show_all = True
+        self._refilter()
+
     def reload(self) -> None:
-        all_rows = resolution.unresolved_employees()
+        self._all_rows = resolution.unresolved_employees()
+        self._show_all = False
+        self._refilter()
+
+    def _refilter(self) -> None:
+        all_rows = self._all_rows
         q = self.search.text().strip().lower()
         if q:
             self._rows = [r for r in all_rows if q in r["raw"].lower()]
@@ -304,9 +360,10 @@ class EmployeeTab(QWidget):
                 f"{n} of {total} match{'es' if n != 1 else ''} your search")
         self.empty.setVisible(total == 0)
         self.table.setVisible(n > 0 or total > 0)
+        shown = _capped_rows(self._rows, self._show_all, self.show_all_btn)
         if n:
             rows = [[r["raw"], ", ".join(sorted(r["sources"])), r["count"]]
-                    for r in self._rows]
+                    for r in shown]
             fill_table_with_actions(
                 self.table,
                 ["Raw employee name", "Seen in", "Rows"],
@@ -397,6 +454,8 @@ class CcStringTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rows: list[dict] = []
+        self._all_rows: list[dict] = []
+        self._show_all = False
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
@@ -444,7 +503,7 @@ class CcStringTab(QWidget):
         search_bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by Cost Centre string…")
-        self._sched_reload, self._search_timer = debounced(self.reload)
+        self._sched_reload, self._search_timer = debounced(self._refilter)
         self.search.textChanged.connect(self._sched_reload)
         search_bar.addWidget(self.search)
         layout.addLayout(search_bar)
@@ -456,6 +515,11 @@ class CcStringTab(QWidget):
         self.table.itemSelectionChanged.connect(self._update_bulk_button)
         layout.addWidget(self.table, 1)
 
+        self.show_all_btn = QPushButton("")
+        self.show_all_btn.setVisible(False)
+        self.show_all_btn.clicked.connect(self._show_all_rows)
+        layout.addWidget(self.show_all_btn, alignment=Qt.AlignLeft)
+
         self.empty = _empty_state(
             "✓  Every Cost Centre string is mapped.<br>"
             "<span style='color:#64748B;'>Tally invoices route to the right "
@@ -466,8 +530,13 @@ class CcStringTab(QWidget):
     def count(self) -> int:
         return len(self._rows)
 
+    def _show_all_rows(self) -> None:
+        self._show_all = True
+        self._refilter()
+
     def reload(self) -> None:
-        resolution.apply_known_cc_string_mappings()
+        # The saved-mapping auto-apply runs at page level (showEvent /
+        # import refresh), not per tab reload.
         all_rows = resolution.unresolved_cc_strings()
         # Run our matcher over every unresolved string so the operator
         # sees the suggested partner inline. Cache (cc_id, mgr_id, score,
@@ -497,7 +566,12 @@ class CcStringTab(QWidget):
                 r["suggested_label"] = label
             else:
                 r["suggested_label"] = ""
+        self._all_rows = all_rows
+        self._show_all = False
+        self._refilter()
 
+    def _refilter(self) -> None:
+        all_rows = self._all_rows
         q = self.search.text().strip().lower()
         if q:
             self._rows = [r for r in all_rows if q in r["raw"].lower()]
@@ -527,9 +601,10 @@ class CcStringTab(QWidget):
                 else "✓ Confirm suggested")
         self.empty.setVisible(total == 0)
         self.table.setVisible(n > 0 or total > 0)
+        shown = _capped_rows(self._rows, self._show_all, self.show_all_btn)
         if n:
             rows = [[r["raw"], r["count"], r["suggested_label"]]
-                    for r in self._rows]
+                    for r in shown]
             fill_table_with_actions(
                 self.table,
                 ["Cost Centre string", "Invoices", "Suggested partner"],
@@ -737,7 +812,10 @@ def _amount_query_predicate(text: str):
     return mk(lambda x: abs(x - target) <= 0.5)
 
 
-_VCH_RENDER_LIMIT = 1000    # rows rendered at once — each carries widgets
+# Rows rendered at once — each carries five widgets, so this is what
+# keeps the tab snappy however many vouchers accumulate (v0.3.112:
+# lowered from 1,000 — still slow on modest hardware).
+_VCH_RENDER_LIMIT = _QUEUE_RENDER_LIMIT
 
 
 class VoucherTab(QWidget):
@@ -1074,14 +1152,22 @@ class ReviewPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        # Lazy navigation (v0.3.111): apply the auto-mapping passes (the
-        # unresolved sets they scan are small thanks to the partial
-        # indexes) but reload ONLY the tab the operator is looking at —
-        # loading all four (the voucher tab in particular renders a
-        # widget-heavy table) made navigating here sluggish once years of
-        # data accumulated. Every tab reloads fresh from the DB the
-        # moment it's activated, so nothing shown is ever stale.
-        self._apply_auto_mappings()
+        # Lazy navigation (v0.3.111): apply the auto-mapping passes but
+        # reload ONLY the tab the operator is looking at — loading all
+        # four (the voucher tab in particular renders a widget-heavy
+        # table) made navigating here sluggish once years of data
+        # accumulated. Every tab reloads fresh from the DB the moment
+        # it's activated, so nothing shown is ever stale.
+        #
+        # On plain navigation the client-alias pass runs EXACT-match only
+        # (v0.3.112): the fuzzy leg re-scores every permanently-unmapped
+        # vendor against the whole client master (seconds once both grow
+        # into the thousands) and can never find anything new when
+        # neither the data nor the masters changed. The full fuzzy pass
+        # still runs where it matters — after every import / manual
+        # entry (refresh()) and via the Clients tab's ⚡ Auto-resolve
+        # button.
+        self._apply_auto_mappings(skip_fuzzy=True)
         self._refresh(self.tabs.currentIndex())
 
     def refresh(self) -> None:
@@ -1089,17 +1175,18 @@ class ReviewPage(QWidget):
 
         Fired by the Import page after every successful Tally pull or
         Excel commit (and by Manual Entry on save), so newly-imported
-        vouchers / clients / CC strings resolve immediately. Tabs load
-        lazily: only the visible tab is (re)built — a hidden tab always
-        reloads from the DB when activated, so it can't go stale.
+        vouchers / clients / CC strings resolve immediately — including
+        the fuzzy client-name pass. Tabs load lazily: only the visible
+        tab is (re)built — a hidden tab always reloads from the DB when
+        activated, so it can't go stale.
         """
-        self._apply_auto_mappings()
+        self._apply_auto_mappings(skip_fuzzy=False)
         if self.isVisible():
             self._refresh(self.tabs.currentIndex())
 
     @staticmethod
-    def _apply_auto_mappings() -> None:
-        resolution.apply_known_client_aliases()
+    def _apply_auto_mappings(skip_fuzzy: bool) -> None:
+        resolution.apply_known_client_aliases(skip_fuzzy=skip_fuzzy)
         resolution.apply_known_cc_string_mappings()
         resolution.auto_match_cc_strings()
 

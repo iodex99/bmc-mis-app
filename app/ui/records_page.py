@@ -39,6 +39,10 @@ from .widgets import (
 
 
 _PAGE_LIMIT = 2000
+# Reimbursement rows carry Edit / Delete widgets per row (unlike the
+# plain salary / timesheet cells), so their default page is smaller —
+# "Load all" still fetches everything on demand (v0.3.112).
+_REIMB_PAGE_LIMIT = 500
 
 
 def _info(text: str) -> QLabel:
@@ -552,7 +556,7 @@ class ReimbursementsTab(QWidget):
         period = self.period_combo.currentData()
         emp_q = self.emp_search.text().strip()
         cli_q = self.client_search.text().strip()
-        limit = None if self._show_all else _PAGE_LIMIT
+        limit = None if self._show_all else _REIMB_PAGE_LIMIT
         rows = records.list_reimbursements(period, emp_q, cli_q, limit=limit)
         self._rows = rows
         totals = records.reimbursement_totals(period, emp_q, cli_q)
