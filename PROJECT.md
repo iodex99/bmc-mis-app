@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.112** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.113** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,40 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.113 — Expenses sheet: Invoice No now comes through the Tally pull
+
+Operator report: the generated MIS's Expenses sheet had a blank
+"Invoice No" column. Root cause: only the **Excel** voucher-dump parser
+read the register's "New Ref" / "Agst Ref" bill references — the
+**direct Tally HTTP pull** (the operator's normal flow since the Tally
+Pull page shipped) never extracted them from the XML, so every pulled
+voucher stored ``invoice_no = NULL`` and the sheet's column C (which
+was wired correctly all along, calc → fact → sheet) had nothing to
+show.
+
+* **``tally_xml._bill_refs``** — reads ``BILLALLOCATIONS.LIST`` under
+  the party ledger entry of each voucher: ``NAME`` is the reference,
+  ``BILLTYPE`` says New Ref (fresh invoice) vs Agst Ref (settling an
+  old one). Same rule as the Excel parser: New Refs preferred, Agst
+  Refs the fallback, several references joined with ", ".
+* **Re-pull backfills history.** Vouchers pulled before this fix hold
+  no invoice number, and a re-pull skips them as identical duplicates —
+  the dedup skip now **fills in an EMPTY invoice_no as it passes**
+  (never overwrites an existing one; amounts and every other field
+  untouched). So the operator just re-pulls the old periods once and
+  the numbers appear, with zero duplicate risk.
+* The Revenue sheet's "Invoice No" column intentionally keeps showing
+  the sales voucher number — for the firm's own invoices that IS the
+  invoice number.
+
+Verified with a 14-check suite: extraction across every shape (New
+Ref, Agst-only, multiple refs joined without mixing in Agst, no
+bill allocations, amounts unaffected), commit persisting the numbers,
+the re-pull inserting nothing while backfilling exactly the blank
+rows and preserving non-blank ones, and the generated workbook's
+Expenses sheet carrying the reference on the voucher's row. All six
+prior suites (21+28+30+34+48+70 checks) and the UI smoke stay green.
 
 ### v0.3.112 — Review & Map no longer hangs; CC-strings tab crash fixed
 

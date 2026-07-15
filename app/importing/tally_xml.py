@@ -314,6 +314,36 @@ def _extract_cc_name(elem: ET.Element) -> str | None:
     return None
 
 
+def _bill_refs(velem: ET.Element) -> str:
+    """The voucher's bill reference(s) — what the firm calls the
+    invoice number.
+
+    Tally records it as ``BILLALLOCATIONS.LIST`` under the party
+    ledger entry: ``NAME`` holds the reference, ``BILLTYPE`` says
+    whether it's a **New Ref** (a fresh invoice raised/received) or an
+    **Agst Ref** (settling an existing reference). Mirrors the Excel
+    voucher-dump parser's rule: New Refs preferred, Agst Refs the
+    fallback, several references joined with ", ". Without this the
+    direct Tally pull left ``invoice_no`` blank on every voucher — the
+    Excel import path was the only one filling it (operator report:
+    "Invoice No not coming on the Expenses sheet").
+    """
+    new_refs: list[str] = []
+    agst_refs: list[str] = []
+    for desc in velem.iter():
+        if _norm_tag(desc.tag) not in ("billallocations.list",
+                                        "billallocations"):
+            continue
+        name = _text(_find_first(desc, ["name"]))
+        if not name:
+            continue
+        btype = _text(_find_first(desc, ["billtype"])).lower()
+        bucket = agst_refs if "agst" in btype else new_refs
+        if name not in bucket:
+            bucket.append(name)
+    return ", ".join(new_refs or agst_refs)
+
+
 def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
     """Convert a single ``<VOUCHER>`` element into a ParsedVoucher.
 
@@ -342,6 +372,7 @@ def _voucher_from_xml(velem: ET.Element) -> ParsedVoucher | None:
         period=period_of(date) if date else None,
         vch_type=vch_type_raw,
         vch_no=vch_no,
+        invoice_no=_bill_refs(velem),
         party_name=party,
         kind=kind,
     )

@@ -123,19 +123,21 @@ _AMT_TOLERANCE = 1.0    # ₹ — rounding wiggle room when checking for duplica
 
 
 def _existing_voucher(conn, entity_id, kind, vch_no):
-    """Return ``(id, gross_amount)`` of an existing voucher with the same
-    natural key, or ``None``. The natural key is what the dedup pass uses to
-    decide whether a re-import row is new, identical, or a conflict.
+    """Return ``(id, gross_amount, invoice_no)`` of an existing voucher
+    with the same natural key, or ``None``. The natural key is what the
+    dedup pass uses to decide whether a re-import row is new, identical,
+    or a conflict.
     """
     if not vch_no:
         return None
     row = conn.execute(
-        "SELECT id, gross_amount FROM vouchers "
+        "SELECT id, gross_amount, invoice_no FROM vouchers "
         "WHERE ifnull(entity_id, 0) = ifnull(?, 0) "
         "  AND kind = ? AND vch_no = ?",
         (entity_id, kind, vch_no),
     ).fetchone()
-    return (row["id"], row["gross_amount"]) if row else None
+    return (row["id"], row["gross_amount"], row["invoice_no"]) \
+        if row else None
 
 
 def commit_result(result: ParseResult, entity_id: int | None,
@@ -230,9 +232,19 @@ def commit_result(result: ParseResult, entity_id: int | None,
         for vi, v in enumerate(result.vouchers):
             existing = _existing_voucher(conn, entity_id, v.kind, v.vch_no)
             if existing is not None:
-                ex_id, ex_gross = existing
+                ex_id, ex_gross, ex_inv = existing
                 if abs((ex_gross or 0) - (v.gross_amount or 0)) <= _AMT_TOLERANCE:
                     report.skipped_duplicates += 1
+                    # Backfill (v0.3.113): vouchers pulled before the XML
+                    # parser read bill references carry no invoice number.
+                    # A re-pull skips them as identical duplicates — fill
+                    # the EMPTY invoice_no in as it passes (never
+                    # overwrites an existing one; amounts untouched).
+                    if (v.invoice_no or "").strip() \
+                            and not (ex_inv or "").strip():
+                        conn.execute(
+                            "UPDATE vouchers SET invoice_no = ? "
+                            "WHERE id = ?", (v.invoice_no, ex_id))
                 else:
                     report.amount_mismatches.append({
                         "vch_no": v.vch_no,
