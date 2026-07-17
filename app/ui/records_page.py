@@ -58,6 +58,28 @@ def _hint(text: str) -> QLabel:
     return label
 
 
+def _source_label(file_name: str | None) -> str:
+    """Where a stored row came from, for the Source column on every
+    Records tab: "Manual entry" for rows added on the Manual Entry page,
+    otherwise the uploaded / pulled file's name."""
+    name = (file_name or "").strip()
+    if name == "(manual entry)":
+        return "Manual entry"
+    return name or "—"
+
+
+def _fk_combo(table: str, current_id) -> NoScrollComboBox:
+    """Master dropdown with a "(none)" entry, preselecting *current_id*."""
+    combo = NoScrollComboBox()
+    combo.addItem("(none)", None)
+    for fid, label in repo.fk_options(table):
+        combo.addItem(label, fid)
+    pos = combo.findData(current_id)
+    if pos >= 0:
+        combo.setCurrentIndex(pos)
+    return combo
+
+
 def _debounce(callback, *, ms: int = 250):
     """Return a function that calls *callback* once after *ms* of quiet."""
     timer = QTimer()
@@ -149,17 +171,94 @@ class ImportsTab(QWidget):
 
 # --- Salary tab -------------------------------------------------------------
 
+class EditSalaryDialog(QDialog):
+    """Edit one stored salary row.
+
+    Salary is on the CALENDAR month (decisions log), so the period is a
+    plain Month/Year pick. The cost centre chosen here is the source of
+    truth for where the pay lands in the MIS; the raw text the uploaded
+    sheet carried stays stored untouched for reference.
+    """
+
+    def __init__(self, row: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._row = row
+        self.setWindowTitle("Edit — Salary")
+        self.setMinimumWidth(420)
+        form = QFormLayout()
+
+        self.month, self.year = _month_year_combos(row.get("period"))
+        self.employee = QLineEdit(row.get("employee_name") or "")
+        self.cost_centre = _fk_combo("cost_centres",
+                                     row.get("cost_centre_id"))
+        self.entity = _fk_combo("entities", row.get("entity_id"))
+        self.category = QLineEdit(row.get("category") or "")
+        self.category.setPlaceholderText("optional — e.g. E / CA / CMA")
+        self.salary = QDoubleSpinBox()
+        self.salary.setRange(0, 1_000_000_000)
+        self.salary.setGroupSeparatorShown(True)
+        self.salary.setDecimals(2)
+        self.salary.setValue(float(row.get("salary_paid") or 0))
+        self.reimb = QDoubleSpinBox()
+        self.reimb.setRange(0, 1_000_000_000)
+        self.reimb.setGroupSeparatorShown(True)
+        self.reimb.setDecimals(2)
+        self.reimb.setValue(float(row.get("reimbursement") or 0))
+
+        form.addRow("Month:", self.month)
+        form.addRow("Year:", self.year)
+        form.addRow("Employee *:", self.employee)
+        form.addRow("Cost centre:", self.cost_centre)
+        form.addRow("Entity:", self.entity)
+        form.addRow("Category:", self.category)
+        form.addRow("Salary paid *:", self.salary)
+        form.addRow("Reimbursement:", self.reimb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        if self.save():
+            self.accept()
+
+    def save(self) -> bool:
+        name = self.employee.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Employee required",
+                                "Enter the employee's name.")
+            return False
+        records.update_salary(
+            self._row["id"],
+            period=_period_from(self.month, self.year),
+            employee_name=name,
+            cost_centre_id=self.cost_centre.currentData(),
+            entity_id=self.entity.currentData(),
+            category=self.category.text(),
+            salary_paid=self.salary.value(),
+            reimbursement=self.reimb.value(),
+        )
+        return True
+
+
 class SalaryTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._first_load = True
         self._show_all = False
+        self._rows: list[dict] = []
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.addWidget(_hint(
             "Every salary row imported across every period. Defaults to the "
             "latest month — switch the dropdown to a different period or "
-            "'(all periods)' to compare months side by side."))
+            "'(all periods)' to compare months side by side. The Source "
+            "column shows where each row came from; use <b>Edit</b> / "
+            "<b>Delete</b> to fix or remove a single entry."))
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
@@ -202,6 +301,7 @@ class SalaryTab(QWidget):
         q = self.search.text().strip()
         limit = None if self._show_all else _PAGE_LIMIT
         rows = records.list_salary(period, q, limit=limit)
+        self._rows = rows
         totals = records.salary_totals(period, q)
         total_n = totals.get("n", 0)
         showing = len(rows)
@@ -227,13 +327,48 @@ class SalaryTab(QWidget):
             r["category"] or "",
             fmt_inr(r["salary_paid"] or 0, 2),
             fmt_inr(r["reimbursement"] or 0, 2),
+            _source_label(r.get("source")),
         ] for r in rows]
         fill_table_with_actions(
             self.table,
             ["Period", "Employee", "Cost centre", "Entity", "Category",
-             "Salary paid", "Reimbursement"],
+             "Salary paid", "Reimbursement", "Source"],
             body, stretch_col=1,
+            action_label="Edit",
+            action_callback=self._edit,
+            secondary_label="Delete",
+            secondary_callback=self._delete,
+            secondary_object_name="rowActionDanger",
         )
+
+    def _edit(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        dlg = EditSalaryDialog(self._rows[idx], self)
+        if dlg.exec() == QDialog.Accepted:
+            self.reload()
+
+    def _delete(self, idx: int) -> None:
+        if not (0 <= idx < len(self._rows)):
+            return
+        r = self._rows[idx]
+        confirm = QMessageBox.warning(
+            self, "Delete salary row?",
+            f"Permanently delete this entry?\n\n"
+            f"{r['period'] or '—'} · {r['employee_name']} · "
+            f"₹ {fmt_inr(r['salary_paid'] or 0, 2)} salary"
+            + (f" + ₹ {fmt_inr(r['reimbursement'], 2)} reimbursement"
+               if r["reimbursement"] else "")
+            + "\n\nThe MIS will no longer include it. This cannot be undone.",
+            QMessageBox.Cancel | QMessageBox.Yes, QMessageBox.Cancel)
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            records.delete_salary(r["id"])
+        except Exception as exc:
+            QMessageBox.critical(self, "Failed", str(exc))
+            return
+        self.reload()
 
     def _refill_periods(self) -> None:
         keep = self.period_combo.currentData()
@@ -345,11 +480,12 @@ class TimesheetTab(QWidget):
             fmt_inr(r["hours"] or 0, 2),
             r["reporting_manager"] or "",
             "Yes" if r["is_billable"] else "No",
+            _source_label(r.get("source")),
         ] for r in rows]
         fill_table_with_actions(
             self.table,
             ["Date", "Employee", "Client", "Task", "Hours", "Manager",
-             "Billable"],
+             "Billable", "Source"],
             body, stretch_col=2,
         )
 
@@ -584,7 +720,7 @@ class ReimbursementsTab(QWidget):
             r["client_name"] or r["client_raw"] or "—",
             fmt_inr(r["amount"] or 0, 2),
             "Yes" if r["client_reimbursable"] else "No",
-            r["source"] or "",
+            _source_label(r.get("source")),
         ] for r in rows]
         fill_table_with_actions(
             self.table,

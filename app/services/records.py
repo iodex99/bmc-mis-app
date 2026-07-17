@@ -65,14 +65,16 @@ def list_reimbursement_periods() -> list[str]:
 def list_salary(period: str | None = None, employee_q: str = "",
                 limit: int | None = None) -> list[dict]:
     sql = (
-        "SELECT s.period, s.employee_name, "
-        "  cc.code AS cc_code, cc.name AS cc_name, "
-        "  e.name AS entity_name, "
+        "SELECT s.id, s.period, s.employee_name, "
+        "  s.cost_centre_id, cc.code AS cc_code, cc.name AS cc_name, "
+        "  s.entity_id, e.name AS entity_name, "
         "  s.category, s.salary_paid, s.reimbursement, "
-        "  s.raw_cost_centre, s.raw_entity "
+        "  s.raw_cost_centre, s.raw_entity, "
+        "  b.file_name AS source "
         "FROM salary_entries s "
         "LEFT JOIN cost_centres cc ON cc.id = s.cost_centre_id "
         "LEFT JOIN entities e ON e.id = s.entity_id "
+        "LEFT JOIN import_batches b ON b.id = s.batch_id "
         "WHERE 1=1")
     params: list = []
     if period:
@@ -116,9 +118,11 @@ def list_timesheet(period: str | None = None, employee_q: str = "",
     sql = (
         "SELECT t.txn_date, t.emp_name, t.client_raw, "
         "  c.canonical_name AS client_name, "
-        "  t.task, t.hours, t.reporting_manager, t.is_billable, t.description "
+        "  t.task, t.hours, t.reporting_manager, t.is_billable, "
+        "  t.description, b.file_name AS source "
         "FROM timesheet_entries t "
         "LEFT JOIN clients c ON c.id = t.client_id "
+        "LEFT JOIN import_batches b ON b.id = t.batch_id "
         "WHERE 1=1")
     params: list = []
     if period:
@@ -262,3 +266,33 @@ def delete_reimbursement(row_id: int) -> None:
     """Permanently delete one reimbursement row (Records page action)."""
     with transaction() as conn:
         conn.execute("DELETE FROM reimbursements WHERE id = ?", (row_id,))
+
+
+# --- salary row actions -------------------------------------------------------
+
+def update_salary(row_id: int, *, period: str, employee_name: str,
+                  cost_centre_id: int | None, entity_id: int | None,
+                  category: str | None, salary_paid: float,
+                  reimbursement: float) -> None:
+    """Update one salary row from the Records page's Edit dialog.
+
+    The raw Tally/sheet text columns (``raw_cost_centre`` /
+    ``raw_entity``) are left untouched — they record what the uploaded
+    file said; the resolved ids the operator picks here are what every
+    calculation reads.
+    """
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE salary_entries SET period = ?, employee_name = ?, "
+            "cost_centre_id = ?, entity_id = ?, category = ?, "
+            "salary_paid = ?, reimbursement = ? WHERE id = ?",
+            (period, employee_name, cost_centre_id, entity_id,
+             (category or "").strip() or None,
+             float(salary_paid or 0.0), float(reimbursement or 0.0),
+             row_id))
+
+
+def delete_salary(row_id: int) -> None:
+    """Permanently delete one salary row (Records page action)."""
+    with transaction() as conn:
+        conn.execute("DELETE FROM salary_entries WHERE id = ?", (row_id,))

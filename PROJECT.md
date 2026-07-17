@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.113** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.114** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,36 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.114 — Records ▸ Salary: Edit / Delete; Source column on every tab
+
+Two operator asks:
+
+**1. Salary rows get the same Edit / Delete actions as Reimbursements
+(v0.3.108).** New ``EditSalaryDialog``: Month/Year (salary is on the
+calendar month per the decisions log), Employee, Cost centre + Entity
+master dropdowns, Category, Salary paid and Reimbursement. The cost
+centre picked here is the source of truth the MIS reads; the raw
+sheet text (``raw_cost_centre`` / ``raw_entity``) stays stored
+untouched for reference. Delete confirms with the row's figures and
+removes exactly that entry. New ``records.update_salary`` /
+``delete_salary`` services; the listing now carries the row id and
+the resolved FK ids for prefill.
+
+**2. A Source column on every Records line-item tab** (Salary,
+Timesheet, Reimbursements) so the operator can tell where each entry
+came from: **"Manual entry"** for rows added on the Manual Entry page,
+otherwise the uploaded / pulled **file's name** (one shared
+``_source_label``; the Reimbursements tab's existing column now uses
+the same label). Plain read from the row's import batch — no schema
+change, no data touched.
+
+Verified with a 14-check suite: Source values on all three tabs
+(file name vs Manual entry), Edit/Delete buttons per salary row, the
+dialog's full prefill, an edit persisting period/CC/amounts while
+leaving the raw sheet text and row count untouched, calc picking up
+the edited figure, and delete removing exactly one row. All seven
+prior suites (245 checks) and the UI smoke stay green.
 
 ### v0.3.113 — Expenses sheet: Invoice No now comes through the Tally pull
 
