@@ -203,6 +203,11 @@ def generate(data: MISData, path: str | Path,
 CMP = " (Cmp)"   # suffix for comparison-period data sheets
 FYS = " (FY)"    # suffix for the FY-prior cumulative data sheets
 
+# Companion data sheet behind the "Budget vs Monthly Sales" summary
+# (v0.3.115): one row per (partner, FY-to-date month, sales) so that
+# sheet's month columns can be live SUMIFS instead of baked values.
+BUDGET_DATA_SHEET = "Budget Sales (Monthly)"
+
 
 def _fy_prior_periods(periods: list[str]) -> list[str]:
     """The FY months BEFORE the earliest selected month (v0.3.102).
@@ -445,9 +450,14 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
 
     Independent of the selected MIS period: always shows the full FY-to-date
     picture so the board sees trend context alongside the headline P&L.
-    Monthly cells are values (read from DB) since the Revenue data sheet only
-    contains the selected periods; totals/variance/average are formulas so
-    edits still recalculate.
+
+    Every amount cell is a live formula (v0.3.115). The month columns were
+    the last baked values on the sheet — the Revenue data sheet only holds
+    the SELECTED periods, so it can't feed the full FY-to-date view. A
+    companion data sheet (:data:`BUDGET_DATA_SHEET`) is written with one
+    row per (partner, month, sales) across the whole FY-to-date, and each
+    month cell SUMIFS over it by partner code + month label. YTD /
+    Variance / Average were already formulas.
     """
     bm = budget_monthly_data(data, lbl)
     if bm is None:
@@ -497,6 +507,7 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
     last_m = get_column_letter(4 + len(months) - 1)
     ytd_L = get_column_letter(ytd_col)
     var_L = get_column_letter(var_col)
+    bd = _q(BUDGET_DATA_SHEET)
 
     def avg_formula(row: int) -> str | float:
         # Variance vs Budget spread over the months left in the FY — the
@@ -512,10 +523,17 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
         _cell(ws, r, 2, partner["name"], border=True)
         _cell(ws, r, 3, round(budgets.get(code, 0.0), 2),
               fmt=INR, border=True)
-        for i, period in enumerate(months):
+        # Each month is a live SUMIFS over the companion data sheet, keyed
+        # on the partner CODE (column A of this row) and the month LABEL
+        # (this column's header cell) — so editing a sales row on that
+        # sheet recomputes the month cell, the YTD, variance and average.
+        for i, _period in enumerate(months):
             col = 4 + i
-            amount = monthly.get(code, {}).get(period, 0.0)
-            _cell(ws, r, col, round(amount, 2), fmt=INR, border=True)
+            col_L = get_column_letter(col)
+            _cell(ws, r, col,
+                  f'=SUMIFS({bd}!$C:$C,{bd}!$A:$A,$A{r},'
+                  f'{bd}!$B:$B,{col_L}${hrow})',
+                  fmt=INR, border=True)
         _cell(ws, r, ytd_col, f"=SUM({first_m}{r}:{last_m}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
         _cell(ws, r, var_col, f"=C{r}-{ytd_L}{r}", fmt=INR, border=True)
@@ -537,6 +555,25 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
     _subtotal_filter(ws, hrow, body_start, last_body,
                      list(range(3, avg_col + 1)), last_col=avg_col)
     ws.freeze_panes = f"D{body_start}"
+
+    # Companion data sheet the month columns SUMIFS over. One row per
+    # (partner, FY-to-date month) with a non-zero sales figure — pulled
+    # from the SAME ``monthly`` dict the values used to come from, so the
+    # numbers are identical, only now formula-backed. Written even when
+    # empty so the SUMIFS references resolve (an empty column sums to 0).
+    data_rows = []
+    for partner in partners:
+        code = partner["code"]
+        pmonthly = monthly.get(code, {})
+        for period in months:
+            amt = pmonthly.get(period, 0.0)
+            if abs(amt) < 0.005:
+                continue
+            data_rows.append([code, _month_short(period), round(amt, 2)])
+    _write_data_sheet(
+        wb, BUDGET_DATA_SHEET,
+        ["Partner", "Period", "Sales"],
+        [12, 12, 16], data_rows)
 
 
 # --- Cost Centre P&L (the core sheet) ----------------------------------------

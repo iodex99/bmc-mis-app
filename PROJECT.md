@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.114** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.115** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,39 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.115 — Budget vs Monthly Sales: month columns are now formula-driven
+
+Operator ask: the per-month columns on the "Budget vs Monthly Sales"
+sheet were baked values — make them formula-driven like the rest of the
+workbook. They were the last hard-coded cells on the sheet (YTD /
+Variance / Average were already formulas). The reason they were baked:
+the Revenue data sheet only holds the SELECTED MIS periods, but this
+sheet always shows the full **FY-to-date**, so a SUMIFS over Revenue
+would miss any FY month that wasn't selected (e.g. a June-only run
+still shows Apr + May columns).
+
+Fix: a companion data sheet **"Budget Sales (Monthly)"** is written with
+one row per (partner, FY-to-date month, sales) — pulled from the SAME
+``monthly`` dict the values used to come from, so the figures are
+identical, only now formula-backed. Each month cell is a live
+``=SUMIFS`` keyed on the partner **code** (column A of its row) and the
+month **label** (the column's header cell). Editing a sales figure on
+the data sheet now recomputes that month cell, its YTD, Variance and
+Average — the whole row stays live. Sales-only (Income) filtering,
+credit-note negatives and the FY-to-date span are unchanged; the HTML
+dashboard reads the same ``monthly`` dict so the two still agree by
+construction.
+
+Verified with a 19-check suite generating a **June-only** MIS (so the
+Apr/May columns are provably NOT in the Revenue sheet): every month
+cell is a SUMIFS over the companion sheet; the data sheet holds exactly
+the non-zero Income rows (OPE/reimbursement excluded, zero months
+omitted); formula evaluation gives Apr 100,000 / May 0 / Jun 50,000 for
+PM and 30,000 / 20,000 / −5,000 for KS, with YTD 150,000 / 45,000, the
+Variance and the TOTAL row all tying; and ``budget_monthly_data`` (the
+dashboard's source) is unchanged. All eight prior suites (14+14+21+30+
+34+48+70+28 checks) and the UI smoke stay green.
 
 ### v0.3.114 — Records ▸ Salary: Edit / Delete; Source column on every tab
 
