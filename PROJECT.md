@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.115** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.116** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,39 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.116 — Budget Sales (Monthly) is formula-driven down to the transactions
+
+Follow-up on v0.3.115: the month columns read the new "Budget Sales
+(Monthly)" data sheet, but THAT sheet held baked values — so a sales
+row the operator adds or edits in Excel post-generation never reached
+it. The data sheet's Sales cells are now **themselves live SUMIFS over
+the transaction-level Revenue sheets**, completing the chain:
+
+* A month in the SELECTED period reads the **"Revenue"** sheet; an
+  earlier FY month reads **"Revenue (FY)"** (the same window v0.3.102
+  writes for the PM P&L cumulative column) — together the two sheets
+  cover the whole FY-to-date. Criteria: partner code (col D) +
+  Category ``"Income"`` (col I — reimbursement/OPE recoveries stay
+  excluded) + Period label (col J, added in v0.3.109).
+* **Zero months get a row too** (previously omitted): a sale ADDED on
+  a Revenue sheet for a month that had nothing still flows through.
+* A month covered by neither sheet — only possible with a
+  non-contiguous period selection — keeps a baked value.
+
+So: edit/add a row on Revenue or Revenue (FY) → the data sheet cell
+recomputes → the month cell on Budget vs Monthly Sales → its YTD,
+Variance vs Budget, Average and the TOTAL row, all live.
+
+Verified with the suite grown to 29 checks: every data-sheet cell is a
+SUMIFS with the right source (selected→Revenue, prior→Revenue (FY),
+never the prev-FY sheet on an April-only run), zero-month rows exist,
+all v0.3.115 figures evaluate identically through the extra formula
+hop — and the end-to-end ask itself: a June sale typed onto the Revenue
+sheet post-generation lifts PM's Jun cell 50,000→57,000 (an added OPE
+row is correctly ignored), an edited Revenue (FY) row lifts KS's May
+20,000→25,000, and YTD / Variance / TOTAL all follow. All eight prior
+suites and the UI smoke stay green.
 
 ### v0.3.115 — Budget vs Monthly Sales: month columns are now formula-driven
 

@@ -160,7 +160,7 @@ def generate(data: MISData, path: str | Path,
 
     _sheet_cover(wb, data, compare)
     _sheet_dashboard(wb, data)
-    _sheet_budget_monthly(wb, data, lbl)
+    _sheet_budget_monthly(wb, data, lbl, fy_periods=fy_periods)
     rows_pl = _sheet_cost_centre(wb, data, lbl)
     _sheet_partner_manager(wb, data, lbl, fy_label=fy_label, fy_data=fy_data)
     _sheet_entity(wb, data, lbl)
@@ -445,19 +445,25 @@ def budget_monthly_data(data: MISData, lbl: dict) -> dict | None:
     }
 
 
-def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
+def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict,
+                          fy_periods: list[str] | None = None) -> None:
     """Year-to-date monthly sales per partner cost centre, vs annual budget.
 
     Independent of the selected MIS period: always shows the full FY-to-date
     picture so the board sees trend context alongside the headline P&L.
 
-    Every amount cell is a live formula (v0.3.115). The month columns were
-    the last baked values on the sheet — the Revenue data sheet only holds
-    the SELECTED periods, so it can't feed the full FY-to-date view. A
-    companion data sheet (:data:`BUDGET_DATA_SHEET`) is written with one
-    row per (partner, month, sales) across the whole FY-to-date, and each
-    month cell SUMIFS over it by partner code + month label. YTD /
-    Variance / Average were already formulas.
+    Every amount cell is a live formula, all the way down (v0.3.115/116):
+    each month cell SUMIFS the companion data sheet
+    (:data:`BUDGET_DATA_SHEET`) by partner code + month label, and that
+    sheet's Sales cells are THEMSELVES SUMIFS over the transaction-level
+    Revenue sheets — the selected months read the "Revenue" sheet and the
+    earlier FY months read "Revenue (FY)" (*fy_periods*, the same window
+    v0.3.102 writes for the PM P&L's cumulative column). Together the two
+    sheets cover the whole FY-to-date, so a sales row edited or added on
+    them post-generation flows through the data sheet into the month
+    cell, its YTD, Variance and Average. A month covered by neither
+    sheet (only possible with a non-contiguous period selection) falls
+    back to a baked value. YTD / Variance / Average were always formulas.
     """
     bm = budget_monthly_data(data, lbl)
     if bm is None:
@@ -557,19 +563,35 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict) -> None:
     ws.freeze_panes = f"D{body_start}"
 
     # Companion data sheet the month columns SUMIFS over. One row per
-    # (partner, FY-to-date month) with a non-zero sales figure — pulled
-    # from the SAME ``monthly`` dict the values used to come from, so the
-    # numbers are identical, only now formula-backed. Written even when
-    # empty so the SUMIFS references resolve (an empty column sums to 0).
+    # (partner, FY-to-date month), and each Sales cell is ITSELF a live
+    # SUMIFS over the transaction-level Revenue sheets (v0.3.116) —
+    # partner code (col D) + Category "Income" (col I, so reimbursement /
+    # OPE recoveries stay excluded like always) + Period label (col J).
+    # Selected months read "Revenue"; earlier FY months read
+    # "Revenue (FY)". Zero months get a row too, so a sales row ADDED on
+    # a Revenue sheet post-generation is still captured. A month covered
+    # by neither sheet (non-contiguous selection) keeps a baked value,
+    # and only when non-zero.
+    selected = set(data.options.periods)
+    fy_set = set(fy_periods or [])
+    rev, rev_fy = _q("Revenue"), _q("Revenue" + FYS)
     data_rows = []
     for partner in partners:
         code = partner["code"]
         pmonthly = monthly.get(code, {})
         for period in months:
-            amt = pmonthly.get(period, 0.0)
-            if abs(amt) < 0.005:
-                continue
-            data_rows.append([code, _month_short(period), round(amt, 2)])
+            label = _month_short(period)
+            src = (rev if period in selected
+                   else rev_fy if period in fy_set else None)
+            if src is not None:
+                data_rows.append([
+                    code, label,
+                    f'=SUMIFS({src}!$H:$H,{src}!$D:$D,"{code}",'
+                    f'{src}!$I:$I,"Income",{src}!$J:$J,"{label}")'])
+            else:
+                amt = pmonthly.get(period, 0.0)
+                if abs(amt) >= 0.005:
+                    data_rows.append([code, label, round(amt, 2)])
     _write_data_sheet(
         wb, BUDGET_DATA_SHEET,
         ["Partner", "Period", "Sales"],
