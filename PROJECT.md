@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-07-13
 >
-> Current version: **v0.3.116** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.117** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,47 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.117 — Manual rows added in Excel post-generation count everywhere
+
+Operator report: the Revenue sheet's filtered-subtotal row didn't pick
+up rows typed in below the generated data. Fixed, plus a full audit of
+every place a manually-added row could be missed:
+
+* **Data-sheet subtotals are open-ended.** Every data sheet's top
+  ``=SUBTOTAL(109,…)`` row (Revenue / Expenses / Salary /
+  Reimbursements / Provisions / Budget Sales (Monthly), plus the (Cmp)
+  and (FY) editions) now runs to the sheet bottom (row 1,048,576)
+  instead of stopping at the last generated row — a row typed below
+  the data counts. Appended rows sit past the AutoFilter range so the
+  filter can never hide them: they are ALWAYS included, coherent with
+  "everything I added counts".
+* **Client Billing's current-month cells were the last baked values**
+  on that sheet — a manual Revenue row never reached them. They are
+  now live SUMIFS over the "Revenue" sheet by Client + Period label
+  (exactly like the prior-FY columns over "Revenue (FY)" since
+  v0.3.109), so additions/edits flow into the month cell, the Grand
+  Total and the TOTAL row.
+* **Audit of every other figure**: the CC P&L, PM P&L (+ (FY)/(Cmp)),
+  Entity, Service, Budget (v0.3.116 chain), Employee Register and
+  Comparatives all read FULL-COLUMN SUMIFS over the data sheets — they
+  already captured appended rows. Three bounded ranges remain, each
+  deliberately: summary-sheet filtered subtotals (extending them would
+  double-count their own TOTAL rows), the Salary sheet's overhead
+  offset (must back out exactly its heads block, v0.3.106), and the
+  Employee Register's office-staff-salary window (a full column would
+  be an Excel circular reference through the Overhead rows — the one
+  documented spot a manually appended Pool-Source salary row can't
+  reach).
+
+Verified (suite now 36 checks): the three populated data sheets carry
+open-ended subtotal ranges; after typing two rows onto the generated
+Revenue sheet the subtotal evaluates 45,000 → 55,333; Client Billing's
+month cells are SUMIFS and its "(unmapped)" June cell + Grand Total
+follow to 55,333; the whole v0.3.116 budget chain keeps working; and
+the April-only edge stays correct. All eight prior suites (updated
+v109 expectation: the June cell is now evaluated, same figure) and the
+UI smoke stay green.
 
 ### v0.3.116 — Budget Sales (Monthly) is formula-driven down to the transactions
 

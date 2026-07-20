@@ -1525,13 +1525,16 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     One row per client (canonical name from the master, or ``(unmapped)``
     when the voucher's party didn't resolve). Columns: Client | Grand
     Total | one per FY month BEFORE the selected period | one per
-    selected period. The prior-FY columns (v0.3.109, replacing the single
-    cumulative column of v0.3.103) show each earlier FY month's billing
-    separately — live SUMIFS over the "Revenue (FY)" data sheet's Client
-    + Period columns. Clients billed only in that prior window still get
-    a row (0 current), so the history never undercounts. The Grand Total
-    sums ONLY the selected period's columns. Credit / Debit Notes flow
-    through with signs intact. Sorted by Grand Total descending.
+    selected period. EVERY month cell is a live SUMIFS by Client +
+    Period label — prior-FY months over the "Revenue (FY)" data sheet,
+    current months over "Revenue" (v0.3.117; they were baked values) —
+    so a sales row edited or added on those sheets post-generation flows
+    straight through. Both sheets name clients identically (master
+    canonical name, raw party fallback), so the criteria always match.
+    Clients billed only in the prior window still get a row (0 current),
+    so the history never undercounts. The Grand Total sums ONLY the
+    selected period's columns. Credit / Debit Notes flow through with
+    signs intact. Sorted by Grand Total descending.
     """
     if not data.options.periods:
         return
@@ -1606,8 +1609,9 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     r = body_start
     first_period_col = get_column_letter(p0)
     last_period_col = get_column_letter(p0 + len(periods) - 1)
+    rev = _q("Revenue")
     rev_fy = _q("Revenue" + FYS)
-    for name, _total, amounts in rows:
+    for name, _total, _amounts in rows:
         _cell(ws, r, 1, name, border=True)
         # Grand Total is a SUM formula across the CURRENT period columns —
         # not a baked-in value — so the operator can edit a cell and
@@ -1625,8 +1629,15 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
                   f'=SUMIFS({rev_fy}!$H:$H,{rev_fy}!$G:$G,$A{r},'
                   f'{rev_fy}!$J:$J,"{month_label(p)}")',
                   fmt=INR, border=True)
-        for i, amt in enumerate(amounts):
-            _cell(ws, r, p0 + i, amt, fmt=INR, border=True)
+        # Current-period months: same live SUMIFS over the "Revenue"
+        # sheet (v0.3.117 — these were the last baked values here), so a
+        # sales row edited or ADDED on Revenue post-generation flows into
+        # the month cell, the Grand Total and the TOTAL row.
+        for i, p in enumerate(periods):
+            _cell(ws, r, p0 + i,
+                  f'=SUMIFS({rev}!$H:$H,{rev}!$G:$G,$A{r},'
+                  f'{rev}!$J:$J,"{month_label(p)}")',
+                  fmt=INR, border=True)
         r += 1
 
     # TOTAL row
@@ -1738,9 +1749,15 @@ def _write_data_sheet(wb, name, headers, widths, rows):
         for ci in range(ncols):
             L = get_column_letter(ci + 1)
             if numeric[ci]:
+                # Open-ended to the sheet bottom (v0.3.117) — a row the
+                # operator types in BELOW the generated data still counts.
+                # Bounding at data_last silently excluded manual
+                # additions. (Rows appended past the AutoFilter range
+                # can't be hidden by it, so SUBTOTAL always includes
+                # them — coherent with "everything I added counts".)
                 cell = ws.cell(
                     row=1, column=ci + 1,
-                    value=f"=SUBTOTAL(109,{L}{_DATA_FIRST_ROW}:{L}{data_last})")
+                    value=f"=SUBTOTAL(109,{L}{_DATA_FIRST_ROW}:{L}1048576)")
                 cell.font = _BOLD
                 cell.fill = _TOTAL_FILL
                 cell.number_format = INR
@@ -2184,8 +2201,12 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         # Office-home staff salary — live SUMIFS over the Salary sheet's
         # Pool Source rows (v0.3.98; was a baked value). The range is
         # BOUNDED to the salary-only rows: the Overhead rows that follow
-        # them chain back to this sheet's column J, so a full-column
-        # reference would be a circular dependency in Excel.
+        # them chain back to this sheet's column K, so a full-column
+        # reference would be a circular dependency in Excel. This is the
+        # ONE bounded window a manually-appended row can't reach (a
+        # salary row typed below the Overhead block with Pool Source =
+        # Yes won't join the pool) — unavoidable without the circularity;
+        # every other figure in the workbook picks appended rows up.
         if sal_last_row >= _DATA_FIRST_ROW:
             sal_rng = lambda col: (f"{lab}!${col}${_DATA_FIRST_ROW}:"
                                    f"${col}${sal_last_row}")
