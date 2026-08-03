@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from .. import config
 from .. import repository as repo
 from ..services import vouchers as vsvc
-from ..util import fmt_inr
+from ..util import fmt_inr, periods_label
 from ..services.calc import MISOptions, compute
 from ..services.report import generate
 from ..services.dashboard import generate_dashboard
@@ -50,11 +50,17 @@ class GeneratePage(QWidget):
         body = QHBoxLayout()
         root.addLayout(body, 1)
 
+        # The month lists are pre-ticked only ONCE, on the first show —
+        # see :meth:`_reload_periods` for why re-ticking is dangerous.
+        self._periods_initialised = False
+
         # --- period selection ----------------------------------------------
-        period_box = QGroupBox("Reporting period(s)")
+        self.period_box = QGroupBox("Reporting period(s)")
+        period_box = self.period_box
         pv = QVBoxLayout(period_box)
         self.period_list = QListWidget()
         self.period_list.setSelectionMode(QListWidget.NoSelection)
+        self.period_list.itemChanged.connect(self._update_box_titles)
         pv.addWidget(self.period_list)
         sel_bar = QHBoxLayout()
         all_btn = QPushButton("Select all")
@@ -68,11 +74,13 @@ class GeneratePage(QWidget):
         body.addWidget(period_box, 1)
 
         # --- comparison period (optional) ----------------------------------
-        cmp_box = QGroupBox("Compare with (optional)")
+        self.cmp_box = QGroupBox("Compare with (optional)")
+        cmp_box = self.cmp_box
         cv = QVBoxLayout(cmp_box)
         cv.addWidget(QLabel("Tick months to show as a comparison column."))
         self.compare_list = QListWidget()
         self.compare_list.setSelectionMode(QListWidget.NoSelection)
+        self.compare_list.itemChanged.connect(self._update_box_titles)
         cv.addWidget(self.compare_list)
         clear_cmp = QPushButton("Clear comparison")
         clear_cmp.clicked.connect(self._clear_compare)
@@ -126,17 +134,34 @@ class GeneratePage(QWidget):
         self._reload_periods()
 
     def _reload_periods(self) -> None:
+        """Repopulate both month lists, preserving the operator's ticks.
+
+        The FIRST time the page is shown, the LATEST month is pre-ticked —
+        the firm reports monthly, so that is the overwhelmingly common run.
+
+        Every later show preserves the selection EXACTLY, including an empty
+        one. Until v0.3.119 the rule was ``p in checked or not checked``,
+        which re-ticked EVERY month whenever nothing was ticked: showing the
+        page (navigating back to it, or the very first visit) silently turned
+        "no selection" into "every month on record", and the operator got an
+        FY-wide MIS instead of the month they meant. Nothing here may ever
+        widen a selection on its own — a freshly imported month arrives
+        unticked, so an import cannot quietly pull extra months into the
+        next report either.
+        """
         checked = self._selected_periods()
         compare = self._compare_periods()
         periods = vsvc.list_periods()
+        if periods and not self._periods_initialised:
+            checked = [max(periods)]        # 'YYYY-MM' sorts chronologically
+            self._periods_initialised = True
         self.period_list.clear()
         self.compare_list.clear()
         for p in periods:
             item = QListWidgetItem(_pretty(p))
             item.setData(Qt.UserRole, p)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if (p in checked or not checked)
-                               else Qt.Unchecked)
+            item.setCheckState(Qt.Checked if p in checked else Qt.Unchecked)
             self.period_list.addItem(item)
 
             citem = QListWidgetItem(_pretty(p))
@@ -144,7 +169,30 @@ class GeneratePage(QWidget):
             citem.setFlags(citem.flags() | Qt.ItemIsUserCheckable)
             citem.setCheckState(Qt.Checked if p in compare else Qt.Unchecked)
             self.compare_list.addItem(citem)
+        self._update_box_titles()
         self._reload_locations()
+
+    def _update_box_titles(self, _item=None) -> None:
+        """Put the live selection in the two group-box titles.
+
+        The operator's complaint behind v0.3.119 was generating an FY-wide
+        MIS without realising it, so what is ticked has to be readable
+        without scrolling the list.
+        """
+        def summarise(periods: list[str], empty: str) -> str:
+            if not periods:
+                return empty
+            label = periods_label(periods)
+            if len(label) > 34:                  # long comma lists
+                return f"{len(periods)} months"
+            return label
+
+        self.period_box.setTitle(
+            "Reporting period(s) — "
+            + summarise(self._selected_periods(), "none selected"))
+        self.cmp_box.setTitle(
+            "Compare with — "
+            + summarise(self._compare_periods(), "none (optional)"))
 
     def _reload_locations(self) -> None:
         """Populate the location checklist (all checked by default; the
