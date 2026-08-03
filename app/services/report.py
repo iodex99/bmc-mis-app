@@ -149,8 +149,10 @@ def generate(data: MISData, path: str | Path,
     # FY-cumulative context (v0.3.102): the months of the financial year
     # BEFORE the earliest selected month (or the whole previous FY when
     # the selection starts in April). Computed with the same calc engine
-    # and written to " (FY)" data sheets so the Partner-Manager P&L's
-    # cumulative column is live SUMIFS like every other figure.
+    # so the Partner-Manager P&L's cumulative column is live SUMIFS like
+    # every other figure. Its revenue / expense rows are merged INTO the
+    # "Revenue" / "Expenses" sheets under Scope = "FY Prior" (v0.3.118);
+    # salary / reimbursements / provisions keep their " (FY)" sheets.
     fy_periods = _fy_prior_periods(data.options.periods)
     fy_data = compute(MISOptions(
         periods=fy_periods,
@@ -170,8 +172,11 @@ def generate(data: MISData, path: str | Path,
     _sheet_client_register(wb, data, lbl)
     if compare is not None:
         _sheet_comparatives(wb, data, compare, lbl, rows_pl)
-    _sheet_revenue(wb, data, lbl)
-    _sheet_expenses(wb, data, lbl)
+    # Revenue / Expenses carry BOTH windows (v0.3.118): the FY-prior rows
+    # first (they are the earlier months), then the selected period's,
+    # told apart by the Scope column.
+    _sheet_revenue(wb, data, lbl, fy_data=fy_data)
+    _sheet_expenses(wb, data, lbl, fy_data=fy_data)
     _sheet_salary(wb, data, lbl)
     _sheet_reimbursements(wb, data, lbl)
     _sheet_provisions(wb, data, lbl)
@@ -185,8 +190,8 @@ def generate(data: MISData, path: str | Path,
         _sheet_reimbursements(wb, compare, lbl, CMP)
         _sheet_provisions(wb, compare, lbl, CMP)
     if fy_data is not None:
-        _sheet_revenue(wb, fy_data, lbl, FYS)
-        _sheet_expenses(wb, fy_data, lbl, FYS)
+        # Revenue / Expenses for this window are already on the main
+        # sheets (Scope = "FY Prior"); these three keep their own.
         _sheet_salary(wb, fy_data, lbl, FYS)
         _sheet_reimbursements(wb, fy_data, lbl, FYS)
         _sheet_provisions(wb, fy_data, lbl, FYS)
@@ -207,6 +212,63 @@ FYS = " (FY)"    # suffix for the FY-prior cumulative data sheets
 # (v0.3.115): one row per (partner, FY-to-date month, sales) so that
 # sheet's month columns can be live SUMIFS instead of baked values.
 BUDGET_DATA_SHEET = "Budget Sales (Monthly)"
+
+# --- merged Revenue / Expenses data sheets (v0.3.118) ------------------------
+#
+# "Revenue (FY)" / "Expenses (FY)" used to be separate sheets holding the
+# FY-prior window (the months of the financial year before the selected
+# period — see :func:`_fy_prior_periods`). They are now written into the
+# SAME "Revenue" / "Expenses" sheets, so the operator reads one continuous
+# transaction register per kind instead of hopping between two. A trailing
+# **Scope** column says which window each row belongs to.
+#
+# Two invariants make this safe:
+#
+# 1. The two windows never share a month. ``_fy_prior_periods`` returns
+#    months strictly BEFORE the earliest selected month (or the whole
+#    previous FY when the selection starts in April), so a Period label
+#    identifies its window on its own. Formulas already keyed on Period
+#    (Client Billing, the Budget data sheet, the Employee Register's
+#    office-indirect pool) therefore need NO scope criterion — and got
+#    simpler, since both windows now live on one sheet.
+# 2. Partner / cost-centre aggregates DO need one, and the current-window
+#    criterion is ``<>FY Prior`` rather than ``=Current``: a row the
+#    operator types in below the generated data has an empty Scope cell,
+#    and SUMIFS ``<>`` criteria match empty cells — so an appended row
+#    still counts towards the selected period, preserving the v0.3.117
+#    "everything I added counts" guarantee. Tagging it "FY Prior" by hand
+#    is the (discoverable) way to book it to the earlier window instead.
+#
+# " (Cmp)" stays a genuinely separate sheet: the comparison period is
+# operator-chosen and may OVERLAP the FY-prior window, so merging it would
+# double-count.
+SCOPE_HEADER = "Scope"
+SCOPE_CURRENT = "Current"
+SCOPE_FY = "FY Prior"
+SCOPE_COL_REV = "K"   # Revenue  sheet: A..J data + K Scope
+SCOPE_COL_EXP = "M"   # Expenses sheet: A..L data + M Scope
+
+
+def _data_sheet_q(base: str, sfx: str = "") -> str:
+    """Quoted name of the Revenue / Expenses data sheet to read for *sfx*.
+
+    ``FYS`` shares the main sheet (the FY-prior window is a Scope column,
+    not a sheet of its own); ``CMP`` is still its own sheet.
+    """
+    return _q(base + (CMP if sfx == CMP else ""))
+
+
+def _scope_crit(sheet_q: str, scope_col: str, sfx: str = "") -> str:
+    """The extra SUMIFS criteria pair restricting a merged data sheet to
+    one period window — ``""`` (selected period) or :data:`FYS`.
+
+    Returns a leading-comma fragment to splice into a SUMIFS call, or an
+    empty string for ``CMP`` (a separate sheet, so nothing to restrict).
+    """
+    if sfx == CMP:
+        return ""
+    value = SCOPE_FY if sfx == FYS else f"<>{SCOPE_FY}"
+    return f',{sheet_q}!${scope_col}:${scope_col},"{value}"'
 
 
 def _fy_prior_periods(periods: list[str]) -> list[str]:
@@ -456,14 +518,15 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict,
     each month cell SUMIFS the companion data sheet
     (:data:`BUDGET_DATA_SHEET`) by partner code + month label, and that
     sheet's Sales cells are THEMSELVES SUMIFS over the transaction-level
-    Revenue sheets — the selected months read the "Revenue" sheet and the
-    earlier FY months read "Revenue (FY)" (*fy_periods*, the same window
-    v0.3.102 writes for the PM P&L's cumulative column). Together the two
-    sheets cover the whole FY-to-date, so a sales row edited or added on
-    them post-generation flows through the data sheet into the month
-    cell, its YTD, Variance and Average. A month covered by neither
-    sheet (only possible with a non-contiguous period selection) falls
-    back to a baked value. YTD / Variance / Average were always formulas.
+    "Revenue" sheet. That sheet covers the whole FY-to-date on its own
+    since v0.3.118 — the selected months plus the earlier FY ones
+    (*fy_periods*, the same window v0.3.102 writes for the PM P&L's
+    cumulative column, formerly the separate "Revenue (FY)" sheet) — so
+    a sales row edited or added on it post-generation flows through the
+    data sheet into the month cell, its YTD, Variance and Average. A
+    month in neither window (only possible with a non-contiguous period
+    selection) falls back to a baked value. YTD / Variance / Average
+    were always formulas.
     """
     bm = budget_monthly_data(data, lbl)
     if bm is None:
@@ -564,30 +627,29 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict,
 
     # Companion data sheet the month columns SUMIFS over. One row per
     # (partner, FY-to-date month), and each Sales cell is ITSELF a live
-    # SUMIFS over the transaction-level Revenue sheets (v0.3.116) —
+    # SUMIFS over the transaction-level "Revenue" sheet (v0.3.116) —
     # partner code (col D) + Category "Income" (col I, so reimbursement /
     # OPE recoveries stay excluded like always) + Period label (col J).
-    # Selected months read "Revenue"; earlier FY months read
-    # "Revenue (FY)". Zero months get a row too, so a sales row ADDED on
-    # a Revenue sheet post-generation is still captured. A month covered
-    # by neither sheet (non-contiguous selection) keeps a baked value,
-    # and only when non-zero.
-    selected = set(data.options.periods)
-    fy_set = set(fy_periods or [])
-    rev, rev_fy = _q("Revenue"), _q("Revenue" + FYS)
+    # Since v0.3.118 that ONE sheet holds both the selected months and
+    # the earlier FY ones (what used to be "Revenue (FY)"), and a month
+    # belongs to exactly one window — so the Period label alone selects
+    # the right rows and no Scope criterion is needed. Zero months get a
+    # row too, so a sales row ADDED post-generation is still captured. A
+    # month covered by neither window (non-contiguous selection) keeps a
+    # baked value, and only when non-zero.
+    covered = set(data.options.periods) | set(fy_periods or [])
+    rev = _q("Revenue")
     data_rows = []
     for partner in partners:
         code = partner["code"]
         pmonthly = monthly.get(code, {})
         for period in months:
             label = _month_short(period)
-            src = (rev if period in selected
-                   else rev_fy if period in fy_set else None)
-            if src is not None:
+            if period in covered:
                 data_rows.append([
                     code, label,
-                    f'=SUMIFS({src}!$H:$H,{src}!$D:$D,"{code}",'
-                    f'{src}!$I:$I,"Income",{src}!$J:$J,"{label}")'])
+                    f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{code}",'
+                    f'{rev}!$I:$I,"Income",{rev}!$J:$J,"{label}")'])
             else:
                 amt = pmonthly.get(period, 0.0)
                 if abs(amt) >= 0.005:
@@ -639,6 +701,11 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     lab = _q("Salary")
     reimb = _q("Reimbursements")
     prov = _q("Provisions")
+    # Revenue / Expenses also carry the FY-prior rows (v0.3.118) — this
+    # sheet reports the SELECTED period, so every SUMIFS over them adds
+    # the current-window criterion.
+    rev_s = _scope_crit(rev, SCOPE_COL_REV)
+    exp_s = _scope_crit(exp, SCOPE_COL_EXP)
     first = hrow + 1
     n_partners = len(partners)
     # Row order: partners, then Office, then (optional) Unassigned.
@@ -653,11 +720,12 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # is Reimbursement or OPE (Amount=H, CostCentre=D).
         _cell(ws, r, 4,
               f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},{rev}!$I:$I,'
-              f'"Reimbursement")+SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},'
-              f'{rev}!$I:$I,"OPE")',
+              f'"Reimbursement"{rev_s})+SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r},'
+              f'{rev}!$I:$I,"OPE"{rev_s})',
               fmt=INR, border=True)
         # Revenue (sales income only) = all revenue for the CC minus OPE.
-        _cell(ws, r, 3, f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r})-D{r}",
+        _cell(ws, r, 3,
+              f"=SUMIFS({rev}!$H:$H,{rev}!$D:$D,$A{r}{rev_s})-D{r}",
               fmt=INR, border=True)
         # Total Income = Revenue + Reimbursements (OPE).
         _cell(ws, r, 5, f"=C{r}+D{r}", fmt=INR, border=True)
@@ -675,7 +743,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # (Expenses Amount=J, CostCentre=E, Type of Expense=H).
         _cell(ws, r, 8,
               f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r},'
-              f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")',
+              f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}"{exp_s})',
               fmt=INR, border=True)
         # Reimbursement Expenses: reimbursement-sheet outlays (Amount=I)
         # by the BOOKED Employee CC column (E, v0.3.109) — the cost
@@ -701,7 +769,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # Indirect Expenses: Expenses with Type = Indirect Expense.
         _cell(ws, r, 15,
               f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{r},'
-              f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")',
+              f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}"{exp_s})',
               fmt=INR, border=True)
         # Net Profit = Gross − Office Overhead − Indirect Expenses.
         _cell(ws, r, 16, f"=L{r}-N{r}-O{r}", fmt=INR, border=True)
@@ -956,21 +1024,28 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
               fill=_SUBHEAD_FILL, align=_CENTER, border=True)
 
     # ---- P&L lines ----
-    rev, exp, lab = (_q("Revenue" + suffix), _q("Expenses" + suffix),
-                     _q("Salary" + suffix))
+    # Revenue / Expenses hold both period windows on one sheet (v0.3.118),
+    # so the selected-period cells carry a Scope criterion; Salary /
+    # Reimbursements / Provisions still have per-window sheets.
+    rev, exp = _data_sheet_q("Revenue", suffix), _data_sheet_q("Expenses",
+                                                               suffix)
+    lab = _q("Salary" + suffix)
     reimb = _q("Reimbursements" + suffix)
     prov = _q("Provisions" + suffix)
+    rev_s = _scope_crit(rev, SCOPE_COL_REV, suffix)
+    exp_s = _scope_crit(exp, SCOPE_COL_EXP, suffix)
 
     # Returns the SUMIFS formula for a (partner, manager) cell on a given
     # data sheet's amount column.
     def sumifs(sheet_q, amount_col, cc_code, mgr_filter, extra=None,
-               cc_col="D", mgr_col="E"):
-        # Column layout on the data sheets (v0.3.69):
+               cc_col="D", mgr_col="E", scope=""):
+        # Column layout on the data sheets (v0.3.69, + Scope in v0.3.118):
         #   Revenue:  A=Date B=VoucherNo C=Entity D=CostCentre E=Manager
-        #             F=Service G=Client H=Amount I=Category
+        #             F=Service G=Client H=Amount I=Category J=Period
+        #             K=Scope
         #   Expenses: A=Date B=VoucherNo C=InvoiceNo D=Entity E=CostCentre
         #             F=Manager G=Service H=TypeOfExpense I=Client
-        #             J=Amount K=Description L=Period
+        #             J=Amount K=Description L=Period M=Scope
         parts = [
             f"{sheet_q}!${amount_col}:${amount_col}",
             f"{sheet_q}!${cc_col}:${cc_col}", f'"{cc_code}"',
@@ -981,14 +1056,15 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         for col, value in (extra or []):
             parts.append(f"{sheet_q}!${col}:${col}")
             parts.append(f'"{value}"')
-        return "=SUMIFS(" + ",".join(parts) + ")"
+        return "=SUMIFS(" + ",".join(parts) + scope + ")"
 
     def exp_sumifs(cc_code, mgr_filter, type_label):
         # Expense cells filter on the Type of Expense column (H) so the
         # P&L can split Professional Fees (direct) from Indirect
         # Expenses (shown under the overhead block).
         return sumifs(exp, "J", cc_code, mgr_filter,
-                      extra=[("H", type_label)], cc_col="E", mgr_col="F")
+                      extra=[("H", type_label)], cc_col="E", mgr_col="F",
+                      scope=exp_s)
 
     def labour_sumifs(cc_code, billable=None, mgr_filter=None):
         # Labour now carries the employee's manager (Salary sheet col L,
@@ -1139,13 +1215,13 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                     formula = f"=IF({L}{s}=0,0,{L}{nr}/{L}{s})"
                 elif kind == "sales":
                     formula = sumifs(rev, "H", cc_code, mgr_filter,
-                                     extra=[("I", "Income")])
+                                     extra=[("I", "Income")], scope=rev_s)
                 elif kind == "reimb":
                     # Reimbursement + OPE together — two SUMIFS summed.
                     f1 = sumifs(rev, "H", cc_code, mgr_filter,
-                                extra=[("I", "Reimbursement")])
+                                extra=[("I", "Reimbursement")], scope=rev_s)
                     f2 = sumifs(rev, "H", cc_code, mgr_filter,
-                                extra=[("I", "OPE")])
+                                extra=[("I", "OPE")], scope=rev_s)
                     formula = "=" + f1[1:] + "+" + f2[1:]
                 elif kind == "income_sum":
                     sales_r = rows_by_kind["sales"]
@@ -1277,9 +1353,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
             f" The '{fy_label}' column shows the partner's CUMULATIVE "
             "figures for the financial-year months before the selected "
             "period (a selection starting in April shows the whole "
-            "previous FY), read live from the ' (FY)' data sheets; it is "
-            "context only and is NOT included in the partner Total or "
-            "MIS Total.")
+            "previous FY), read live from the Revenue / Expenses sheets' "
+            "Scope = \"FY Prior\" rows and the ' (FY)' Salary / "
+            "Reimbursements / Provisions sheets; it is context only and "
+            "is NOT included in the partner Total or MIS Total.")
     _cell(ws, r + 1, 1, note, font=_SUB)
 
 
@@ -1290,18 +1367,26 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
 def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
     """Partner-level SUMIFS for *kind* against the ``sfx`` data sheets
     ("" = current, ``CMP`` = comparison, ``FYS`` = FY-prior cumulative).
-    Returns ``None`` for row-arithmetic kinds (sums / %s)."""
-    rev, exp, lab = (_q("Revenue" + sfx), _q("Expenses" + sfx),
-                     _q("Salary" + sfx))
+    Returns ``None`` for row-arithmetic kinds (sums / %s).
+
+    Revenue / Expenses are ONE sheet per edition since v0.3.118 — the
+    current and FY-prior windows live together and are told apart by the
+    Scope criterion, so only ``CMP`` still names a separate sheet. Salary
+    / Reimbursements / Provisions keep a sheet per window.
+    """
+    rev, exp = _data_sheet_q("Revenue", sfx), _data_sheet_q("Expenses", sfx)
+    lab = _q("Salary" + sfx)
     reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
+    rev_s = _scope_crit(rev, SCOPE_COL_REV, sfx)
+    exp_s = _scope_crit(exp, SCOPE_COL_EXP, sfx)
     if kind == "sales":
         return (f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
-                f'{rev}!$I:$I,"Income")')
+                f'{rev}!$I:$I,"Income"{rev_s})')
     if kind == "reimb":
         f1 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
-              f'{rev}!$I:$I,"Reimbursement")')
+              f'{rev}!$I:$I,"Reimbursement"{rev_s})')
         f2 = (f'SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
-              f'{rev}!$I:$I,"OPE")')
+              f'{rev}!$I:$I,"OPE"{rev_s})')
         return "=" + f1 + "+" + f2
     if kind == "salary":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
@@ -1311,10 +1396,10 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
                 f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")')
     if kind == "expense":
         return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
-                f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}")')
+                f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}"{exp_s})')
     if kind == "indirect":
         return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
-                f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}")')
+                f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}"{exp_s})')
     if kind == "reimb_exp":
         # Booked by the Employee CC column (E, v0.3.109) — same criterion
         # on the current, (Cmp) and (FY) editions of the sheet.
@@ -1526,11 +1611,10 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     when the voucher's party didn't resolve). Columns: Client | Grand
     Total | one per FY month BEFORE the selected period | one per
     selected period. EVERY month cell is a live SUMIFS by Client +
-    Period label — prior-FY months over the "Revenue (FY)" data sheet,
-    current months over "Revenue" (v0.3.117; they were baked values) —
-    so a sales row edited or added on those sheets post-generation flows
-    straight through. Both sheets name clients identically (master
-    canonical name, raw party fallback), so the criteria always match.
+    Period label over the "Revenue" data sheet (v0.3.117; they were
+    baked values) — which since v0.3.118 carries the prior-FY months
+    too, so both column blocks read the one sheet and a sales row
+    edited or added on it post-generation flows straight through.
     Clients billed only in the prior window still get a row (0 current),
     so the history never undercounts. The Grand Total sums ONLY the
     selected period's columns. Credit / Debit Notes flow through with
@@ -1610,7 +1694,6 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     first_period_col = get_column_letter(p0)
     last_period_col = get_column_letter(p0 + len(periods) - 1)
     rev = _q("Revenue")
-    rev_fy = _q("Revenue" + FYS)
     for name, _total, _amounts in rows:
         _cell(ws, r, 1, name, border=True)
         # Grand Total is a SUM formula across the CURRENT period columns —
@@ -1620,21 +1703,13 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
         _cell(ws, r, 2,
               f"=SUM({first_period_col}{r}:{last_period_col}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
-        # One live SUMIFS per prior-FY month over the Revenue (FY)
-        # sheet's Client (G) + Period (J) columns — both sheets name
-        # clients identically (master canonical name, raw party
-        # fallback), so the criteria always match.
-        for i, p in enumerate(fy_months):
+        # One live SUMIFS per month — prior-FY months then the selected
+        # ones — over the Revenue sheet's Client (G) + Period (J)
+        # columns. Since v0.3.118 both windows are on that one sheet, and
+        # a month belongs to exactly one of them, so the Period label
+        # alone picks the right rows: no Scope criterion needed here.
+        for i, p in enumerate(fy_months + periods):
             _cell(ws, r, fy0 + i,
-                  f'=SUMIFS({rev_fy}!$H:$H,{rev_fy}!$G:$G,$A{r},'
-                  f'{rev_fy}!$J:$J,"{month_label(p)}")',
-                  fmt=INR, border=True)
-        # Current-period months: same live SUMIFS over the "Revenue"
-        # sheet (v0.3.117 — these were the last baked values here), so a
-        # sales row edited or ADDED on Revenue post-generation flows into
-        # the month cell, the Grand Total and the TOTAL row.
-        for i, p in enumerate(periods):
-            _cell(ws, r, p0 + i,
                   f'=SUMIFS({rev}!$H:$H,{rev}!$G:$G,$A{r},'
                   f'{rev}!$J:$J,"{month_label(p)}")',
                   fmt=INR, border=True)
@@ -1676,6 +1751,10 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
     _header_row(ws, hrow, headers)
 
     rev, exp, prov = _q("Revenue"), _q("Expenses"), _q("Provisions")
+    # These sheets report the SELECTED period, so exclude the FY-prior
+    # rows the data sheets also carry since v0.3.118.
+    rev_s = _scope_crit(rev, SCOPE_COL_REV)
+    exp_s = _scope_crit(exp, SCOPE_COL_EXP)
     r = hrow + 1
     first = r
     for item in rows:
@@ -1683,9 +1762,12 @@ def _simple_summary(wb, sheet, title, label, rows, _mapname, lbl, key,
         # Revenue Amount = col H; Expenses Amount = col J (v0.3.69 layout —
         # Invoice No + Type of Expense pushed Amount from H to J; col H is
         # now the "Type of Expense" TEXT column, so summing it returns 0).
-        _cell(ws, r, 2, f"=SUMIFS({rev}!$H:$H,{rev}!${sumcol_rev}:${sumcol_rev},$A{r})",
+        _cell(ws, r, 2,
+              f"=SUMIFS({rev}!$H:$H,"
+              f"{rev}!${sumcol_rev}:${sumcol_rev},$A{r}{rev_s})",
               fmt=INR, border=True)
-        exp_f = f"=SUMIFS({exp}!$J:$J,{exp}!${sumcol_exp}:${sumcol_exp},$A{r})"
+        exp_f = (f"=SUMIFS({exp}!$J:$J,"
+                 f"{exp}!${sumcol_exp}:${sumcol_exp},$A{r}{exp_s})")
         if prov_col:
             exp_f += f"+SUMIFS({prov}!$G:$G,{prov}!${prov_col}:${prov_col},$A{r})"
         _cell(ws, r, 3, exp_f, fmt=INR, border=True)
@@ -1800,14 +1882,21 @@ def _client_or_party(lbl: dict, f: dict) -> str:
     return (f.get("party_name") or "").strip() or "(unmapped)"
 
 
-def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
+def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "",
+                   fy_data: MISData | None = None) -> None:
     # Period (J, v0.3.109) lets the Client Billing sheet split the FY
     # months before the selected period into one live SUMIFS column per
     # month (was a single cumulative column).
-    rows = []
-    for f in data.revenue_facts:
+    #
+    # Scope (K, v0.3.118) marks which window a row belongs to. With
+    # *fy_data*, that period's rows are written FIRST (they are the
+    # earlier months) as "FY Prior", then the selected period's as
+    # "Current" — one continuous register instead of the old separate
+    # "Revenue (FY)" sheet. See the SCOPE_* constants for why the
+    # current-window criterion is ``<>FY Prior``.
+    def _row(f, scope):
         svc_name = lbl["svc"].get(f["service_id"], "(unspecified)")
-        rows.append([
+        return [
             _fmt_date(f.get("txn_date")),
             f.get("vch_no") or "",
             lbl["ent"].get(f["entity_id"], "(unspecified)"),
@@ -1818,19 +1907,25 @@ def _sheet_revenue(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
             round(f["amount"], 2),
             _service_category(svc_name),
             month_label(f.get("period")) if f.get("period") else "",
-        ])
+            scope,
+        ]
+    rows = [_row(f, SCOPE_FY) for f in (fy_data.revenue_facts
+                                        if fy_data is not None else [])]
+    rows += [_row(f, SCOPE_CURRENT) for f in data.revenue_facts]
     _write_data_sheet(
         wb, "Revenue" + suffix,
         ["Date", "Invoice No", "Entity", "CostCentre", "Manager",
-         "Service", "Client", "Amount", "Category", "Period"],
-        [12, 16, 24, 12, 12, 22, 28, 14, 14, 10], rows)
+         "Service", "Client", "Amount", "Category", "Period", SCOPE_HEADER],
+        [12, 16, 24, 12, 12, 22, 28, 14, 14, 10, 11], rows)
 
 
-def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
-    # Column layout (v0.3.69):
+def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "",
+                    fy_data: MISData | None = None) -> None:
+    # Column layout (v0.3.69, + M in v0.3.118):
     #   A Date          B Voucher No   C Invoice No   D Entity
     #   E CostCentre    F Manager      G Service      H Type of Expense
     #   I Client        J Amount       K Description  L Period
+    #   M Scope
     #
     # Invoice No comes from the register's "New Ref" bill allocation
     # (the vendor's invoice number on the detailed Tally export).
@@ -1838,10 +1933,11 @@ def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     # Indirect Expense — the P&Ls SUMIFS against column H.
     # Period (L) lets the Employee Register compute the per-period
     # office indirect pool with a SUMIFS.
-    rows = []
-    for f in data.expense_facts:
+    # Scope (M) marks the FY-prior rows merged in from what used to be the
+    # "Expenses (FY)" sheet — see the SCOPE_* constants.
+    def _row(f, scope):
         svc_name = lbl["svc"].get(f["service_id"], "(unspecified)")
-        rows.append([
+        return [
             _fmt_date(f.get("txn_date")), f.get("vch_no") or "",
             f.get("invoice_no") or "",
             lbl["ent"].get(f["entity_id"], "(unspecified)"),
@@ -1852,12 +1948,18 @@ def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
             _client_or_party(lbl, f),
             round(f["amount"], 2), f.get("description", ""),
             month_label(f.get("period")) if f.get("period") else "",
-        ])
+            scope,
+        ]
+    rows = [_row(f, SCOPE_FY) for f in (fy_data.expense_facts
+                                        if fy_data is not None else [])]
+    rows += [_row(f, SCOPE_CURRENT) for f in data.expense_facts]
     _write_data_sheet(wb, "Expenses" + suffix,
                       ["Date", "Voucher No", "Invoice No", "Entity",
                        "CostCentre", "Manager", "Service", "Type of Expense",
-                       "Client", "Amount", "Description", "Period"],
-                      [12, 14, 16, 24, 12, 12, 20, 17, 28, 14, 30, 10], rows)
+                       "Client", "Amount", "Description", "Period",
+                       SCOPE_HEADER],
+                      [12, 14, 16, 24, 12, 12, 20, 17, 28, 14, 30, 10, 11],
+                      rows)
 
 
 def _sheet_provisions(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
@@ -2193,7 +2295,10 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
               f'=COUNTIFS({rA},$A{row},{rMov},"Exit")',
               border=True, align=_CENTER)
         # Office indirect — live SUMIFS so editing an office expense
-        # recomputes the cascade.
+        # recomputes the cascade. The Period criterion (col L) already
+        # pins this to the selected month, and the FY-prior rows merged
+        # into the Expenses sheet in v0.3.118 are all OTHER months, so
+        # no Scope criterion is needed here.
         _cell(ws, row, 6,
               f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{office_code}",'
               f'{exp}!$H:$H,"{EXPENSE_TYPE_INDIRECT}",{exp}!$L:$L,$A{row})',

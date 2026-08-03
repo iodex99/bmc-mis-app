@@ -1,8 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-07-13
+> Living document. Updated as we discuss. Last updated: 2026-08-03
 >
-> Current version: **v0.3.117** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.118** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,76 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.118 — Revenue and Expenses are one sheet each (the "(FY)" editions merged in)
+
+Operator ask: merge "Revenue" with "Revenue (FY)", and "Expenses" with
+"Expenses (FY)". Those pairs held the same kind of transaction for two
+different month windows — the SELECTED MIS period, and the financial-year
+months before it that feed the Partner-Manager P&L's cumulative column
+(v0.3.102). Reading a client's or a partner's year meant hopping between
+two sheets. Now there is **one Revenue register and one Expenses
+register**, each covering the whole FY-to-date.
+
+* **A new `Scope` column** — `Revenue` col **K**, `Expenses` col **M** —
+  says which window a row belongs to: `Current` (the selected period) or
+  `FY Prior`. Rows are written chronologically: the FY-prior months
+  first, then the selected period's. Every pre-existing column keeps its
+  letter (Revenue A–J, Expenses A–L), so nothing that referenced them
+  moved.
+* **Aggregates carry a Scope criterion.** The Cost Centre P&L, the
+  Partner-Manager P&L's leaf/subtotal columns, Entity P&L and Service MIS
+  report the selected period, so their SUMIFS gained
+  `Scope <> "FY Prior"`; the PM P&L's FY-cumulative column gained
+  `Scope = "FY Prior"`. The current-window test is the **negation**
+  deliberately: a row the operator types in below the generated data has
+  an empty Scope cell, and Excel's `<>` criteria match empty cells — so
+  an appended row still counts towards the selected period, keeping the
+  v0.3.117 "everything I added counts" guarantee. Typing `FY Prior` in
+  the Scope cell is the way to book an added row to the earlier window
+  instead.
+* **Period-keyed formulas got SIMPLER, not more complex.** Client
+  Billing's month columns and the `Budget Sales (Monthly)` data sheet used
+  to pick their source sheet per month (`Revenue` vs `Revenue (FY)`);
+  they now read the one sheet and key on the Period label alone. That is
+  safe because the two windows never share a month —
+  `_fy_prior_periods` returns months strictly before the earliest
+  selected one — and it means an appended row with a blank Scope still
+  reaches them. The Employee Register's office-indirect pool was already
+  period-keyed and is untouched.
+* **" (Cmp)" stays a separate sheet.** The comparison period is
+  operator-chosen and may OVERLAP the FY-prior window (a June MIS
+  compared against May, with May also in the cumulative window), so
+  merging it would double-count. `Salary`, `Reimbursements` and
+  `Provisions` keep their `(FY)` editions — only the two sheets the
+  operator asked about were merged.
+
+Verified with a new 93-check suite plus a 20-check edge-case suite, both
+driving **real Excel** (openpyxl only writes formula strings; the whole
+point of this workbook is what Excel computes). The central check is an
+equivalence proof: the same database is rendered by the pre-merge code
+and the new code, both recalculated by Excel, and **every summary sheet
+compared cell for cell** — Cover, Dashboard, Budget vs Monthly Sales,
+Budget Sales (Monthly), Cost Centre P&L, Partner-Manager P&L, Entity
+P&L, Service MIS, Client Billing, Employee Register, Client Register,
+and on a comparative run also Comparatives and Partner-Manager P&L
+(Cmp). Every figure is identical; the only difference anywhere in the
+workbook is the PM P&L footnote, which now names the Scope rows instead
+of the old sheets. Also verified: the merged sheets carry every row from
+both former sheets, byte-identical in the data columns and in
+chronological order; the two windows never share a month label; PM's
+June revenue reads 50,000 and not 190,000 (it has 140,000 in the FY
+window — the figure a missing Scope criterion would produce); a row
+typed onto Revenue with an EMPTY Scope flows into the CC P&L, the PM
+P&L current total, Client Billing, the Budget month cell and the
+open-ended subtotal, while staying out of the FY column; the same row
+tagged `FY Prior` does the reverse; an appended Expenses row behaves the
+same; a comparison against May (inside the FY window) keeps the (Cmp)
+column at May's 60,000 rather than double-counting; an April-start MIS
+(whose FY window is the whole empty previous FY) evaluates to 0
+cumulative with the current figures intact; a non-contiguous Apr+Jun
+selection still bakes the uncovered May value; and an empty database
+still builds. The UI smoke across all eight pages stays green.
 
 ### v0.3.117 — Manual rows added in Excel post-generation count everywhere
 
