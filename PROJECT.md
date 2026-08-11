@@ -1,8 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-08-03
+> Living document. Updated as we discuss. Last updated: 2026-08-11
 >
-> Current version: **v0.3.119** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.120** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,86 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.120 — Previous months, month by month — and the comparison selection decides which
+
+Two operator asks about the columns beside the reported month, plus the
+Client Register:
+
+**1. The previous months are now one column EACH.** A Jul-26 MIS used to
+show a single lumped "Apr-26 to Jun-26" cumulative column per partner
+(v0.3.102). Every partner block on the **Partner-Manager P&L** now ends
+with **Apr-26 | May-26 | Jun-26 | Apr-26 to Jun-26** — a column per month
+of the financial year so far, then their total — and the "MIS Total"
+block carries the same set. Each month column is a live partner-level
+`SUMIFS` keyed on that month's Period label, so it shows exactly what
+that month's own MIS would have shown; the %s recompute inside their own
+column, so each is a true ratio of that month's figures. A window
+spanning a single month gets no (duplicate) total column.
+
+**2. Ticking comparison months produces ONLY those months.** Leave
+"Compare with" empty and the previous-months columns are the financial
+year to date, as above. Tick months there and exactly those months are
+produced — no FY expansion, and the workbook carries no `" (FY)"` data
+sheets at all; the columns read the `" (Cmp)"` sheets instead. One
+`PriorWindow` object now carries the months, the data-sheet suffix and
+the calc-engine data for whichever of the two cases applies, so the P&L,
+Client Billing, the Budget data sheet, the Client Register and the HTML
+dashboard all follow the same window. The Cover states it in two new
+rows — **Previous months shown** and **Previous months from**
+("financial year to date" / "selected comparison month(s)"). A month
+ticked in BOTH lists is dropped from the window: it already has its own
+reported column. The Generate page's comparison box now explains the
+rule.
+
+**3. The Client Register covers the previous months too.** A Jul-26 MIS
+lists Apr-26, May-26 and Jun-26 above the reported month — in the
+summary, the roster and the "Clients by cost centre" block — so the
+year's client movement reads in one place. A new **Scope** column marks
+each month "Previous" or "Reported"; it is a label, so every count stays
+keyed on the Period alone. "New" still means first-billed-ever across all
+history, which is why a client billed back in Mar-26 does NOT read as new
+in Apr-26. The HTML dashboard's Client Register section shows the same
+months.
+
+**Provisions are a stock, not a flow.** They carry forward, so they can
+never be summed across months. Each window's Provisions sheet now holds
+**one snapshot per month**, stamped in a new **As At** column (H), built
+by `calc.provisions_as_at`; a month column reads its own snapshot, and a
+window total shows the LAST month's balance rather than a sum. The main
+Provisions sheet is unchanged — one snapshot, no As At criterion, so an
+appended row still counts.
+
+**The v0.3.118 Scope contract is untouched.** The month columns carry the
+Period criterion ON TOP of the Scope one: a row typed in below the
+generated data with a blank Scope counts towards the selected period,
+exactly as before, and tagging it `FY Prior` books it to its month's
+column and the window total. Without that, one appended row would have
+counted in both windows at once.
+
+Verified with a 343-check suite driving **real Excel** (openpyxl only
+writes formula strings; what matters is what Excel computes), plus a
+19-check offscreen UI smoke. The central check is an equivalence proof:
+every previous-month column, for every P&L line and every partner, is
+compared against a fresh calc-engine run for that single month — Apr-26
+reads 1,00,000 / May-26 40,000 / Jun-26 60,000 for PM against a Jul-26
+reported 50,000, and the window total 2,00,000. Also verified: the
+reported month's figures are byte-identical with an FY window, a
+comparison window or none at all; the window total never leaks into the
+partner Total or the MIS Total; provisions read 1,00,000 / 1,00,000 /
+60,000 across Apr/May/Jun with a window total of 60,000 (not 2,60,000)
+and an MIS window total of 85,000; a ticked May-26 comparison produces a
+May-26 column and no Apr/Jun columns, with no `(FY)` sheets and no
+`Scope = "FY Prior"` rows anywhere; an Apr-26 MIS lays out all twelve
+months of the previous FY and picks up its lone Mar-26 sale; a
+non-contiguous Apr+Jun selection still bakes the uncovered May budget
+value while Apr stays live; the degenerate "compare July with July" case
+produces no previous columns but keeps the comparison sheets; a blank
+Scope row appended in Excel lands in the reported month only and the same
+row tagged `FY Prior` lands in May and the window total; the whole
+workbook still ties out to the calc engine sheet by sheet (Cost Centre
+P&L, Entity P&L, Service MIS, Employee Register's overhead cascade,
+Dashboard KPIs, Cover totals); and an empty database still builds.
 
 ### v0.3.119 — Generate MIS no longer silently selects the whole financial year
 

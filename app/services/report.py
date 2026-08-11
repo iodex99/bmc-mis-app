@@ -9,6 +9,7 @@ data row, and every report number recalculates — nothing is hard-coded.
 from __future__ import annotations
 
 import datetime as _dt
+from dataclasses import dataclass
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -27,6 +28,7 @@ from .calc import (
     expense_type,
     financial_year,
     normalize_fy,
+    provisions_as_at,
     revenue_category,
 )
 from .resolution import norm
@@ -136,40 +138,41 @@ def _labels() -> dict:
 # =============================== generation =================================
 
 def generate(data: MISData, path: str | Path,
-             compare: MISData | None = None) -> Path:
+             compare: MISData | None = None,
+             prior: "PriorWindow | None" = None) -> Path:
     """Write the full MIS workbook for *data* to *path*.
 
     When *compare* (a second MISData for a prior period) is given, a
     Comparatives sheet plus its own data sheets are added.
+
+    *prior* is the previous-months window shown beside the selected
+    period — see :func:`prior_window`, which builds it when the caller
+    doesn't (passing it in avoids recomputing it for the HTML dashboard).
     """
     lbl = _labels()
     wb = Workbook()
     wb.remove(wb.active)
 
-    # FY-cumulative context (v0.3.102): the months of the financial year
-    # BEFORE the earliest selected month (or the whole previous FY when
-    # the selection starts in April). Computed with the same calc engine
-    # so the Partner-Manager P&L's cumulative column is live SUMIFS like
-    # every other figure. Its revenue / expense rows are merged INTO the
+    if prior is None:
+        prior = prior_window(data.options, compare)
+    # The FY-prior window's revenue / expense rows are merged INTO the
     # "Revenue" / "Expenses" sheets under Scope = "FY Prior" (v0.3.118);
-    # salary / reimbursements / provisions keep their " (FY)" sheets.
-    fy_periods = _fy_prior_periods(data.options.periods)
-    fy_data = compute(MISOptions(
-        periods=fy_periods,
-        include_reimbursement=data.options.include_reimbursement,
-        location_ids=data.options.location_ids)) if fy_periods else None
-    fy_label = periods_label(fy_periods) if fy_periods else None
+    # salary / reimbursements / provisions keep their " (FY)" sheets. An
+    # operator-chosen comparison window lives on its " (Cmp)" sheets
+    # instead, so ``fy_data`` is None then and no FY sheets are written.
+    fy_data = prior.data if prior.suffix == FYS else None
+    fy_periods = prior.periods if prior.suffix == FYS else []
 
-    _sheet_cover(wb, data, compare)
+    _sheet_cover(wb, data, compare, prior)
     _sheet_dashboard(wb, data)
-    _sheet_budget_monthly(wb, data, lbl, fy_periods=fy_periods)
+    _sheet_budget_monthly(wb, data, lbl, prior)
     rows_pl = _sheet_cost_centre(wb, data, lbl)
-    _sheet_partner_manager(wb, data, lbl, fy_label=fy_label, fy_data=fy_data)
+    _sheet_partner_manager(wb, data, lbl, prior=prior)
     _sheet_entity(wb, data, lbl)
     _sheet_service(wb, data, lbl)
-    _sheet_client_billing(wb, data, lbl, fy_label=fy_label, fy_data=fy_data)
+    _sheet_client_billing(wb, data, lbl, prior)
     _sheet_employee_register(wb, data, lbl)
-    _sheet_client_register(wb, data, lbl)
+    _sheet_client_register(wb, data, lbl, prior)
     if compare is not None:
         _sheet_comparatives(wb, data, compare, lbl, rows_pl)
     # Revenue / Expenses carry BOTH windows (v0.3.118): the FY-prior rows
@@ -188,13 +191,17 @@ def generate(data: MISData, path: str | Path,
         _sheet_expenses(wb, compare, lbl, CMP)
         _sheet_salary(wb, compare, lbl, CMP)
         _sheet_reimbursements(wb, compare, lbl, CMP)
-        _sheet_provisions(wb, compare, lbl, CMP)
+        # One provision snapshot per comparison month — a month column
+        # reads its own As At snapshot (provisions are a carried-forward
+        # stock, so they can't be summed across months).
+        _sheet_provisions(wb, compare, lbl, CMP,
+                          asat_periods=compare.options.periods)
     if fy_data is not None:
         # Revenue / Expenses for this window are already on the main
         # sheets (Scope = "FY Prior"); these three keep their own.
         _sheet_salary(wb, fy_data, lbl, FYS)
         _sheet_reimbursements(wb, fy_data, lbl, FYS)
-        _sheet_provisions(wb, fy_data, lbl, FYS)
+        _sheet_provisions(wb, fy_data, lbl, FYS, asat_periods=fy_periods)
 
     # Dashboard KPIs + Cover totals link to the Cost Centre P&L total row.
     _link_dashboard(wb, rows_pl)
@@ -271,6 +278,78 @@ def _scope_crit(sheet_q: str, scope_col: str, sfx: str = "") -> str:
     return f',{sheet_q}!${scope_col}:${scope_col},"{value}"'
 
 
+# --- the "previous months" window (v0.3.120) ---------------------------------
+
+@dataclass
+class PriorWindow:
+    """The months shown BESIDE the selected reporting period.
+
+    One column per month on the Partner-Manager P&L and Client Billing,
+    and one row per month on the Client Register. Two ways to fill it:
+
+    * **Nothing ticked under "Compare with"** — the financial year to
+      date: every FY month before the earliest selected one (Jul-26 →
+      Apr-26, May-26, Jun-26). Read from the " (FY)" data sheets, i.e.
+      the ``Scope = "FY Prior"`` rows of Revenue / Expenses plus the
+      " (FY)" Salary / Reimbursements / Provisions sheets.
+    * **Comparison months ticked** — ONLY those months (operator ask,
+      v0.3.120). Read from the " (Cmp)" data sheets.
+
+    ``suffix`` is the data-sheet suffix to read (:data:`FYS` / :data:`CMP`),
+    so one set of formula builders serves both.
+    """
+    periods: list[str]
+    suffix: str
+    data: MISData | None
+
+    @property
+    def active(self) -> bool:
+        return bool(self.periods) and self.data is not None
+
+    @property
+    def label(self) -> str | None:
+        """Human label for the whole window ("Apr-26 to Jun-26")."""
+        return periods_label(self.periods) if self.periods else None
+
+    @property
+    def is_comparison(self) -> bool:
+        return self.suffix == CMP
+
+    @property
+    def source(self) -> str:
+        """Where the window came from — for the Cover and the notes."""
+        if not self.periods:
+            return "—"
+        return ("selected comparison month(s)" if self.is_comparison
+                else "financial year to date")
+
+
+def prior_window(options: MISOptions,
+                 compare: MISData | None = None) -> PriorWindow:
+    """Build the previous-months window for a run (v0.3.120).
+
+    An operator-chosen comparison selection WINS: tick months under
+    "Compare with" and only those months are produced — no FY-to-date
+    expansion, and no " (FY)" data sheets in the workbook. A comparison
+    month that is also a reporting month is dropped from the window (it
+    already has its own current column, so it would just be a duplicate).
+
+    With nothing ticked the window is the financial year to date, computed
+    with the same calc engine so every figure stays live SUMIFS.
+    """
+    selected = set(options.periods)
+    if compare is not None:
+        months = [p for p in sorted(set(compare.options.periods))
+                  if p not in selected]
+        return PriorWindow(months, CMP, compare if months else None)
+    months = _fy_prior_periods(options.periods)
+    data = compute(MISOptions(
+        periods=months,
+        include_reimbursement=options.include_reimbursement,
+        location_ids=options.location_ids)) if months else None
+    return PriorWindow(months, FYS, data)
+
+
 def _fy_prior_periods(periods: list[str]) -> list[str]:
     """The FY months BEFORE the earliest selected month (v0.3.102).
 
@@ -302,8 +381,14 @@ def _fy_prior_periods(periods: list[str]) -> list[str]:
 
 # --- Cover -------------------------------------------------------------------
 
+# First row of the Cover's label/value block. _link_cover scans from here
+# for the three headline totals, so both must agree.
+COVER_FIRST_ROW = 6
+
+
 def _sheet_cover(wb: Workbook, data: MISData,
-                 compare: MISData | None = None) -> None:
+                 compare: MISData | None = None,
+                 prior: PriorWindow | None = None) -> None:
     ws = wb.create_sheet("Cover")
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 3
@@ -313,10 +398,16 @@ def _sheet_cover(wb: Workbook, data: MISData,
     _cell(ws, 3, 2, "Management Information System",
           font=Font(size=13, color=BLUE))
     periods = periods_label(data.options.periods)
+    prior_months = (", ".join(month_label(p) for p in prior.periods)
+                    if prior and prior.periods else "—")
     rows = [
         ("Reporting period(s)", periods),
         ("Comparison period(s)",
          periods_label(compare.options.periods) if compare else "—"),
+        # The previous-months columns (v0.3.120): the comparison selection
+        # when the operator made one, else the financial year to date.
+        ("Previous months shown", prior_months),
+        ("Previous months from", prior.source if prior else "—"),
         ("Generated on", _dt.date.today().strftime("%d %b %Y")),
         ("Reimbursements in MIS",
          "Included" if data.options.include_reimbursement else "Excluded"),
@@ -330,21 +421,18 @@ def _sheet_cover(wb: Workbook, data: MISData,
         ("Net profit", 0),
     ]
     for i, (k, v) in enumerate(rows):
-        r = 6 + i
-        _cell(ws, r, 2, k, font=_BOLD)
-        ws.cell(row=r, column=2).alignment = Alignment(horizontal="left")
-        _cell(ws, r, 2, k, font=_BOLD)
-        c = ws.cell(row=r, column=2)
-        c.value = k
+        r = COVER_FIRST_ROW + i
+        c = ws.cell(row=r, column=2, value=k)
+        c.font = _BOLD
+        c.alignment = Alignment(horizontal="left")
         d = ws.cell(row=r, column=3, value=v)
         d.font = _NORMAL
     ws.column_dimensions["C"].width = 32
-    for w in data.warnings:
-        ws.append([])
     if data.warnings:
-        _cell(ws, 16, 2, "Notes:", font=_BOLD)
+        notes_row = COVER_FIRST_ROW + len(rows) + 1
+        _cell(ws, notes_row, 2, "Notes:", font=_BOLD)
         for i, w in enumerate(data.warnings):
-            _cell(ws, 17 + i, 2, "• " + w, font=_SUB)
+            _cell(ws, notes_row + 1 + i, 2, "• " + w, font=_SUB)
 
 
 # --- Dashboard ---------------------------------------------------------------
@@ -389,7 +477,7 @@ def _link_cover(wb: Workbook, rows_pl: dict) -> None:
         "Total cost": f"={pl}!{ti}{total}-{pl}!{prof}{total}",
         "Net profit": f"={pl}!{prof}{total}",
     }
-    for r in range(6, 20):
+    for r in range(COVER_FIRST_ROW, COVER_FIRST_ROW + 30):
         label = ws.cell(row=r, column=2).value
         if label in formulas:
             cell = ws.cell(row=r, column=3, value=formulas.pop(label))
@@ -508,7 +596,7 @@ def budget_monthly_data(data: MISData, lbl: dict) -> dict | None:
 
 
 def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict,
-                          fy_periods: list[str] | None = None) -> None:
+                          prior: "PriorWindow | None" = None) -> None:
     """Year-to-date monthly sales per partner cost centre, vs annual budget.
 
     Independent of the selected MIS period: always shows the full FY-to-date
@@ -517,16 +605,15 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict,
     Every amount cell is a live formula, all the way down (v0.3.115/116):
     each month cell SUMIFS the companion data sheet
     (:data:`BUDGET_DATA_SHEET`) by partner code + month label, and that
-    sheet's Sales cells are THEMSELVES SUMIFS over the transaction-level
-    "Revenue" sheet. That sheet covers the whole FY-to-date on its own
-    since v0.3.118 — the selected months plus the earlier FY ones
-    (*fy_periods*, the same window v0.3.102 writes for the PM P&L's
-    cumulative column, formerly the separate "Revenue (FY)" sheet) — so
-    a sales row edited or added on it post-generation flows through the
+    sheet's Sales cells are THEMSELVES SUMIFS over a transaction-level
+    revenue register. The "Revenue" sheet covers the selected months plus
+    (when the window is the FY to date) the earlier FY ones since
+    v0.3.118; an operator-chosen comparison window lives on
+    "Revenue (Cmp)" instead, and those months read that sheet (v0.3.120)
+    — so a sales row edited or added post-generation flows through the
     data sheet into the month cell, its YTD, Variance and Average. A
-    month in neither window (only possible with a non-contiguous period
-    selection) falls back to a baked value. YTD / Variance / Average
-    were always formulas.
+    month covered by no window falls back to a baked value. YTD /
+    Variance / Average were always formulas.
     """
     bm = budget_monthly_data(data, lbl)
     if bm is None:
@@ -627,25 +714,30 @@ def _sheet_budget_monthly(wb: Workbook, data: MISData, lbl: dict,
 
     # Companion data sheet the month columns SUMIFS over. One row per
     # (partner, FY-to-date month), and each Sales cell is ITSELF a live
-    # SUMIFS over the transaction-level "Revenue" sheet (v0.3.116) —
+    # SUMIFS over a transaction-level revenue register (v0.3.116) —
     # partner code (col D) + Category "Income" (col I, so reimbursement /
     # OPE recoveries stay excluded like always) + Period label (col J).
-    # Since v0.3.118 that ONE sheet holds both the selected months and
-    # the earlier FY ones (what used to be "Revenue (FY)"), and a month
-    # belongs to exactly one window — so the Period label alone selects
-    # the right rows and no Scope criterion is needed. Zero months get a
-    # row too, so a sales row ADDED post-generation is still captured. A
-    # month covered by neither window (non-contiguous selection) keeps a
-    # baked value, and only when non-zero.
-    covered = set(data.options.periods) | set(fy_periods or [])
-    rev = _q("Revenue")
+    # Since v0.3.118 the "Revenue" sheet holds both the selected months
+    # and the earlier FY ones (what used to be "Revenue (FY)"), and a
+    # month belongs to exactly one window — so the Period label alone
+    # selects the right rows and no Scope criterion is needed. A month
+    # that only exists on the comparison register reads "Revenue (Cmp)"
+    # (v0.3.120). Zero months get a row too, so a sales row ADDED
+    # post-generation is still captured. A month covered by no register
+    # keeps a baked value, and only when non-zero.
+    source = {p: _q("Revenue") for p in data.options.periods}
+    if prior is not None and prior.periods:
+        prior_sheet = _data_sheet_q("Revenue", prior.suffix)
+        for p in prior.periods:
+            source.setdefault(p, prior_sheet)
     data_rows = []
     for partner in partners:
         code = partner["code"]
         pmonthly = monthly.get(code, {})
         for period in months:
             label = _month_short(period)
-            if period in covered:
+            rev = source.get(period)
+            if rev:
                 data_rows.append([
                     code, label,
                     f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{code}",'
@@ -821,37 +913,41 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
 # --- Partner – Manager P&L (matrix layout) ----------------------------------
 
 def _build_pm_matrix(data: MISData, lbl: dict,
-                     fy_label: str | None = None,
-                     fy_data: MISData | None = None,
+                     prior: "PriorWindow | None" = None,
                      cur_label: str | None = None):
     """Build the partner-manager column structure for the P&L matrix.
 
     Returns a list of partner blocks, where each block is:
         (cc_code, cc_name, columns)
 
-    ``columns`` is a list of ``(label, role, mgr_filter)`` tuples. ``role`` is
+    ``columns`` is a list of ``(label, role, filter)`` tuples. ``role`` is
     one of:
 
     * ``"self"``      — the partner's own direct work (no manager named).
-      ``mgr_filter`` is ``"(unassigned)"`` — the value the data sheets write
+      ``filter`` is ``"(unassigned)"`` — the value the data sheets write
       in the Manager column for an unassigned split.
-    * ``"manager"``   — a named (active) manager sub-column. ``mgr_filter`` is
+    * ``"manager"``   — a named (active) manager sub-column. ``filter`` is
       the manager's code.
     * ``"subtotal"``  — the per-partner Total column (only present when the
-      partner has at least one manager sub-column). ``mgr_filter`` is ``None``.
+      partner has at least one manager sub-column). ``filter`` is ``None``.
     * ``"partner_total"`` — a single partner-total column used when the partner
       has NO active managers (none assigned, or all deactivated in the master).
-      ``mgr_filter`` is ``None`` — the cell SUMIFS at partner level with no
+      ``filter`` is ``None`` — the cell SUMIFS at partner level with no
       manager criterion, so the partner's whole figure (including any
       deactivated manager's work) rolls up into this one column.
+    * ``"prior_month"`` — one PREVIOUS month (v0.3.120). ``filter`` is that
+      month (``'2026-04'``); the cell is a partner-level SUMIFS keyed on the
+      month's Period label over the window's data sheets.
+    * ``"prior_total"`` — the whole previous window, only when it spans more
+      than one month (with a single month it would duplicate its column).
 
     A manager whose master row is deactivated is already folded to ``None`` on
     the facts by the calc engine, so it never appears as a "manager" column
     here; its work shows up under the partner's "self"/"partner_total" column.
 
-    With *fy_label*, every block additionally ends with a ``"fy_prior"``
-    column of that label — the FY-cumulative figures for the months before
-    the selected period (v0.3.102).
+    With an active *prior* window, every block ends with one column per
+    previous month plus the window total — the financial year to date, or
+    the operator's comparison selection (see :class:`PriorWindow`).
     """
     cc_active_map = {c["id"]: c for c in lbl["cc_active"]}
 
@@ -871,11 +967,13 @@ def _build_pm_matrix(data: MISData, lbl: dict,
             continue
         by_partner.setdefault(cc_id, []).append(mgr_id)
 
-    # A partner with FY-prior activity but nothing in the CURRENT period
-    # must still get a block (a collapsed 0 current column + the FY
-    # cumulative) — otherwise the MIS FY-cumulative total would silently
-    # undercount the firm's year-to-date (v0.3.102).
-    if fy_label and fy_data is not None:
+    # A partner with previous-window activity but nothing in the CURRENT
+    # period must still get a block (a collapsed 0 current column + the
+    # month columns) — otherwise the MIS previous-months total would
+    # silently undercount the firm's year to date (v0.3.102).
+    prior_active = prior is not None and prior.active
+    if prior_active:
+        fy_data = prior.data
         for f in (fy_data.revenue_facts + fy_data.expense_facts
                   + fy_data.labour_facts + fy_data.provision_facts):
             cc_id = f.get("cost_centre_id")
@@ -913,21 +1011,30 @@ def _build_pm_matrix(data: MISData, lbl: dict,
             # No active managers under this partner — show a single
             # partner-total column instead of an identical Self + Total pair.
             columns.append((cur_label or cc["code"], "partner_total", None))
-        if fy_label:
-            # FY-cumulative column (v0.3.102): the partner's totals for
-            # the FY months BEFORE the selected period, SUMIFS-driven
-            # from the " (FY)" data sheets.
-            columns.append((fy_label, "fy_prior", None))
+        if prior_active:
+            # One column per PREVIOUS month (v0.3.120) — the FY to date,
+            # or the operator's comparison selection — SUMIFS-driven from
+            # that window's data sheets, keyed on the month's Period label.
+            for month in prior.periods:
+                columns.append((month_label(month), "prior_month", month))
+            if len(prior.periods) > 1:
+                # Window total. A single-month window is its own total, so
+                # it gets no extra (identical) column.
+                columns.append((prior.label, "prior_total", None))
         result.append((cc["code"], cc["name"], columns))
     return result
 
 
 def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                            suffix: str = "",
-                           fy_label: str | None = None,
-                           fy_data: MISData | None = None) -> None:
+                           prior: "PriorWindow | None" = None) -> None:
     """The headline P&L sheet — partner super-headers, manager sub-columns,
     formula-driven from the Revenue / Expenses / Labour data sheets.
+
+    Each partner block ends with the PREVIOUS MONTHS (v0.3.120): one
+    column per month of the :class:`PriorWindow` — the financial year to
+    date by default, or exactly the operator's comparison selection —
+    plus a window total when it spans more than one month.
 
     With *suffix* (``CMP``), builds the comparison-period edition —
     "Partner-Manager P&L (Cmp)" — from the comparison data sheets, so a
@@ -937,9 +1044,11 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
     ws = wb.create_sheet("Partner-Manager P&L" + suffix)
     ws.sheet_view.showGridLines = False
 
+    prior_active = prior is not None and prior.active
+    prior_sfx = prior.suffix if prior_active else FYS
+    prior_months = list(prior.periods) if prior_active else []
     cur_lbl = periods_label(data.options.periods)
-    matrix = _build_pm_matrix(data, lbl, fy_label=fy_label, fy_data=fy_data,
-                              cur_label=cur_lbl)
+    matrix = _build_pm_matrix(data, lbl, prior=prior, cur_label=cur_lbl)
     if not matrix:
         # Nothing to show — still draw a heading so the sheet isn't blank.
         _cell(ws, 1, 1, title, font=_TITLE)
@@ -956,8 +1065,10 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
           font=_SUB)
 
     # ---- Column layout ----
-    # Col 1 = Particulars. Then each partner block contributes (len(managers))
-    # columns. Final column = "MIS Total".
+    # Col 1 = Particulars. Then each partner block contributes its columns
+    # (leaves + total + one per previous month). The final block is the
+    # firm-wide "MIS Total", which mirrors a partner block's shape: the
+    # selected period, then the same previous-month columns.
     block_starts: list[int] = []
     cols_per_block: list[int] = []
     col_idx = 2
@@ -965,62 +1076,64 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         block_starts.append(col_idx)
         cols_per_block.append(len(managers))
         col_idx += len(managers)
-    mis_total_col = col_idx
-    mis_fy_col = mis_total_col + 1 if fy_label else None
-    last_col = mis_fy_col or mis_total_col
+    # (label, role, filter) for the MIS Total block, same tuple shape as a
+    # partner block's columns so both render through the same code.
+    mis_cols: list[tuple[str, str, str | None]] = [
+        (cur_lbl or "Total", "current", None)]
+    for month in prior_months:
+        mis_cols.append((month_label(month), "prior_month", month))
+    if len(prior_months) > 1:
+        mis_cols.append((prior.label, "prior_total", None))
+    mis_start = col_idx                  # first cell = the selected period
+    last_col = mis_start + len(mis_cols) - 1
 
-    # Set column widths (FY-cumulative columns are wider — they carry a
-    # period-range label like "Apr-26 to Jun-26").
+    # Set column widths (total columns are wider — they carry a period-range
+    # label like "Apr-26 to Jun-26"; month columns hold "Apr-26").
     ws.column_dimensions["A"].width = 30
     for col in range(2, last_col + 1):
         ws.column_dimensions[get_column_letter(col)].width = 14
     for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
         for off, (_lbl2, _role2, _f2) in enumerate(managers):
-            if _role2 in ("fy_prior", "subtotal", "partner_total"):
+            if _role2 in ("prior_total", "subtotal", "partner_total"):
                 ws.column_dimensions[
                     get_column_letter(start + off)].width = 17
-    ws.column_dimensions[get_column_letter(mis_total_col)].width = 17
-    if mis_fy_col:
-        ws.column_dimensions[get_column_letter(mis_fy_col)].width = 17
+    for off, (_lbl3, role3, _f3) in enumerate(mis_cols):
+        ws.column_dimensions[get_column_letter(mis_start + off)].width = (
+            14 if role3 == "prior_month" else 17)
 
     # ---- Header rows ----
     hdr_partner_row = 4
     hdr_mgr_row = 5
     body_start = 7
 
-    # Partner super-header (row 4): merged across each block's columns.
-    for (cc_code, cc_name, managers), start, count in zip(
-            matrix, block_starts, cols_per_block):
+    def _super_header(name: str, start: int, count: int) -> None:
         end = start + count - 1
         if end > start:   # a collapsed single-column block needs no merge
             ws.merge_cells(start_row=hdr_partner_row, start_column=start,
                            end_row=hdr_partner_row, end_column=end)
-        _cell(ws, hdr_partner_row, start, cc_name, font=_HEAD,
+        _cell(ws, hdr_partner_row, start, name, font=_HEAD,
               fill=_HEAD_FILL, align=_CENTER, border=True)
         for col in range(start, end + 1):
             ws.cell(row=hdr_partner_row, column=col).fill = _HEAD_FILL
             ws.cell(row=hdr_partner_row, column=col).border = _BORDER
-    if mis_fy_col:
-        ws.merge_cells(start_row=hdr_partner_row, start_column=mis_total_col,
-                       end_row=hdr_partner_row, end_column=mis_fy_col)
-    _cell(ws, hdr_partner_row, mis_total_col, "MIS Total", font=_HEAD,
-          fill=_HEAD_FILL, align=_CENTER, border=True)
-    if mis_fy_col:
-        ws.cell(row=hdr_partner_row, column=mis_fy_col).fill = _HEAD_FILL
-        ws.cell(row=hdr_partner_row, column=mis_fy_col).border = _BORDER
+
+    # Partner super-header (row 4): merged across each block's columns.
+    for (cc_code, cc_name, managers), start, count in zip(
+            matrix, block_starts, cols_per_block):
+        _super_header(cc_name, start, count)
+    _super_header("MIS Total", mis_start, len(mis_cols))
     _cell(ws, hdr_partner_row, 1, "", fill=_HEAD_FILL)
 
-    # Manager sub-header (row 5): one cell per manager column + Total.
+    # Sub-header (row 5): one cell per column — manager codes, the period
+    # totals and the previous-month labels.
     _cell(ws, hdr_mgr_row, 1, "Particulars", font=_HEAD, fill=_SUBHEAD_FILL,
           align=_CENTER, border=True)
     for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
         for offset, (label, _role, _filter) in enumerate(managers):
             _cell(ws, hdr_mgr_row, start + offset, label, font=_HEAD,
                   fill=_SUBHEAD_FILL, align=_CENTER, border=True)
-    _cell(ws, hdr_mgr_row, mis_total_col, cur_lbl or "Total", font=_HEAD,
-          fill=_SUBHEAD_FILL, align=_CENTER, border=True)
-    if mis_fy_col:
-        _cell(ws, hdr_mgr_row, mis_fy_col, fy_label, font=_HEAD,
+    for offset, (label, _role, _filter) in enumerate(mis_cols):
+        _cell(ws, hdr_mgr_row, mis_start + offset, label, font=_HEAD,
               fill=_SUBHEAD_FILL, align=_CENTER, border=True)
 
     # ---- P&L lines ----
@@ -1133,20 +1246,30 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         _cell(ws, r, 1, label, font=font, fill=fill, border=True)
 
         for (cc_code, cc_name, managers), start in zip(matrix, block_starts):
+            # Column span of this block's previous-month columns, so the
+            # window-total column can SUM them.
+            prior_offsets = [o for o, (_l6, r6, _f6) in enumerate(managers)
+                             if r6 == "prior_month"]
             for offset, (mgr_label, role, mgr_filter) in enumerate(managers):
                 col = start + offset
                 is_total_col = (role == "subtotal")
                 is_partner_total = (role == "partner_total")
                 cell_fmt = PCT if kind.endswith("_pct") else INR
-                fy_leaf = (_pm_leaf_formula(kind, cc_code, FYS)
-                           if role == "fy_prior" else None)
-                if fy_leaf is not None:
-                    # FY-cumulative column: partner-level SUMIFS against
-                    # the " (FY)" data sheets. Row-arithmetic kinds
-                    # (totals / %s) fall through to the generic
-                    # same-column branches below, which are column-local
-                    # and therefore already correct for this column.
-                    formula = fy_leaf
+                L = get_column_letter(col)
+                prior_leaf = (
+                    _pm_leaf_formula(kind, cc_code, prior_sfx,
+                                     period=mgr_filter)
+                    if role == "prior_month" else None)
+                if prior_leaf is not None:
+                    # A previous month: partner-level SUMIFS against that
+                    # window's data sheets, keyed on the month's Period
+                    # label. Row-arithmetic kinds (totals / %s) fall
+                    # through to the generic same-column branches below,
+                    # which are column-local and already correct here.
+                    formula = prior_leaf
+                elif role == "prior_total":
+                    formula = _prior_total_formula(
+                        kind, r, L, prior_offsets, start, rows_by_kind)
                 elif is_total_col and kind == "gross_pct":
                     # Recompute the ratio at the partner level — summing
                     # percentages doesn't make sense. Denominator is SALES
@@ -1287,50 +1410,53 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                 _cell(ws, r, col, formula, font=font, fill=fill, fmt=cell_fmt,
                       border=True)
 
-        # MIS Total column — sum across each partner's "Total" sub-column.
-        L = get_column_letter(mis_total_col)
-        if kind == "gross_pct":
-            inc_r = rows_by_kind["sales"]   # % on sales income only (v0.3.92)
-            gross_r = rows_by_kind["gross"]
-            mis_formula = (f"=IF({L}{inc_r}=0,0,"
-                           f"{L}{gross_r}/{L}{inc_r})")
-        elif kind == "net_pct":
-            inc_r = rows_by_kind["sales"]
-            net_r = rows_by_kind["net"]
-            mis_formula = (f"=IF({L}{inc_r}=0,0,"
-                           f"{L}{net_r}/{L}{inc_r})")
-        else:
-            # Reference each block's subtotal / partner-total column —
-            # the block's LAST column may now be the FY-cumulative one.
-            total_refs = []
+        # ---- MIS Total block ----
+        # One cell per column of the block: the selected period, then the
+        # same previous months. Leaf kinds add up the partner blocks'
+        # matching columns; arithmetic kinds (totals and the two %s)
+        # recompute within their own column, so every % is a true ratio
+        # of that column's own figures.
+        def block_refs(role_match, filter_match=None) -> list[str]:
+            refs = []
             for (_cc4, _nm4, cols4), start in zip(matrix, block_starts):
-                for off, (_l4, ro4, _f4) in enumerate(cols4):
-                    if ro4 in ("subtotal", "partner_total"):
-                        total_refs.append(
-                            f"{get_column_letter(start + off)}{r}")
+                for off, (_l4, ro4, f4) in enumerate(cols4):
+                    if ro4 in role_match and (filter_match is None
+                                              or f4 == filter_match):
+                        refs.append(f"{get_column_letter(start + off)}{r}")
                         break
-            mis_formula = "=" + "+".join(total_refs) if total_refs else 0
-        _cell(ws, r, mis_total_col, mis_formula, font=_BOLD,
-              fill=_TOTAL_FILL,
-              fmt=PCT if kind.endswith("_pct") else INR, border=True)
+            return refs
 
-        # MIS FY-cumulative column: leaf kinds sum the partner blocks'
-        # FY columns; arithmetic kinds (totals / %s) recompute within
-        # this column so the %s are true cumulative ratios.
-        if mis_fy_col:
-            Lf = get_column_letter(mis_fy_col)
-            fy_formula = _pm_col_arith(kind, Lf, rows_by_kind)
-            if fy_formula is None:
-                fy_refs = []
-                for (_cc5, _nm5, cols5), start in zip(matrix, block_starts):
-                    for off, (_l5, ro5, _f5) in enumerate(cols5):
-                        if ro5 == "fy_prior":
-                            fy_refs.append(
-                                f"{get_column_letter(start + off)}{r}")
-                            break
-                fy_formula = "=" + "+".join(fy_refs) if fy_refs else 0
-            _cell(ws, r, mis_fy_col, fy_formula, font=_BOLD,
-                  fill=_TOTAL_FILL,
+        for offset, (_mlbl, mrole, mfilter) in enumerate(mis_cols):
+            col = mis_start + offset
+            L = get_column_letter(col)
+            if mrole == "current":
+                if kind == "gross_pct":
+                    inc_r = rows_by_kind["sales"]     # % on sales (v0.3.92)
+                    gross_r = rows_by_kind["gross"]
+                    mis_formula = (f"=IF({L}{inc_r}=0,0,"
+                                   f"{L}{gross_r}/{L}{inc_r})")
+                elif kind == "net_pct":
+                    inc_r = rows_by_kind["sales"]
+                    net_r = rows_by_kind["net"]
+                    mis_formula = (f"=IF({L}{inc_r}=0,0,"
+                                   f"{L}{net_r}/{L}{inc_r})")
+                else:
+                    # Reference each block's subtotal / partner-total column
+                    # — a block's LAST columns are the previous months.
+                    refs = block_refs(("subtotal", "partner_total"))
+                    mis_formula = "=" + "+".join(refs) if refs else 0
+            else:
+                mis_formula = _pm_col_arith(kind, L, rows_by_kind)
+                if mis_formula is None:
+                    # Leaf kind: add up the partner blocks' matching
+                    # columns. Provisions need no special case here — each
+                    # partner's window-total cell already holds its last
+                    # month's outstanding balance, and those DO add up.
+                    refs = (block_refs(("prior_total",))
+                            if mrole == "prior_total"
+                            else block_refs(("prior_month",), mfilter))
+                    mis_formula = "=" + "+".join(refs) if refs else 0
+            _cell(ws, r, col, mis_formula, font=_BOLD, fill=_TOTAL_FILL,
                   fmt=PCT if kind.endswith("_pct") else INR, border=True)
 
         r += 1
@@ -1348,37 +1474,99 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         "is partner-level (not split by manager), so a manager column's "
         "Net is before office overhead — the partner Total deducts it, and "
         "Gross/Net % are on sales income.")
-    if fy_label:
+    if prior_active:
+        months_txt = ", ".join(month_label(p) for p in prior_months)
+        if prior.is_comparison:
+            source_txt = (
+                "the comparison month(s) ticked on the Generate MIS page — "
+                "only those are shown, read live from the ' (Cmp)' data "
+                "sheets")
+        else:
+            source_txt = (
+                "every financial-year month before the selected period (a "
+                "selection starting in April shows the whole previous FY), "
+                "read live from the Revenue / Expenses sheets' Scope = "
+                "\"FY Prior\" rows and the ' (FY)' Salary / Reimbursements "
+                "/ Provisions sheets")
         note += (
-            f" The '{fy_label}' column shows the partner's CUMULATIVE "
-            "figures for the financial-year months before the selected "
-            "period (a selection starting in April shows the whole "
-            "previous FY), read live from the Revenue / Expenses sheets' "
-            "Scope = \"FY Prior\" rows and the ' (FY)' Salary / "
-            "Reimbursements / Provisions sheets; it is context only and "
-            "is NOT included in the partner Total or MIS Total.")
+            f" The columns after each partner's total — {months_txt}"
+            + (f" and their total '{prior.label}'"
+               if len(prior_months) > 1 else "")
+            + f" — are {source_txt}. They are context only and are NOT "
+              "included in the partner Total or the MIS Total. Provisions "
+              "carry forward, so a month column shows the balance "
+              "OUTSTANDING at the end of that month and the window total "
+              "shows the last month's balance (never a sum).")
     _cell(ws, r + 1, 1, note, font=_SUB)
 
 
+def _prior_total_formula(kind: str, row: int, col_letter: str,
+                         month_offsets: list[int], block_start: int,
+                         rows_by_kind: dict):
+    """The window-total cell for a partner block's previous months.
+
+    Flows (sales, salary, expenses…) add up across the months. Provisions
+    do NOT: a provision is a carried-forward stock, so the window's figure
+    is the LAST month's outstanding balance. Arithmetic kinds (totals,
+    %s) recompute from this column's own rows, exactly like every other
+    total column.
+    """
+    arith = _pm_col_arith(kind, col_letter, rows_by_kind)
+    if arith is not None:
+        return arith
+    if not month_offsets:
+        return 0
+    first = get_column_letter(block_start + month_offsets[0])
+    last = get_column_letter(block_start + month_offsets[-1])
+    if kind == "provisions":
+        return f"={last}{row}"
+    return f"=SUM({first}{row}:{last}{row})"
+
+
 # --- Partner-level P&L formula builders (shared) ------------------------------
-# Used by the Partner-Manager comparison sheet AND the FY-cumulative column
+# Used by the Partner-Manager comparison sheet AND the previous-month columns
 # on the main Partner-Manager P&L, so both stay formula-identical.
 
-def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
+def _pm_leaf_formula(kind: str, cc_code: str, sfx: str,
+                     period: str | None = None,
+                     asat: str | None = None) -> str | None:
     """Partner-level SUMIFS for *kind* against the ``sfx`` data sheets
-    ("" = current, ``CMP`` = comparison, ``FYS`` = FY-prior cumulative).
+    ("" = current, ``CMP`` = comparison, ``FYS`` = FY to date).
     Returns ``None`` for row-arithmetic kinds (sums / %s).
 
     Revenue / Expenses are ONE sheet per edition since v0.3.118 — the
     current and FY-prior windows live together and are told apart by the
     Scope criterion, so only ``CMP`` still names a separate sheet. Salary
     / Reimbursements / Provisions keep a sheet per window.
+
+    With *period* (v0.3.120) the cell covers ONE month: every criterion
+    gains that month's Period label, ON TOP of the Scope criterion. Scope
+    stays because the selected-period columns are NOT month-keyed (the
+    reporting period can span months) and match a blank Scope cell — so
+    dropping it here would let a row appended with a blank Scope count in
+    both windows at once. v0.3.118's contract is unchanged: an appended
+    row counts towards the selected period, and typing ``FY Prior`` in
+    its Scope cell books it to the earlier window's month instead.
+
+    *asat* overrides the month used for Provisions, which are a
+    carried-forward stock: every window sheet holds one snapshot per
+    month, keyed on "As At".
     """
     rev, exp = _data_sheet_q("Revenue", sfx), _data_sheet_q("Expenses", sfx)
     lab = _q("Salary" + sfx)
     reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
     rev_s = _scope_crit(rev, SCOPE_COL_REV, sfx)
     exp_s = _scope_crit(exp, SCOPE_COL_EXP, sfx)
+    lab_p = rmb_p = ""
+    if period:
+        pl = month_label(period)
+        rev_s += f',{rev}!$J:$J,"{pl}"'         # Revenue      J = Period
+        exp_s += f',{exp}!$L:$L,"{pl}"'         # Expenses     L = Period
+        lab_p = f',{lab}!$A:$A,"{pl}"'          # Salary       A = Period
+        rmb_p = f',{reimb}!$A:$A,"{pl}"'        # Reimburse.   A = Period
+    prov_asat = asat or period                  # Provisions   H = As At
+    prov_p = (f',{prov}!$H:$H,"{month_label(prov_asat)}"'
+              if prov_asat else "")
     if kind == "sales":
         return (f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
                 f'{rev}!$I:$I,"Income"{rev_s})')
@@ -1390,10 +1578,10 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
         return "=" + f1 + "+" + f2
     if kind == "salary":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")')
+                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes"{lab_p})')
     if kind == "salary_nonbill":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")')
+                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No"{lab_p})')
     if kind == "expense":
         return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
                 f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}"{exp_s})')
@@ -1403,12 +1591,14 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
     if kind == "reimb_exp":
         # Booked by the Employee CC column (E, v0.3.109) — same criterion
         # on the current, (Cmp) and (FY) editions of the sheet.
-        return f'=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,"{cc_code}")'
+        return (f'=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,"{cc_code}"'
+                f'{rmb_p})')
     if kind == "provisions":
-        return f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}")'
+        return (f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}"'
+                f'{prov_p})')
     if kind == "overhead":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Overhead")')
+                f'{lab}!$J:$J,"Overhead"{lab_p})')
     return None
 
 
@@ -1502,9 +1692,16 @@ def _sheet_pm_comparison(wb: Workbook, data: MISData, compare: MISData,
     _cell(ws, hdr_sub_row, 1, "Particulars", font=_HEAD, fill=_SUBHEAD_FILL,
           align=_CENTER, border=True)
 
-    # Shared partner-level builders (also used by the FY-cumulative column
-    # on the main sheet).
-    leaf_formula = _pm_leaf_formula
+    # Shared partner-level builders (also used by the previous-month
+    # columns on the main sheet). The " (Cmp)" Provisions sheet holds one
+    # snapshot per comparison month (v0.3.120), so the comparison column
+    # pins the As At to the LAST of them — provisions are a
+    # carried-forward stock and must never be summed across months.
+    cmp_asat = max(compare.options.periods) if compare.options.periods else None
+
+    def leaf_formula(kind, cc_code, sfx):
+        return _pm_leaf_formula(kind, cc_code, sfx,
+                                asat=cmp_asat if sfx == CMP else None)
 
     # Same line plan as the main Partner-Manager P&L.
     plan = [
@@ -1603,28 +1800,30 @@ def _sheet_service(wb: Workbook, data: MISData, lbl: dict) -> None:
 
 
 def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
-                          fy_label: str | None = None,
-                          fy_data: MISData | None = None) -> None:
+                          prior: "PriorWindow | None" = None) -> None:
     """Client × period billing matrix.
 
     One row per client (canonical name from the master, or ``(unmapped)``
     when the voucher's party didn't resolve). Columns: Client | Grand
-    Total | one per FY month BEFORE the selected period | one per
-    selected period. EVERY month cell is a live SUMIFS by Client +
-    Period label over the "Revenue" data sheet (v0.3.117; they were
-    baked values) — which since v0.3.118 carries the prior-FY months
-    too, so both column blocks read the one sheet and a sales row
-    edited or added on it post-generation flows straight through.
-    Clients billed only in the prior window still get a row (0 current),
-    so the history never undercounts. The Grand Total sums ONLY the
-    selected period's columns. Credit / Debit Notes flow through with
-    signs intact. Sorted by Grand Total descending.
+    Total | one per PREVIOUS month | one per selected period. EVERY month
+    cell is a live SUMIFS by Client + Period label over a revenue
+    register (v0.3.117; they were baked values) — the "Revenue" sheet,
+    which since v0.3.118 carries the prior-FY months too, or
+    "Revenue (Cmp)" for an operator-chosen comparison window (v0.3.120)
+    — so a sales row edited or added post-generation flows straight
+    through. Clients billed only in the previous window still get a row
+    (0 current), so the history never undercounts. The Grand Total sums
+    ONLY the selected period's columns. Credit / Debit Notes flow through
+    with signs intact. Sorted by Grand Total descending.
     """
     if not data.options.periods:
         return
     periods = sorted(data.options.periods)
-    has_fy = bool(fy_label and fy_data is not None)
-    fy_months = sorted(fy_data.options.periods) if has_fy else []
+    has_fy = bool(prior is not None and prior.active)
+    fy_months = sorted(prior.periods) if has_fy else []
+    fy_label = prior.label if has_fy else None
+    fy_data = prior.data if has_fy else None
+    prior_rev = _data_sheet_q("Revenue", prior.suffix) if has_fy else None
 
     # Group by resolved client; unresolved parties group by their raw
     # party name (one row per distinct vendor/client as Tally spells it)
@@ -1679,9 +1878,9 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
 
     _cell(ws, 1, 1, "Client-wise Billing", font=_TITLE)
     _cell(ws, 2, 1, "Period(s): " + periods_label(periods)
-          + (f".  Columns {fy_label} show each FY month before the "
-             "selected period, month by month; the Grand Total sums only "
-             "the selected period's columns." if has_fy else ""),
+          + (f".  Columns {fy_label} show the previous months "
+             f"({prior.source}), month by month; the Grand Total sums "
+             "only the selected period's columns." if has_fy else ""),
           font=_SUB)
     hrow = 4
     headers = (["Client", "Grand Total"]
@@ -1703,13 +1902,20 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
         _cell(ws, r, 2,
               f"=SUM({first_period_col}{r}:{last_period_col}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
-        # One live SUMIFS per month — prior-FY months then the selected
-        # ones — over the Revenue sheet's Client (G) + Period (J)
-        # columns. Since v0.3.118 both windows are on that one sheet, and
-        # a month belongs to exactly one of them, so the Period label
-        # alone picks the right rows: no Scope criterion needed here.
-        for i, p in enumerate(fy_months + periods):
+        # One live SUMIFS per month — the previous months then the
+        # selected ones — over the revenue register's Client (G) +
+        # Period (J) columns. The FY window shares the "Revenue" sheet
+        # with the selected period (v0.3.118) and a month belongs to
+        # exactly one of them, so the Period label alone picks the right
+        # rows and no Scope criterion is needed; a comparison window
+        # reads its own "Revenue (Cmp)" sheet (v0.3.120).
+        for i, p in enumerate(fy_months):
             _cell(ws, r, fy0 + i,
+                  f'=SUMIFS({prior_rev}!$H:$H,{prior_rev}!$G:$G,$A{r},'
+                  f'{prior_rev}!$J:$J,"{month_label(p)}")',
+                  fmt=INR, border=True)
+        for i, p in enumerate(periods):
+            _cell(ws, r, p0 + i,
                   f'=SUMIFS({rev}!$H:$H,{rev}!$G:$G,$A{r},'
                   f'{rev}!$J:$J,"{month_label(p)}")',
                   fmt=INR, border=True)
@@ -1962,16 +2168,34 @@ def _sheet_expenses(wb, data: MISData, lbl: dict, suffix: str = "",
                       rows)
 
 
-def _sheet_provisions(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
+def _sheet_provisions(wb, data: MISData, lbl: dict, suffix: str = "",
+                      asat_periods: list[str] | None = None) -> None:
     """Outstanding provision costs carried into the reporting month.
 
     Always created (even with no rows) so the Cost Centre / Entity /
     Partner-Manager P&L SUMIFS over the Remaining column resolve to 0
     rather than #REF. ``CostCentre`` holds the partner code and ``Entity``
     the entity name, matching the criteria those P&L sheets use.
+    ``Period`` (A) is the month the provision was BOOKED.
+
+    A provision is a carried-forward stock, so it can't be summed across
+    months the way revenue can. With *asat_periods* (v0.3.120 — the
+    previous-months windows) the sheet holds one snapshot **per month**,
+    each row stamped with the month it is outstanding at in the new
+    **As At** column (H); a month column SUMIFS just its own snapshot.
+    Without it there is a single snapshot, as at the last reporting
+    month, and no As At criterion is used — so a row the operator appends
+    still counts.
     """
+    if asat_periods:
+        facts = provisions_as_at(asat_periods)
+    else:
+        facts = data.provision_facts
+    default_asat = (max(data.options.periods)
+                    if data.options.periods else None)
     rows = []
-    for f in data.provision_facts:
+    for f in facts:
+        asat = f.get("asat_period") or f.get("period") or default_asat
         rows.append([
             month_label(f.get("provision_period"))
             if f.get("provision_period") else "",
@@ -1981,12 +2205,13 @@ def _sheet_provisions(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
             round(f.get("original", 0.0), 2),
             round(f.get("adjusted", 0.0), 2),
             round(f["amount"], 2),
+            month_label(asat) if asat else "",
         ])
     _write_data_sheet(
         wb, "Provisions" + suffix,
         ["Period", "Entity", "CostCentre", "Client",
-         "Original", "Adjusted", "Remaining"],
-        [12, 24, 14, 28, 16, 16, 16], rows)
+         "Original", "Adjusted", "Remaining", "As At"],
+        [12, 24, 14, 28, 16, 16, 16, 12], rows)
 
 
 def _fmt_date(raw):
@@ -2423,16 +2648,32 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
 
 # --- Client Register ---------------------------------------------------------
 
-def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
+def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict,
+                           prior: "PriorWindow | None" = None) -> None:
     """Clients billed per period, flagging only NEW clients (first ever
     billed) — the client analogue of the Employee Register. Clients bill
     irregularly, so a month's absence is NOT treated as "lost"; the system
     remembers every past client and only additions are flagged. Summary
     COUNTIFS over a per-(period, client) roster, plus a 'Clients by cost
-    centre' breakdown beside it."""
-    reg = data.client_register
+    centre' breakdown beside it.
+
+    The register covers the PREVIOUS months as well (v0.3.120, operator
+    ask): a Jul-26 MIS lists Apr-26, May-26 and Jun-26 above it, so the
+    board reads the year's client movement in one place. Which months
+    those are is the same :class:`PriorWindow` the P&L columns use — the
+    financial year to date, or exactly the comparison months when the
+    operator ticked some. A Scope column tells the two apart.
+    """
+    prior_months = (set(prior.periods)
+                    if prior is not None and prior.active else set())
+    prior_reg = ([r for r in prior.data.client_register
+                  if r["period"] in prior_months] if prior_months else [])
+    reg = sorted(prior_reg + list(data.client_register),
+                 key=lambda r: r["period"])
     if not reg:
         return
+    scope_of = {r["period"]: ("Previous" if r["period"] in prior_months
+                              else "Reported") for r in reg}
     ws = wb.create_sheet("Client Register")
     ws.sheet_view.showGridLines = False
     for col, w in (("A", 12), ("B", 32), ("C", 16), ("D", 10)):
@@ -2444,7 +2685,10 @@ def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
           "for the FIRST time ever (across all months on record). Clients "
           "bill irregularly, so a month's absence isn't shown as lost — the "
           "system keeps remembering every past client. Grouped by the "
-          "client's cost centre.", font=_SUB)
+          "client's cost centre."
+          + (f"  The 'Previous' months ({prior.source}) are listed "
+             "alongside the reported one so the year's client movement "
+             "reads in one place." if prior_months else ""), font=_SUB)
 
     # Pre-compute the roster so the summary COUNTIFS know their range.
     roster_rows: list[list] = []
@@ -2465,14 +2709,18 @@ def _sheet_client_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     rD = f"$D${roster_first}:$D${roster_last}"
 
     # ---- 1. Summary -----------------------------------------------------
-    _header_row(ws, sum_hrow, ["Period", "Active Clients", "New Clients"])
+    # Scope (B) is a label, not a criterion — every count stays keyed on
+    # the Period alone, exactly as before.
+    _header_row(ws, sum_hrow,
+                ["Period", "Scope", "Active Clients", "New Clients"])
     for i, r in enumerate(reg):
         row = sum_first + i
         _cell(ws, row, 1, month_label(r["period"]), border=True)
+        _cell(ws, row, 2, scope_of[r["period"]], border=True, align=_CENTER)
         # Active = every roster row for the period; New = the flagged ones.
-        _cell(ws, row, 2, f'=COUNTIFS({rA},$A{row})',
+        _cell(ws, row, 3, f'=COUNTIFS({rA},$A{row})',
               font=_BOLD, border=True, align=_CENTER)
-        _cell(ws, row, 3, f'=COUNTIFS({rA},$A{row},{rD},"New")',
+        _cell(ws, row, 4, f'=COUNTIFS({rA},$A{row},{rD},"New")',
               border=True, align=_CENTER)
 
     # ---- 2. Roster -------------------------------------------------------

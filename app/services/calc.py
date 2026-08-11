@@ -1146,6 +1146,83 @@ def _build_reimbursement_facts(data: MISData, options: MISOptions,
         })
 
 
+def _load_provisions() -> tuple[list[dict], dict[int, list]]:
+    """Every active provision + its adjustments, read once."""
+    with transaction() as conn:
+        provs = [dict(r) for r in conn.execute(
+            "SELECT * FROM provisions WHERE active = 1")]
+        adjs = conn.execute(
+            "SELECT provision_id, amount, adjusted_period "
+            "FROM provision_adjustments").fetchall()
+    adj_by: dict[int, list] = {}
+    for a in adjs:
+        adj_by.setdefault(a["provision_id"], []).append(dict(a))
+    return provs, adj_by
+
+
+def _provision_snapshot(as_at: str, provs: list[dict],
+                        adj_by: dict[int, list], masters: dict) -> list[dict]:
+    """Outstanding provisions **as at** the month *as_at*.
+
+    A provision is a stock, not a flow: the snapshot holds every provision
+    booked on or before *as_at* at its remaining value (original minus the
+    adjustments recorded up to and including that month). Both the
+    reporting period's facts and the previous months' columns are built
+    from this one function, so a month column reads exactly what that
+    month's own MIS would have shown.
+    """
+    clients = masters["clients"]
+    entities = masters["entities"]
+    out: list[dict] = []
+    for p in provs:
+        # Not yet booked as of the reporting month (string compare is safe
+        # for 'YYYY-MM').
+        if (p["period"] or "") > as_at:
+            continue
+        adjusted = sum(
+            float(a["amount"] or 0.0) for a in adj_by.get(p["id"], [])
+            if (a["adjusted_period"] or "") <= as_at)
+        remaining = round(float(p["amount"] or 0.0) - adjusted, 2)
+        if remaining <= 0.005:
+            continue
+        client = clients.get(p["client_id"])
+        cc_id = client["cost_centre_id"] if client else None
+        out.append({
+            "period": as_at,
+            "asat_period": as_at,
+            "provision_period": p["period"],
+            "cost_centre_id": cc_id,
+            "entity_id": p["entity_id"],
+            "client_id": p["client_id"],
+            "client_name": (client or {}).get("canonical_name"),
+            "entity_name": (entities.get(p["entity_id"]) or {}).get("name"),
+            "original": round(float(p["amount"] or 0.0), 2),
+            "adjusted": round(adjusted, 2),
+            "amount": remaining,
+        })
+    return out
+
+
+def provisions_as_at(periods: list[str]) -> list[dict]:
+    """One outstanding-provision snapshot **per month** in *periods*.
+
+    Used for the previous-months columns (v0.3.120). Provisions carry
+    forward, so they cannot be summed across months the way revenue or
+    salary can — each month needs its own as-at snapshot, and every fact
+    is stamped with ``asat_period`` (the workbook's "As At" column) so a
+    month column can SUMIFS just its own snapshot.
+    """
+    months = sorted({p for p in (periods or []) if p})
+    if not months:
+        return []
+    masters = _load_masters()
+    provs, adj_by = _load_provisions()
+    out: list[dict] = []
+    for p in months:
+        out.extend(_provision_snapshot(p, provs, adj_by, masters))
+    return out
+
+
 def _build_provision_facts(data: MISData, options: MISOptions,
                             masters: dict) -> None:
     """Build one fact per OUTSTANDING provision, carried forward to the
@@ -1161,43 +1238,9 @@ def _build_provision_facts(data: MISData, options: MISOptions,
     """
     if not options.periods:
         return
-    clients = masters["clients"]
-    entities = masters["entities"]
-    max_p = max(options.periods)
-    with transaction() as conn:
-        provs = [dict(r) for r in conn.execute(
-            "SELECT * FROM provisions WHERE active = 1")]
-        adjs = conn.execute(
-            "SELECT provision_id, amount, adjusted_period "
-            "FROM provision_adjustments").fetchall()
-    adj_by: dict[int, list] = {}
-    for a in adjs:
-        adj_by.setdefault(a["provision_id"], []).append(a)
-    for p in provs:
-        # Not yet booked as of the reporting month (string compare is safe
-        # for 'YYYY-MM').
-        if (p["period"] or "") > max_p:
-            continue
-        adjusted = sum(
-            float(a["amount"] or 0.0) for a in adj_by.get(p["id"], [])
-            if (a["adjusted_period"] or "") <= max_p)
-        remaining = round(float(p["amount"] or 0.0) - adjusted, 2)
-        if remaining <= 0.005:
-            continue
-        client = clients.get(p["client_id"])
-        cc_id = client["cost_centre_id"] if client else None
-        data.provision_facts.append({
-            "period": max_p,
-            "provision_period": p["period"],
-            "cost_centre_id": cc_id,
-            "entity_id": p["entity_id"],
-            "client_id": p["client_id"],
-            "client_name": (client or {}).get("canonical_name"),
-            "entity_name": (entities.get(p["entity_id"]) or {}).get("name"),
-            "original": round(float(p["amount"] or 0.0), 2),
-            "adjusted": round(adjusted, 2),
-            "amount": remaining,
-        })
+    provs, adj_by = _load_provisions()
+    data.provision_facts.extend(
+        _provision_snapshot(max(options.periods), provs, adj_by, masters))
 
 
 # --- roll-ups ----------------------------------------------------------------

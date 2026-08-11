@@ -540,8 +540,17 @@ def _employee_section(data: MISData, ch: _Charts) -> str:
               "per employee = Office indirect expenses ÷ active employees.")
 
 
-def _client_register_section(data: MISData, ch: _Charts) -> str:
-    reg = data.client_register
+def _client_register_section(data: MISData, ch: _Charts,
+                             prior=None) -> str:
+    # The previous months come first, exactly like the workbook's Client
+    # Register sheet (v0.3.120) — the FY to date, or the operator's
+    # comparison selection — so the two artifacts show the same months.
+    prior_months = (set(prior.periods)
+                    if prior is not None and prior.active else set())
+    prior_reg = ([r for r in prior.data.client_register
+                  if r["period"] in prior_months] if prior_months else [])
+    reg = sorted(prior_reg + list(data.client_register),
+                 key=lambda r: r["period"])
     if not reg:
         return ""
     periods = [r["period"] for r in reg]
@@ -576,7 +585,9 @@ def _client_register_section(data: MISData, ch: _Charts) -> str:
         _card("<h3>By period</h3>", _table(headers, rows, {1, 2})),
         intro="Active = billed on a sales voucher in the period. New = billed "
               "for the first time ever (clients bill irregularly, so a "
-              "month's absence isn't treated as lost).")
+              "month's absence isn't treated as lost)."
+              + (f"  Includes the previous months ({prior.source})."
+                 if prior_months else ""))
 
 
 # --- assets ------------------------------------------------------------------
@@ -808,8 +819,15 @@ function setupTables(){
 
 
 def generate_dashboard(data: MISData, path: str | Path,
-                       compare: MISData | None = None) -> Path:
-    """Write the interactive HTML dashboard for *data* to *path*."""
+                       compare: MISData | None = None,
+                       prior=None) -> Path:
+    """Write the interactive HTML dashboard for *data* to *path*.
+
+    *prior* is the workbook's :class:`~app.services.report.PriorWindow` —
+    the previous months shown beside the reporting period. Passing it in
+    keeps the dashboard's Client Register on the same months as the
+    workbook sheet; leaving it out simply omits them.
+    """
     global _table_seq
     _table_seq = 0
     lbl = report._labels()
@@ -850,7 +868,7 @@ def generate_dashboard(data: MISData, path: str | Path,
         _client_section(data, lbl, ch),
         _provision_section(data, lbl, ch),
         _employee_section(data, ch),
-        _client_register_section(data, ch),
+        _client_register_section(data, ch, prior),
     ]
     sections = [s for s in sections if s]
 

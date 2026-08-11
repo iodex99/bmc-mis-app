@@ -26,7 +26,7 @@ from .. import repository as repo
 from ..services import vouchers as vsvc
 from ..util import fmt_inr, periods_label
 from ..services.calc import MISOptions, compute
-from ..services.report import generate
+from ..services.report import generate, prior_window
 from ..services.dashboard import generate_dashboard
 
 
@@ -77,7 +77,13 @@ class GeneratePage(QWidget):
         self.cmp_box = QGroupBox("Compare with (optional)")
         cmp_box = self.cmp_box
         cv = QVBoxLayout(cmp_box)
-        cv.addWidget(QLabel("Tick months to show as a comparison column."))
+        cmp_note = QLabel(
+            "Tick months to show as comparison columns. Leave this EMPTY "
+            "and the MIS shows every earlier month of the financial year "
+            "instead (a Jul-26 MIS shows Apr-26, May-26, Jun-26). Tick "
+            "months here and ONLY those are produced.")
+        cmp_note.setWordWrap(True)
+        cv.addWidget(cmp_note)
         self.compare_list = QListWidget()
         self.compare_list.setSelectionMode(QListWidget.NoSelection)
         self.compare_list.itemChanged.connect(self._update_box_titles)
@@ -323,7 +329,12 @@ class GeneratePage(QWidget):
                     periods=compare_periods,
                     include_reimbursement=opts.include_reimbursement,
                     location_ids=opts.location_ids))
-            out = generate(data, path, compare_data)
+            # The previous-months window — the comparison selection when
+            # there is one, else the financial year to date. Built once
+            # and shared, so the workbook and the dashboard show the
+            # same months (and the FY window is computed only once).
+            prior = prior_window(opts, compare_data)
+            out = generate(data, path, compare_data, prior)
         except Exception as exc:
             QMessageBox.critical(self, "Generation failed", str(exc))
             return
@@ -333,7 +344,7 @@ class GeneratePage(QWidget):
         dash_path = Path(out).with_name(Path(out).stem + "_Dashboard.html")
         dash_ok = True
         try:
-            generate_dashboard(data, dash_path, compare_data)
+            generate_dashboard(data, dash_path, compare_data, prior)
         except Exception:                                   # noqa: BLE001
             dash_ok = False
         if dash_ok:

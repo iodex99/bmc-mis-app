@@ -19,9 +19,12 @@ See [PROJECT.md](PROJECT.md) for the full specification, decisions and design.
    clients, services and annual targets — all add/edit/deactivate.
 4. **Generate MIS** — pick the month(s), set the reimbursements toggle and an
    optional comparison period, then export a multi-sheet Excel workbook where
-   every report figure is a live formula. Office overhead is computed from
-   the books automatically (Office-cost-centre indirect expenses ÷ active
-   employees — see the Employee Register sheet).
+   every report figure is a live formula. Beside the reported month the
+   workbook shows the **previous months, one column each**: the financial
+   year so far (a Jul-26 MIS shows Apr-26, May-26, Jun-26), or exactly the
+   months ticked under "Compare with" when you tick any. Office overhead is
+   computed from the books automatically (Office-cost-centre indirect
+   expenses ÷ active employees — see the Employee Register sheet).
 
 All history is kept in a local SQLite database, so any period can be
 re-reported or compared at any time.
