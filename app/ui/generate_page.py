@@ -26,7 +26,7 @@ from .. import repository as repo
 from ..services import vouchers as vsvc
 from ..util import fmt_inr, periods_label
 from ..services.calc import MISOptions, compute
-from ..services.report import generate, prior_window
+from ..services.report import build_windows, generate
 from ..services.dashboard import generate_dashboard
 
 
@@ -43,8 +43,13 @@ class GeneratePage(QWidget):
         heading.setObjectName("pageHeading")
         root.addWidget(heading)
         note = QLabel("Select one or more months, set the options and export "
-                      "the board-ready Excel workbook.")
+                      "the board-ready Excel workbook. The comparison "
+                      "periods are worked out for you: alongside the month "
+                      "you pick, the MIS carries the financial year so far "
+                      "and the year to date against the same period last "
+                      "year.")
         note.setObjectName("pageNote")
+        note.setWordWrap(True)
         root.addWidget(note)
 
         body = QHBoxLayout()
@@ -73,25 +78,11 @@ class GeneratePage(QWidget):
         pv.addLayout(sel_bar)
         body.addWidget(period_box, 1)
 
-        # --- comparison period (optional) ----------------------------------
-        self.cmp_box = QGroupBox("Compare with (optional)")
-        cmp_box = self.cmp_box
-        cv = QVBoxLayout(cmp_box)
-        cmp_note = QLabel(
-            "Tick months to show as comparison columns. Leave this EMPTY "
-            "and the MIS shows every earlier month of the financial year "
-            "instead (a Jul-26 MIS shows Apr-26, May-26, Jun-26). Tick "
-            "months here and ONLY those are produced.")
-        cmp_note.setWordWrap(True)
-        cv.addWidget(cmp_note)
-        self.compare_list = QListWidget()
-        self.compare_list.setSelectionMode(QListWidget.NoSelection)
-        self.compare_list.itemChanged.connect(self._update_box_titles)
-        cv.addWidget(self.compare_list)
-        clear_cmp = QPushButton("Clear comparison")
-        clear_cmp.clicked.connect(self._clear_compare)
-        cv.addWidget(clear_cmp)
-        body.addWidget(cmp_box, 1)
+        # The "Compare with" month list was removed in v0.3.121: the
+        # operator picks the reporting month and nothing else. Every
+        # comparison in the workbook is now derived from it — the FY
+        # months before it, and the year to date against the same span a
+        # year earlier (see report.build_windows).
 
         # --- options --------------------------------------------------------
         opt_box = QGroupBox("Options")
@@ -140,7 +131,7 @@ class GeneratePage(QWidget):
         self._reload_periods()
 
     def _reload_periods(self) -> None:
-        """Repopulate both month lists, preserving the operator's ticks.
+        """Repopulate the month list, preserving the operator's ticks.
 
         The FIRST time the page is shown, the LATEST month is pre-ticked —
         the firm reports monthly, so that is the overwhelmingly common run.
@@ -156,49 +147,35 @@ class GeneratePage(QWidget):
         next report either.
         """
         checked = self._selected_periods()
-        compare = self._compare_periods()
         periods = vsvc.list_periods()
         if periods and not self._periods_initialised:
             checked = [max(periods)]        # 'YYYY-MM' sorts chronologically
             self._periods_initialised = True
         self.period_list.clear()
-        self.compare_list.clear()
         for p in periods:
             item = QListWidgetItem(_pretty(p))
             item.setData(Qt.UserRole, p)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if p in checked else Qt.Unchecked)
             self.period_list.addItem(item)
-
-            citem = QListWidgetItem(_pretty(p))
-            citem.setData(Qt.UserRole, p)
-            citem.setFlags(citem.flags() | Qt.ItemIsUserCheckable)
-            citem.setCheckState(Qt.Checked if p in compare else Qt.Unchecked)
-            self.compare_list.addItem(citem)
         self._update_box_titles()
         self._reload_locations()
 
     def _update_box_titles(self, _item=None) -> None:
-        """Put the live selection in the two group-box titles.
+        """Put the live selection in the group-box title.
 
         The operator's complaint behind v0.3.119 was generating an FY-wide
         MIS without realising it, so what is ticked has to be readable
         without scrolling the list.
         """
-        def summarise(periods: list[str], empty: str) -> str:
-            if not periods:
-                return empty
+        periods = self._selected_periods()
+        if not periods:
+            summary = "none selected"
+        else:
             label = periods_label(periods)
-            if len(label) > 34:                  # long comma lists
-                return f"{len(periods)} months"
-            return label
-
-        self.period_box.setTitle(
-            "Reporting period(s) — "
-            + summarise(self._selected_periods(), "none selected"))
-        self.cmp_box.setTitle(
-            "Compare with — "
-            + summarise(self._compare_periods(), "none (optional)"))
+            summary = (f"{len(periods)} months" if len(label) > 34
+                       else label)
+        self.period_box.setTitle("Reporting period(s) — " + summary)
 
     def _reload_locations(self) -> None:
         """Populate the location checklist (all checked by default; the
@@ -245,10 +222,6 @@ class GeneratePage(QWidget):
             self.period_list.item(i).setCheckState(
                 Qt.Checked if state else Qt.Unchecked)
 
-    def _clear_compare(self) -> None:
-        for i in range(self.compare_list.count()):
-            self.compare_list.item(i).setCheckState(Qt.Unchecked)
-
     def _checked(self, widget) -> list[str]:
         out = []
         for i in range(widget.count()):
@@ -259,9 +232,6 @@ class GeneratePage(QWidget):
 
     def _selected_periods(self) -> list[str]:
         return self._checked(self.period_list)
-
-    def _compare_periods(self) -> list[str]:
-        return self._checked(self.compare_list)
 
     def _options(self) -> MISOptions | None:
         periods = self._selected_periods()
@@ -280,13 +250,7 @@ class GeneratePage(QWidget):
         if not opts:
             return
         data = compute(opts)
-        compare_periods = self._compare_periods()
-        compare_data = None
-        if compare_periods:
-            compare_data = compute(MISOptions(
-                periods=compare_periods,
-                include_reimbursement=opts.include_reimbursement,
-                location_ids=opts.location_ids))
+        windows = build_windows(opts)
 
         def block(label: str, periods: list[str], d) -> str:
             n_rev = len(d.revenue_facts)
@@ -304,9 +268,15 @@ class GeneratePage(QWidget):
                 f"{len(d.cost_centres)}"
                 f"</div>")
 
-        text = "<b>Preview</b><br><br>" + block("Primary", opts.periods, data)
-        if compare_data:
-            text += block("Comparison", compare_periods, compare_data)
+        text = "<b>Preview</b><br><br>" + block(
+            "Reporting period", opts.periods, data)
+        # The derived context windows, so the operator sees what the
+        # workbook will carry beside the reported month (v0.3.121).
+        for label, win in (("Financial year so far", windows.fy_prior),
+                           ("Year to date", windows.ytd),
+                           ("Same period last year", windows.last_year)):
+            if win.data is not None:
+                text += block(label, win.periods, win.data)
         self.summary.setText(text)
 
     def _generate(self) -> None:
@@ -320,21 +290,13 @@ class GeneratePage(QWidget):
             self, "Save MIS workbook", str(default), "Excel files (*.xlsx)")
         if not path:
             return
-        compare_periods = self._compare_periods()
         try:
             data = compute(opts)
-            compare_data = None
-            if compare_periods:
-                compare_data = compute(MISOptions(
-                    periods=compare_periods,
-                    include_reimbursement=opts.include_reimbursement,
-                    location_ids=opts.location_ids))
-            # The previous-months window — the comparison selection when
-            # there is one, else the financial year to date. Built once
-            # and shared, so the workbook and the dashboard show the
-            # same months (and the FY window is computed only once).
-            prior = prior_window(opts, compare_data)
-            out = generate(data, path, compare_data, prior)
+            # The three context windows (FY so far, year to date, same
+            # period last year) — built once and shared, so the workbook
+            # and the dashboard agree and nothing is computed twice.
+            windows = build_windows(opts)
+            out = generate(data, path, windows)
         except Exception as exc:
             QMessageBox.critical(self, "Generation failed", str(exc))
             return
@@ -344,7 +306,7 @@ class GeneratePage(QWidget):
         dash_path = Path(out).with_name(Path(out).stem + "_Dashboard.html")
         dash_ok = True
         try:
-            generate_dashboard(data, dash_path, compare_data, prior)
+            generate_dashboard(data, dash_path, prior=windows.fy_prior)
         except Exception:                                   # noqa: BLE001
             dash_ok = False
         if dash_ok:

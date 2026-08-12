@@ -542,9 +542,8 @@ def _employee_section(data: MISData, ch: _Charts) -> str:
 
 def _client_register_section(data: MISData, ch: _Charts,
                              prior=None) -> str:
-    # The previous months come first, exactly like the workbook's Client
-    # Register sheet (v0.3.120) — the FY to date, or the operator's
-    # comparison selection — so the two artifacts show the same months.
+    # The financial year so far comes first, exactly like the workbook's
+    # Client Register sheet (v0.3.120), so the two artifacts agree.
     prior_months = (set(prior.periods)
                     if prior is not None and prior.active else set())
     prior_reg = ([r for r in prior.data.client_register
@@ -586,7 +585,7 @@ def _client_register_section(data: MISData, ch: _Charts,
         intro="Active = billed on a sales voucher in the period. New = billed "
               "for the first time ever (clients bill irregularly, so a "
               "month's absence isn't treated as lost)."
-              + (f"  Includes the previous months ({prior.source})."
+              + ("  Includes the earlier months of this financial year."
                  if prior_months else ""))
 
 
@@ -823,8 +822,8 @@ def generate_dashboard(data: MISData, path: str | Path,
                        prior=None) -> Path:
     """Write the interactive HTML dashboard for *data* to *path*.
 
-    *prior* is the workbook's :class:`~app.services.report.PriorWindow` —
-    the previous months shown beside the reporting period. Passing it in
+    *prior* is the workbook's FY-so-far :class:`~app.services.report.Window`
+    — the financial-year months before the reporting period. Passing it in
     keeps the dashboard's Client Register on the same months as the
     workbook sheet; leaving it out simply omits them.
     """

@@ -1203,26 +1203,6 @@ def _provision_snapshot(as_at: str, provs: list[dict],
     return out
 
 
-def provisions_as_at(periods: list[str]) -> list[dict]:
-    """One outstanding-provision snapshot **per month** in *periods*.
-
-    Used for the previous-months columns (v0.3.120). Provisions carry
-    forward, so they cannot be summed across months the way revenue or
-    salary can — each month needs its own as-at snapshot, and every fact
-    is stamped with ``asat_period`` (the workbook's "As At" column) so a
-    month column can SUMIFS just its own snapshot.
-    """
-    months = sorted({p for p in (periods or []) if p})
-    if not months:
-        return []
-    masters = _load_masters()
-    provs, adj_by = _load_provisions()
-    out: list[dict] = []
-    for p in months:
-        out.extend(_provision_snapshot(p, provs, adj_by, masters))
-    return out
-
-
 def _build_provision_facts(data: MISData, options: MISOptions,
                             masters: dict) -> None:
     """Build one fact per OUTSTANDING provision, carried forward to the

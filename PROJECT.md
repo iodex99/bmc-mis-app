@@ -1,8 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-08-11
+> Living document. Updated as we discuss. Last updated: 2026-08-12
 >
-> Current version: **v0.3.120** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.121** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,77 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.121 — "Compare with" is gone; every comparison is derived
+
+Operator ask, in three parts: drop the comparison month-picker, give the
+Partner-Manager P&L **one** column for the reported month and **one** for
+the earlier months of the financial year, and turn the "(Cmp)" sheet into
+a **year-on-year** view.
+
+**1. The "Compare with" section is removed from the app.** The operator
+picks the reporting month(s) and nothing else. Every comparison in the
+workbook is now derived from that one choice, so there is no way to
+produce a mismatched pair by accident. `report.build_windows()` derives
+three spans, all computed with the same calc engine so every figure stays
+a live `SUMIFS`:
+
+| Window | For a Jun-26 MIS | Where it shows |
+|---|---|---|
+| **FY so far** — the FY months BEFORE the selection | Apr-26 to May-26 | one column per partner block on the Partner-Manager P&L; a column per month on Client Billing; a row per month on the Client Register |
+| **Year to date** — April through the reported month | Apr-26 to Jun-26 | "Partner-Manager P&L (Cmp)", Comparatives |
+| **Same period last year** | Apr-25 to Jun-25 | the same two sheets |
+
+**2. Partner-Manager P&L — two columns, not many.** Each partner block
+ends with `Jun-26 | Apr-26 to May-26`. v0.3.120 broke the earlier months
+out one column per month; with eight partners that ran past a hundred
+columns and was unreadable, so the cumulative column is back (the
+v0.3.102 shape). A selection starting in April still shows the whole
+previous FY there, as it has since v0.3.102.
+
+**3. "Partner-Manager P&L (Cmp)" is now year-on-year.** Per partner:
+`Apr-26 to Jun-26 | Apr-25 to Jun-25 | Δ`, on the full P&L line plan,
+read from new `" (YTD)"` and `" (LY)"` data-sheet sets. Both windows have
+their own sheets because the year to date CONTAINS the reported month —
+merging them into the main registers would double-count. **Comparatives**
+follows the same two windows, per cost centre, with both sides built by
+the SAME formula so the columns are like for like; its per-partner profit
+ties to the (Cmp) P&L's Net Profit exactly.
+
+The year to date is a true year to date: it fills any gap a
+non-contiguous selection leaves (Apr-26 + Jun-26 selected → the window is
+Apr-26..Jun-26, May included), which is why it needs its own data rather
+than being derived by adding two columns together.
+
+**Provisions** go back to one snapshot per sheet — the balance
+outstanding at the end of that window, named in the **As At** column
+(v0.3.120) but no longer filtered on, so an appended row still counts.
+They are a carried-forward stock, never a sum of months.
+
+The **Cover** carries the three derived windows ("Previous months this
+FY", "Year to date", "Same period last year") in place of the old
+comparison row, and the Generate page's preview shows the totals for all
+three before the operator exports.
+
+Verified with a 301-check suite driving **real Excel** plus a 33-check
+offscreen UI smoke. The seed now holds a full prior financial year, so
+the year-on-year columns are checked against real figures rather than
+zeros. Every window is proved equal to a fresh calc-engine run, line by
+line, for each partner: a Jun-26 MIS reads PM 60,000 for the month and
+1,40,000 for Apr–May; the (Cmp) sheet reads 2,00,000 against last year's
+1,55,000 with a Δ of 45,000, and a 5,00,000 Sep-25 invoice inside last
+year's FY but outside Apr–Jun provably stays out. Also verified:
+Comparatives ties to the (Cmp) P&L; provisions read 1,00,000 outstanding
+at end-May and 60,000 at end-June (never 1,60,000); an April MIS shows
+Apr-26 vs Apr-25 alongside the whole previous FY; a non-contiguous
+Apr+Jun selection still produces an Apr..Jun year to date; a row appended
+to Revenue with a blank Scope counts in the reported month only and the
+same row tagged `FY Prior` moves to the FY-so-far column; a row appended
+to the (YTD) register reaches the year-on-year sheet and nothing else;
+the whole workbook still ties out to the calc engine sheet by sheet; and
+an empty database still builds. The UI smoke proves the "Compare with"
+box, its list and its methods are all gone, that only the period and
+location lists remain, and that the v0.3.119 selection rules still hold.
 
 ### v0.3.120 — Previous months, month by month — and the comparison selection decides which
 
