@@ -25,8 +25,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import config, repository as repo
+from .. import repository as repo
 from ..services import manual_entry as ME
+from ..util import fmt_inr
 from .master_data import _month_year_combos, _period_from
 
 
@@ -85,10 +86,10 @@ class VoucherForm(_FormBase):
 
     def __init__(self) -> None:
         super().__init__()
-        form = QFormLayout(self)
+        form = self._form = QFormLayout(self)
         self.kind = QComboBox()
-        self.kind.addItem("Sales (revenue)", config.VCH_SALES)
-        self.kind.addItem("Expense / Purchase", config.VCH_EXPENSE)
+        for vt in ME.VOUCHER_TYPES:
+            self.kind.addItem(vt.label, vt)
         self.kind.currentIndexChanged.connect(self._toggle_kind)
         self.entity = self._fk_combo("entities", allow_none=True)
         self.date = QDateEdit(QDate.currentDate())
@@ -107,15 +108,24 @@ class VoucherForm(_FormBase):
         self.vch_no = QLineEdit()
         self.vch_no.setPlaceholderText("optional — auto-generated if blank")
         self.desc = QLineEdit()
+        # A credit note is typed in as a positive figure and stored
+        # negative, so the form says so rather than leaving the operator
+        # to guess whether a minus sign belongs in the box.
+        self._return_note = QLabel(
+            "Enter the credit as a positive figure — it is stored as a "
+            "negative and nets off the revenue it reverses.")
+        self._return_note.setObjectName("pageNote")
+        self._return_note.setWordWrap(True)
+        self._amount_label = QLabel()
 
         form.addRow("Type *:", self.kind)
         form.addRow("Entity:", self.entity)
         form.addRow("Date *:", self.date)
         form.addRow("Cost centre *:", self.cost_centre)
-        form.addRow("Amount (net) *:", self.amount)
+        form.addRow(self._amount_label, self.amount)
+        form.addRow("", self._return_note)
         form.addRow("Tax (optional):", self.tax)
-        self._exp_label = QLabel("Type of expense:")
-        form.addRow(self._exp_label, self.exp_type)
+        form.addRow("Type of expense:", self.exp_type)
         form.addRow("Party name:", self.party)
         form.addRow("Client:", self.client)
         form.addRow("Manager:", self.manager)
@@ -131,10 +141,10 @@ class VoucherForm(_FormBase):
         self.status.setObjectName("pageNote")
         bar.addWidget(self.status)
         bar.addStretch(1)
-        btn = QPushButton("＋ Add voucher")
-        btn.setObjectName("primary")
-        btn.clicked.connect(self._save)
-        bar.addWidget(btn)
+        self.save_btn = QPushButton()
+        self.save_btn.setObjectName("primary")
+        self.save_btn.clicked.connect(self._save)
+        bar.addWidget(self.save_btn)
         form.addRow("", self._wrap(bar))
 
     @staticmethod
@@ -144,24 +154,31 @@ class VoucherForm(_FormBase):
         return w
 
     def _toggle_kind(self) -> None:
-        is_exp = self.kind.currentData() == config.VCH_EXPENSE
-        self.exp_type.setVisible(is_exp)
-        self._exp_label.setVisible(is_exp)
+        """Re-dress the form for the voucher type on show: the expense
+        classification only applies to expenses, and a credit note reads
+        as a credit throughout (label, hint, button)."""
+        vt = self.kind.currentData()
+        self._form.setRowVisible(self.exp_type, vt.is_expense)
+        self._form.setRowVisible(self._return_note, vt.is_return)
+        self._amount_label.setText(
+            "Credit amount *:" if vt.is_return else "Amount (net) *:")
+        self.save_btn.setText(f"＋ Add {vt.noun}")
 
     def _save(self) -> None:
+        vt = self.kind.currentData()
         if self.cost_centre.currentData() is None:
             QMessageBox.warning(self, "Cost centre required",
                                 "Pick the cost centre this voucher belongs to.")
             return
         if self.amount.value() <= 0:
+            what = "credit" if vt.is_return else "net"
             QMessageBox.warning(self, "Amount required",
-                                "Enter a net amount greater than zero.")
+                                f"Enter a {what} amount greater than zero.")
             return
-        kind = self.kind.currentData()
         ME.add_voucher(
             entity_id=self.entity.currentData(),
             txn_date=self.date.date().toPython(),
-            kind=kind,
+            vtype=vt,
             cost_centre_id=self.cost_centre.currentData(),
             amount=self.amount.value(),
             tax_amount=self.tax.value(),
@@ -171,9 +188,14 @@ class VoucherForm(_FormBase):
             manager_id=self.manager.currentData(),
             service_id=self.service.currentData(),
             expense_type=(self.exp_type.currentData()
-                          if kind == config.VCH_EXPENSE else None),
+                          if vt.is_expense else None),
             description=self.desc.text().strip())
-        self.status.setText("✓ Voucher added.")
+        # Confirm with the figure as STORED, so a credit note visibly
+        # went in as a negative.
+        stored = vt.sign * (self.amount.value() + self.tax.value())
+        self.status.setText(
+            f"✓ {vt.noun.capitalize()} added — "
+            f"{'−' if stored < 0 else ''}₹{fmt_inr(abs(stored), 2)}.")
         self.amount.setValue(0)
         self.tax.setValue(0)
         self.party.clear()
@@ -314,9 +336,10 @@ class ManualEntryPage(QWidget):
         heading.setObjectName("pageHeading")
         layout.addWidget(heading)
         note = QLabel(
-            "Add a single voucher, salary or reimbursement row by hand — for "
-            "the one-off entry where uploading a file is overkill. Entries go "
-            "straight into the MIS. Fields marked * are required.")
+            "Add a single voucher (sales, credit note or expense), salary or "
+            "reimbursement row by hand — for the one-off entry where "
+            "uploading a file is overkill. Entries go straight into the MIS. "
+            "Fields marked * are required.")
         note.setObjectName("pageNote")
         note.setWordWrap(True)
         layout.addWidget(note)

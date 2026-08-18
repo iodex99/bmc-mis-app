@@ -1739,15 +1739,16 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     One row per client (canonical name from the master, or ``(unmapped)``
     when the voucher's party didn't resolve). Columns: Client | Grand
     Total | one per PREVIOUS month | one per selected period. EVERY month
-    cell is a live SUMIFS by Client + Period label over a revenue
-    register (v0.3.117; they were baked values) — the "Revenue" sheet,
-    which since v0.3.118 carries the prior-FY months too, or
-    "Revenue (Cmp)" for an operator-chosen comparison window (v0.3.120)
-    — so a sales row edited or added post-generation flows straight
-    through. Clients billed only in the previous window still get a row
-    (0 current), so the history never undercounts. The Grand Total sums
-    ONLY the selected period's columns. Credit / Debit Notes flow through
-    with signs intact. Sorted by Grand Total descending.
+    cell is a live SUMIFS by Client + Period label over the "Revenue"
+    sheet (v0.3.117; they were baked values), which since v0.3.118
+    carries the prior-FY months too — so a sales row edited or added
+    post-generation flows straight through. Clients billed only in the
+    previous window still get a row (0 current), so the history never
+    undercounts. The Grand Total sums EVERY month column that follows it
+    (v0.3.122, operator ask) — the previous months and the selected ones
+    alike — so column B is what the client has been billed across the
+    whole sheet. Credit / Debit Notes flow through with signs intact.
+    Sorted by Grand Total descending.
     """
     if not data.options.periods:
         return
@@ -1775,26 +1776,30 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
             names[key] = party or "(unmapped)"
         return key
 
+    all_months = fy_months + periods
     for f in data.revenue_facts:
         key = client_key(f)
-        bucket = agg.setdefault(key, {p: 0.0 for p in periods})
+        bucket = agg.setdefault(key, {p: 0.0 for p in all_months})
         bucket[f["period"]] = bucket.get(f["period"], 0.0) + float(f["amount"])
     # Clients billed only in the FY-prior window get a zero current row —
     # their cumulative figure must still show.
     if has_fy:
         for f in fy_data.revenue_facts:
             key = client_key(f)
-            agg.setdefault(key, {p: 0.0 for p in periods})
+            bucket = agg.setdefault(key, {p: 0.0 for p in all_months})
+            if f["period"] in fy_months:
+                bucket[f["period"]] = (bucket.get(f["period"], 0.0)
+                                       + float(f["amount"]))
 
     if not agg:
         return
 
-    # Build sortable list: (name, total, [per-period amounts])
+    # Build the sort key: the SAME span the Grand Total formula covers,
+    # so the sheet reads top-down by that column.
     rows = []
-    for key, per_period in agg.items():
-        amounts = [round(per_period.get(p, 0.0), 2) for p in periods]
-        total = round(sum(amounts), 2)
-        rows.append((names[key], total, amounts))
+    for key, per_month in agg.items():
+        total = round(sum(per_month.get(p, 0.0) for p in all_months), 2)
+        rows.append((names[key], total))
     rows.sort(key=lambda r: -r[1])
 
     # Layout: A Client, B Grand Total, then one column per FY month
@@ -1812,8 +1817,8 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
     _cell(ws, 1, 1, "Client-wise Billing", font=_TITLE)
     _cell(ws, 2, 1, "Period(s): " + periods_label(periods)
           + (f".  Columns {fy_label} show the earlier months of this "
-             "financial year, month by month; the Grand Total sums only "
-             "the selected period's columns." if has_fy else ""),
+             "financial year, month by month; the Grand Total sums every "
+             "month column on this sheet." if has_fy else ""),
           font=_SUB)
     hrow = 4
     headers = (["Client", "Grand Total"]
@@ -1823,25 +1828,23 @@ def _sheet_client_billing(wb: Workbook, data: MISData, lbl: dict,
 
     body_start = hrow + 1
     r = body_start
-    first_period_col = get_column_letter(p0)
-    last_period_col = get_column_letter(p0 + len(periods) - 1)
+    first_month_col = get_column_letter(fy0)
+    last_month_col = get_column_letter(p0 + len(periods) - 1)
     rev = _q("Revenue")
-    for name, _total, _amounts in rows:
+    for name, _total in rows:
         _cell(ws, r, 1, name, border=True)
-        # Grand Total is a SUM formula across the CURRENT period columns —
-        # not a baked-in value — so the operator can edit a cell and
-        # the total updates live. (The prior-FY month columns are context
-        # and are NOT part of the Grand Total.)
+        # Grand Total is a SUM formula across EVERY month column that
+        # follows — prior-FY months included — not a baked-in value, so
+        # the operator can edit a month cell and the total updates live.
         _cell(ws, r, 2,
-              f"=SUM({first_period_col}{r}:{last_period_col}{r})",
+              f"=SUM({first_month_col}{r}:{last_month_col}{r})",
               font=_BOLD, fill=_TOTAL_FILL, fmt=INR, border=True)
         # One live SUMIFS per month — the previous months then the
         # selected ones — over the revenue register's Client (G) +
         # Period (J) columns. The FY window shares the "Revenue" sheet
         # with the selected period (v0.3.118) and a month belongs to
         # exactly one of them, so the Period label alone picks the right
-        # rows and no Scope criterion is needed; a comparison window
-        # reads its own "Revenue (Cmp)" sheet (v0.3.120).
+        # rows and no Scope criterion is needed.
         for i, p in enumerate(fy_months):
             _cell(ws, r, fy0 + i,
                   f'=SUMIFS({prior_rev}!$H:$H,{prior_rev}!$G:$G,$A{r},'

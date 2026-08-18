@@ -1,8 +1,8 @@
 # Automated MIS Generator — Bilimoria Mehta & Co.
 
-> Living document. Updated as we discuss. Last updated: 2026-08-12
+> Living document. Updated as we discuss. Last updated: 2026-08-18
 >
-> Current version: **v0.3.121** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.122** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,67 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.122 — Credit notes by hand; Client Billing totals the whole row
+
+Two operator asks.
+
+**1. Manual Entry can book a credit note.** The Voucher tab offered only
+"Sales" and "Expense", and its amount box refuses negatives — so a credit
+note (a sales return) could only get in via a Tally pull or an uploaded
+register. The Type dropdown now has a third entry, **Credit Note (sales
+return)**, and the form re-dresses itself for it: the amount reads
+"Credit amount", a hint says the figure is entered positive and stored
+negative, and the button becomes "＋ Add credit note".
+
+* New ``manual_entry.VoucherType`` — ``(key, label, noun, kind, sign,
+  vch_type)`` — is the vocabulary behind the dropdown, so the direction
+  is a property of the TYPE, not something the form has to remember:
+  ``add_voucher`` takes the type and applies ``sign * abs(amount)`` to
+  both the amount and its tax. A 10,000 + 1,800 credit note stores
+  ``net −10,000``, ``tax −1,800``, ``gross −11,800`` and one split of
+  −10,000, exactly the shape ``parsers._vch_side_and_sign`` and
+  ``tally_xml`` already give an IMPORTED credit note. Because the sign
+  lives in the amount, every SUMIFS in the workbook nets it off with no
+  special case, and the row needs no Review step.
+* ``vouchers.vch_type`` is written as ``"Credit Note"`` (Tally's own
+  wording) rather than ``"Manual"``, so hand-entered and pulled credit
+  notes read alike in the Review export.
+* ``kind`` stays ``sales`` — a return reduces revenue, it is not an
+  expense — so a credit note shares the Jul-26 "(manual entry)" sales
+  batch with the invoice it reverses. Auto-generated voucher numbers
+  therefore had to get stricter: ``MAN-<timestamp>`` alone could collide
+  now that a sale and a credit note booked in the same second share
+  ``kind``, so a taken number gets a counter suffix and the importer's
+  ``(entity, kind, vch_no)`` natural key stays unique.
+* A Debit Note still needs no entry of its own: this firm books one as a
+  supplementary sales invoice, which is "Sales" here.
+
+**2. Client Billing's Grand Total sums every column that follows it.**
+Column B covered only the selected period's months and treated the
+prior-FY months as context. It now spans C through the last month
+column, so it reads as what the client has been billed across the whole
+sheet — and a client billed only in an earlier month, which used to show
+a Grand Total of 0, now shows its actual figure and sorts by it. Still a
+live ``=SUM(C5:F5)``, not a baked value, so an edited or appended
+Revenue row flows through to the total. The row sort follows the same
+span. (The HTML dashboard's Client Billing table shows only the selected
+months, so its Grand Total already summed the columns beside it —
+unchanged.)
+
+Verified with a 123-check suite across five files: the service layer
+(31), the generated workbook recalculated in real LibreOffice Calc (29),
+the layout edge cases — a two-month selection, an April selection whose
+prior window is the whole previous financial year at 13 month columns,
+a row appended in Excel after generation, an empty database (21), an
+offscreen UI smoke of the voucher form (32), and an app-wide regression
+that imports every module, builds every page, and renders the workbook
+and HTML dashboard (10). Grand Total equals the sum of its month cells
+on every row and window; Client Billing's TOTAL ties to the whole
+Revenue register (₹11,98,000); a hand-entered −40,000 credit note nets
+Dorado Inc's July from 1,00,000 to 60,000 on the Revenue sheet, the
+Client Billing cell, the Cost Centre P&L and the HTML dashboard alike;
+and the recalculated workbook carries no Excel error values.
 
 ### v0.3.121 — "Compare with" is gone; every comparison is derived
 
