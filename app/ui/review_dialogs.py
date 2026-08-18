@@ -335,10 +335,15 @@ class SplitEditorDialog(QDialog):
         self._svc = repo.fk_options("services")
 
         layout = QVBoxLayout(self)
+        # Invoice no only when the register carried one (manual entries
+        # and reference-less registers have none) — it is the number the
+        # operator reconciles against, so it belongs beside the voucher no.
+        inv = (voucher.get("invoice_no") or "").strip()
         layout.addWidget(QLabel(
             f"<b>{voucher.get('party_name', '')}</b>  ·  "
             f"{voucher.get('vch_no', '')}  ·  "
-            f"net amount <b>{fmt_inr(self.net, 2)}</b>"))
+            + (f"invoice {inv}  ·  " if inv else "")
+            + f"net amount <b>{fmt_inr(self.net, 2)}</b>"))
 
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)

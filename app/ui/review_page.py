@@ -870,7 +870,7 @@ class VoucherTab(QWidget):
         self.status_combo.currentIndexChanged.connect(self._refilter)
         self.search = QLineEdit()
         self.search.setPlaceholderText(
-            "Search by party / client / voucher no…")
+            "Search by party / client / voucher or invoice no…")
         self._sched_filter, self._search_timer = debounced(
             self._refilter, ms=200)
         self.search.textChanged.connect(self._sched_filter)
@@ -989,7 +989,8 @@ class VoucherTab(QWidget):
             rows = [v for v in rows
                     if q in (v.get("party_name") or "").lower()
                     or q in (v.get("client_name") or "").lower()
-                    or q in (v.get("vch_no") or "").lower()]
+                    or q in (v.get("vch_no") or "").lower()
+                    or q in (v.get("invoice_no") or "").lower()]
         amount_ok = _amount_query_predicate(self.amount_search.text())
         if amount_ok is not None:
             rows = [v for v in rows
@@ -1030,7 +1031,14 @@ class VoucherTab(QWidget):
         for v in shown:
             rows_body.append([
                 v["txn_date"] or "",
-                v["vch_no"], v["party_name"],
+                v["vch_no"],
+                # The bill reference Tally carries on the voucher's
+                # "New Ref" / "Agst Ref" line — the number the client
+                # sees on the invoice, which is what the operator
+                # reconciles against. Blank for manual entries and for
+                # registers that carry no reference.
+                v.get("invoice_no") or "—",
+                v["party_name"],
                 # Client mirrors the party for EVERY register (sales,
                 # purchase, …): the master canonical name once resolved,
                 # the raw party text until then. Unresolved parties still
@@ -1051,7 +1059,7 @@ class VoucherTab(QWidget):
 
         fill_table_with_actions(
             self.table,
-            ["Date", "Vch No.", "Party", "Client", "Kind",
+            ["Date", "Vch No.", "Invoice No", "Party", "Client", "Kind",
              "Net amount", "Splits"],
             rows_body,
             action_label=labels,
@@ -1060,7 +1068,7 @@ class VoucherTab(QWidget):
             secondary_callback=self._delete_row,
             secondary_object_name="rowActionDanger",
             status_for_row=status_for,
-            stretch_col=2,
+            stretch_col=3,          # Party — one right of where it was
         )
 
     def _update_totals(self) -> None:

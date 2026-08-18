@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-08-18
 >
-> Current version: **v0.3.123** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.124** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,48 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.124 — Invoice No on Review & Map ▸ Vouchers
+
+Operator ask. The Vouchers tab listed the Tally **voucher** number but not
+the **invoice** number — the reference the client actually sees, which is
+what the operator reconciles against. It is now a column of its own,
+sitting right after Vch No.:
+
+`Status | Date | Vch No. | Invoice No | Party | Client | Kind | Net amount | Splits`
+
+* No new query or schema. ``vouchers.invoice_no`` has been populated since
+  v0.3.37 (the Excel register's "New Ref" / "Agst Ref" line) and v0.3.113
+  (the same references off the Tally HTTP pull), and ``list_vouchers``
+  already does ``SELECT v.*`` — the column was simply never rendered.
+* Blank references (manual entries, registers carrying none) show "—".
+* **The search box now matches the invoice number too**, so the operator
+  can paste a reference straight off a client query and land on the row.
+  Party / client / voucher-no search is unchanged.
+* The stretched column follows Party to its new index, so the table still
+  gives its width to the longest text column.
+* The split editor's header names the invoice beside the voucher number
+  when there is one, and omits it entirely when there isn't.
+
+Verified with a 40-check offscreen UI suite: the header row and the new
+column's position; a populated reference and the "—" fallback; exactly one
+stretched column and it is still Party; search by full and partial
+reference, with party search unaffected; the Edit **and** Delete row
+actions still resolving to the voucher the operator clicked (they index
+the filtered list, which the extra column shifts nothing in); the split
+editor header both ways; the kind / amount / status filters untouched; and
+an app-wide pass — every module imports, every page builds, the workbook
+and HTML dashboard render, and an empty database still opens the tab on
+its empty state.
+
+**Found while testing, NOT fixed here (needs an operator decision).** The
+generated MIS's **Revenue** sheet heads column B "Invoice No" but fills it
+with the *voucher* number; the real invoice reference never reaches that
+sheet at all. The Expenses sheet does it properly, with `B Voucher No` and
+`C Invoice No` as separate columns (v0.3.113). Fixing Revenue means either
+relabelling column B to "Voucher No" and appending a real Invoice No after
+Scope (no formula touched), or inserting it at C to match Expenses (shifts
+D..K and needs ~15 SUMIFS sites updated). Left as-is pending that call.
 
 ### v0.3.123 — Salary and Reimbursements are one sheet each ((FY) editions merged in)
 
