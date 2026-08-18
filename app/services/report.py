@@ -153,12 +153,12 @@ def generate(data: MISData, path: str | Path,
         windows = build_windows(data.options)
     fy_prior, ytd, last_year = (windows.fy_prior, windows.ytd,
                                 windows.last_year)
-    # The FY-prior window's revenue / expense rows are merged INTO the
-    # "Revenue" / "Expenses" sheets under Scope = "FY Prior" (v0.3.118);
-    # salary / reimbursements / provisions keep their " (FY)" sheets. The
-    # two year-on-year windows get a full sheet set each — they OVERLAP
-    # the other two (the year to date contains the selected months), so
-    # merging them would double-count.
+    # The FY-prior window's rows are merged INTO the "Revenue" /
+    # "Expenses" (v0.3.118) and "Salary" / "Reimbursements" (v0.3.123)
+    # sheets under Scope = "FY Prior"; only Provisions keeps a " (FY)"
+    # sheet. The two year-on-year windows get a full sheet set each —
+    # they OVERLAP the other two (the year to date contains the selected
+    # months), so merging them would double-count.
     fy_data = fy_prior.data
 
     _sheet_cover(wb, data, windows)
@@ -170,22 +170,29 @@ def generate(data: MISData, path: str | Path,
     _sheet_entity(wb, data, lbl)
     _sheet_service(wb, data, lbl)
     _sheet_client_billing(wb, data, lbl, fy_prior)
-    _sheet_employee_register(wb, data, lbl)
+    _sheet_employee_register(
+        wb, data, lbl,
+        # The Salary sheet carries the FY-prior rows ahead of this
+        # window's (v0.3.123); the Register's one bounded row-range has
+        # to start past them.
+        fy_offset=len(fy_data.labour_facts) if fy_data is not None else 0)
     _sheet_client_register(wb, data, lbl, fy_prior)
     _sheet_comparatives(wb, data, lbl, windows, rows_pl)
-    # Revenue / Expenses carry BOTH windows (v0.3.118): the FY-prior rows
-    # first (they are the earlier months), then the selected period's,
-    # told apart by the Scope column.
+    # These four carry BOTH windows (v0.3.118 / v0.3.123): the FY-prior
+    # rows first (they are the earlier months), then the selected
+    # period's, told apart by the Scope column.
     _sheet_revenue(wb, data, lbl, fy_data=fy_data)
     _sheet_expenses(wb, data, lbl, fy_data=fy_data)
-    _sheet_salary(wb, data, lbl)
-    _sheet_reimbursements(wb, data, lbl)
+    _sheet_salary(wb, data, lbl, fy_data=fy_data)
+    _sheet_reimbursements(wb, data, lbl, fy_data=fy_data)
     _sheet_provisions(wb, data, lbl)
     if fy_data is not None:
-        # Revenue / Expenses for this window are already on the main
-        # sheets (Scope = "FY Prior"); these three keep their own.
-        _sheet_salary(wb, fy_data, lbl, FYS)
-        _sheet_reimbursements(wb, fy_data, lbl, FYS)
+        # Revenue / Expenses / Salary / Reimbursements for this window are
+        # already on the main sheets (Scope = "FY Prior"); Provisions is
+        # the one that still needs its own — it is a balance outstanding
+        # at the end of a window, not a register of rows, so the two
+        # windows cannot be stacked without reading as a total that was
+        # never owed.
         _sheet_provisions(wb, fy_data, lbl, FYS)
     # Year-on-year: the financial year to date, and the same span a year
     # earlier — one full sheet set each, driving the "(Cmp)" P&L and the
@@ -218,14 +225,26 @@ LY = " (LY)"      # the same year-to-date span one financial year earlier
 # sheet's month columns can be live SUMIFS instead of baked values.
 BUDGET_DATA_SHEET = "Budget Sales (Monthly)"
 
-# --- merged Revenue / Expenses data sheets (v0.3.118) ------------------------
+# --- merged data sheets (v0.3.118, extended v0.3.123) ------------------------
 #
 # "Revenue (FY)" / "Expenses (FY)" used to be separate sheets holding the
 # FY-prior window (the months of the financial year before the selected
 # period — see :func:`_fy_prior_periods`). They are now written into the
 # SAME "Revenue" / "Expenses" sheets, so the operator reads one continuous
 # transaction register per kind instead of hopping between two. A trailing
-# **Scope** column says which window each row belongs to.
+# **Scope** column says which window each row belongs to. v0.3.123 gives
+# "Salary (FY)" and "Reimbursements (FY)" the same treatment, on the same
+# operator ask, leaving "Provisions (FY)" as the only " (FY)" sheet left:
+# a provision sheet is a BALANCE outstanding at the end of its window, not
+# a register of rows, so stacking two windows in one sheet would read as a
+# total that was never owed (see :func:`_sheet_provisions`).
+#
+# On Salary the FY-prior block is written FIRST and keeps PLAIN VALUES,
+# while the selected window's Overhead rows stay live formulas chaining to
+# the Employee Register (which only covers the selected months). The
+# Register's one bounded row-range is shifted past the FY block by
+# ``fy_offset`` so it still frames exactly the current window's salary
+# rows — see :func:`_sheet_salary` and :func:`_sheet_employee_register`.
 #
 # Two invariants make this safe:
 #
@@ -250,19 +269,24 @@ BUDGET_DATA_SHEET = "Budget Sales (Monthly)"
 SCOPE_HEADER = "Scope"
 SCOPE_CURRENT = "Current"
 SCOPE_FY = "FY Prior"
-SCOPE_COL_REV = "K"   # Revenue  sheet: A..J data + K Scope
-SCOPE_COL_EXP = "M"   # Expenses sheet: A..L data + M Scope
+SCOPE_COL_REV = "K"   # Revenue        sheet: A..J data + K Scope
+SCOPE_COL_EXP = "M"   # Expenses       sheet: A..L data + M Scope
+SCOPE_COL_LAB = "O"   # Salary         sheet: A..N data + O Scope
+SCOPE_COL_RMB = "K"   # Reimbursements sheet: A..J data + K Scope
 
-# Suffixes whose window has its own Revenue / Expenses sheet rather than
-# sharing the main one under a Scope value.
+# Suffixes whose window has its own data sheets rather than sharing the
+# main ones under a Scope value.
 _OWN_SHEET_SUFFIXES = (YTD, LY)
 
 
 def _data_sheet_q(base: str, sfx: str = "") -> str:
-    """Quoted name of the Revenue / Expenses data sheet to read for *sfx*.
+    """Quoted name of the merged data sheet to read for *sfx*.
 
     ``FYS`` shares the main sheet (the FY-prior window is a Scope column,
     not a sheet of its own); the year-on-year windows have their own.
+    Covers Revenue / Expenses (v0.3.118) and Salary / Reimbursements
+    (v0.3.123). Provisions keep a sheet per window — see
+    :func:`_sheet_provisions`.
     """
     return _q(base + (sfx if sfx in _OWN_SHEET_SUFFIXES else ""))
 
@@ -818,11 +842,14 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
     lab = _q("Salary")
     reimb = _q("Reimbursements")
     prov = _q("Provisions")
-    # Revenue / Expenses also carry the FY-prior rows (v0.3.118) — this
-    # sheet reports the SELECTED period, so every SUMIFS over them adds
-    # the current-window criterion.
+    # Revenue / Expenses (v0.3.118) and Salary / Reimbursements (v0.3.123)
+    # also carry the FY-prior rows — this sheet reports the SELECTED
+    # period, so every SUMIFS over them adds the current-window criterion.
+    # Provisions is a per-window sheet and needs none.
     rev_s = _scope_crit(rev, SCOPE_COL_REV)
     exp_s = _scope_crit(exp, SCOPE_COL_EXP)
+    lab_s = _scope_crit(lab, SCOPE_COL_LAB)
+    rmb_s = _scope_crit(reimb, SCOPE_COL_RMB)
     first = hrow + 1
     n_partners = len(partners)
     # Row order: partners, then Office, then (optional) Unassigned.
@@ -850,11 +877,11 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # Billable column (K). Salary Amount=I, Charged To=C, Type=J.
         _cell(ws, r, 6,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
-              f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")',
+              f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes"{lab_s})',
               fmt=INR, border=True)
         _cell(ws, r, 7,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
-              f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")',
+              f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No"{lab_s})',
               fmt=INR, border=True)
         # Professional Fees: Expenses with Type = Professional Fees
         # (Expenses Amount=J, CostCentre=E, Type of Expense=H).
@@ -865,7 +892,8 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # Reimbursement Expenses: reimbursement-sheet outlays (Amount=I)
         # by the BOOKED Employee CC column (E, v0.3.109) — the cost
         # follows the employee's own cost centre, not the client's.
-        _cell(ws, r, 9, f"=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,$A{r})",
+        _cell(ws, r, 9,
+              f"=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,$A{r}{rmb_s})",
               fmt=INR, border=True)
         # Provisions: outstanding provision remaining (Remaining=G, CC=C).
         _cell(ws, r, 10, f"=SUMIFS({prov}!$G:$G,{prov}!$C:$C,$A{r})",
@@ -881,7 +909,7 @@ def _sheet_cost_centre(wb: Workbook, data: MISData, lbl: dict) -> dict:
         # Office Overhead (allocated): Overhead-type rows of the Salary sheet.
         _cell(ws, r, 14,
               f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{r},'
-              f'{lab}!$J:$J,"Overhead")',
+              f'{lab}!$J:$J,"Overhead"{lab_s})',
               fmt=INR, border=True)
         # Indirect Expenses: Expenses with Type = Indirect Expense.
         _cell(ws, r, 15,
@@ -1143,15 +1171,18 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
               fill=_SUBHEAD_FILL, align=_CENTER, border=True)
 
     # ---- P&L lines ----
-    # Revenue / Expenses hold both period windows on one sheet (v0.3.118),
-    # so the selected-period cells carry a Scope criterion; Salary /
-    # Reimbursements / Provisions still have per-window sheets.
+    # Revenue / Expenses (v0.3.118) and Salary / Reimbursements (v0.3.123)
+    # hold both period windows on one sheet, so the selected-period cells
+    # carry a Scope criterion; only Provisions still has a sheet per
+    # window.
     rev, exp = _data_sheet_q("Revenue"), _data_sheet_q("Expenses")
-    lab = _q("Salary")
-    reimb = _q("Reimbursements")
+    lab = _data_sheet_q("Salary")
+    reimb = _data_sheet_q("Reimbursements")
     prov = _q("Provisions")
     rev_s = _scope_crit(rev, SCOPE_COL_REV)
     exp_s = _scope_crit(exp, SCOPE_COL_EXP)
+    lab_s = _scope_crit(lab, SCOPE_COL_LAB)
+    rmb_s = _scope_crit(reimb, SCOPE_COL_RMB)
 
     # Returns the SUMIFS formula for a (partner, manager) cell on a given
     # data sheet's amount column.
@@ -1196,7 +1227,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
         if mgr_filter is not None:
             extra += f',{lab}!$L:$L,"{mgr_filter}"'
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Salary"{extra})')
+                f'{lab}!$J:$J,"Salary"{extra}{lab_s})')
 
     # Row layout. Each entry: (label, kind)
     # kinds:
@@ -1283,7 +1314,8 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                     # number directly into the cell. A collapsed
                     # partner-total column carries it the same way.
                     formula = (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,'
-                               f'"{cc_code}",{lab}!$J:$J,"Overhead")')
+                               f'"{cc_code}",{lab}!$J:$J,'
+                               f'"Overhead"{lab_s})')
                 elif is_total_col and kind == "net":
                     gross_r = rows_by_kind["gross"]
                     overhead_r = rows_by_kind["overhead"]
@@ -1368,7 +1400,7 @@ def _sheet_partner_manager(wb: Workbook, data: MISData, lbl: dict,
                     # with the Cost Centre P&L's Reimbursement Expenses.
                     if offset == 0:
                         formula = (f'=SUMIFS({reimb}!$I:$I,'
-                                   f'{reimb}!$E:$E,"{cc_code}")')
+                                   f'{reimb}!$E:$E,"{cc_code}"{rmb_s})')
                     else:
                         formula = 0
                 elif kind == "provisions":
@@ -1490,16 +1522,20 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
     ``""`` (the selected period), :data:`FYS`, :data:`YTD` or :data:`LY`.
     Returns ``None`` for row-arithmetic kinds (sums / %s).
 
-    Revenue / Expenses are ONE sheet for the first two since v0.3.118:
-    those windows live together and are told apart by the Scope
-    criterion. The year-on-year windows name their own sheets. Salary /
-    Reimbursements / Provisions have a sheet per window throughout.
+    Revenue / Expenses (v0.3.118) and Salary / Reimbursements (v0.3.123)
+    are ONE sheet for the first two windows: those live together and are
+    told apart by the Scope criterion. The year-on-year windows name
+    their own sheets, where the criterion is empty. Provisions has a
+    sheet per window throughout.
     """
     rev, exp = _data_sheet_q("Revenue", sfx), _data_sheet_q("Expenses", sfx)
-    lab = _q("Salary" + sfx)
-    reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
+    lab = _data_sheet_q("Salary", sfx)
+    reimb = _data_sheet_q("Reimbursements", sfx)
+    prov = _q("Provisions" + sfx)
     rev_s = _scope_crit(rev, SCOPE_COL_REV, sfx)
     exp_s = _scope_crit(exp, SCOPE_COL_EXP, sfx)
+    lab_s = _scope_crit(lab, SCOPE_COL_LAB, sfx)
+    rmb_s = _scope_crit(reimb, SCOPE_COL_RMB, sfx)
     if kind == "sales":
         return (f'=SUMIFS({rev}!$H:$H,{rev}!$D:$D,"{cc_code}",'
                 f'{rev}!$I:$I,"Income"{rev_s})')
@@ -1511,10 +1547,10 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
         return "=" + f1 + "+" + f2
     if kind == "salary":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes")')
+                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"Yes"{lab_s})')
     if kind == "salary_nonbill":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No")')
+                f'{lab}!$J:$J,"Salary",{lab}!$K:$K,"No"{lab_s})')
     if kind == "expense":
         return (f'=SUMIFS({exp}!$J:$J,{exp}!$E:$E,"{cc_code}",'
                 f'{exp}!$H:$H,"{EXPENSE_TYPE_PROFESSIONAL}"{exp_s})')
@@ -1524,12 +1560,12 @@ def _pm_leaf_formula(kind: str, cc_code: str, sfx: str) -> str | None:
     if kind == "reimb_exp":
         # Booked by the Employee CC column (E, v0.3.109) — the same
         # criterion on every window's edition of the sheet.
-        return f'=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,"{cc_code}")'
+        return f'=SUMIFS({reimb}!$I:$I,{reimb}!$E:$E,"{cc_code}"{rmb_s})'
     if kind == "provisions":
         return f'=SUMIFS({prov}!$G:$G,{prov}!$C:$C,"{cc_code}")'
     if kind == "overhead":
         return (f'=SUMIFS({lab}!$I:$I,{lab}!$C:$C,"{cc_code}",'
-                f'{lab}!$J:$J,"Overhead")')
+                f'{lab}!$J:$J,"Overhead"{lab_s})')
     return None
 
 
@@ -2158,11 +2194,20 @@ def _fmt_date(raw):
 
 
 def _sheet_reimbursements(wb, data: MISData, lbl: dict,
-                            suffix: str = "") -> None:
+                            suffix: str = "",
+                            fy_data: MISData | None = None,
+                            scope: str = SCOPE_CURRENT) -> None:
     """Per-row reimbursement detail. One row per uploaded entry.
 
     Columns: Period | Date | Client CC | Employee | Employee CC | Manager |
-             Client | Client Reimbursable | Amount | Pool Source
+             Client | Client Reimbursable | Amount | Pool Source | Scope
+
+    With *fy_data*, that window's rows are written FIRST (they are the
+    earlier months) as "FY Prior", then the selected period's — one
+    continuous register instead of the old separate "Reimbursements (FY)"
+    sheet (v0.3.123). ``Scope`` (K) tells them apart; every partner-level
+    SUMIFS over this sheet carries the matching criterion via
+    :func:`_scope_crit`.
 
     ``Employee CC`` (E) is the BOOKED cost centre — the employee's own
     home cost centre from the master (v0.3.109), falling back to the
@@ -2187,25 +2232,44 @@ def _sheet_reimbursements(wb, data: MISData, lbl: dict,
         if raw:
             return f"{raw}  ← unmapped, link in Review tab"
         return "(no client)"
-    rows = [[
-        month_label(f["period"]), _fmt_date(f.get("txn_date")),
-        lbl["cc"].get(f.get("client_cost_centre_id"), "—"),
-        f["employee_name"],
-        lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
-        lbl["mgr"].get(f.get("employee_manager_id"), "(unassigned)"),
-        _client_label(f),
-        "Yes" if f["client_reimbursable"] else "No",
-        round(f["amount"], 2),
-        "Yes" if f.get("is_pool_source") else "",
-    ] for f in data.reimbursement_facts]
+    def _row(f, scope_value):
+        return [
+            month_label(f["period"]), _fmt_date(f.get("txn_date")),
+            lbl["cc"].get(f.get("client_cost_centre_id"), "—"),
+            f["employee_name"],
+            lbl["cc"].get(f["cost_centre_id"], "Unassigned"),
+            lbl["mgr"].get(f.get("employee_manager_id"), "(unassigned)"),
+            _client_label(f),
+            "Yes" if f["client_reimbursable"] else "No",
+            round(f["amount"], 2),
+            "Yes" if f.get("is_pool_source") else "",
+            scope_value,
+        ]
+    rows = [_row(f, SCOPE_FY) for f in (fy_data.reimbursement_facts
+                                        if fy_data is not None else [])]
+    rows += [_row(f, scope) for f in data.reimbursement_facts]
     _write_data_sheet(
         wb, "Reimbursements" + suffix,
         ["Period", "Date", "Client CC", "Employee", "Employee CC", "Manager",
-         "Client", "Client Reimbursable", "Amount", "Pool Source"],
-        [10, 12, 12, 26, 12, 16, 28, 16, 14, 12], rows)
+         "Client", "Client Reimbursable", "Amount", "Pool Source",
+         SCOPE_HEADER],
+        [10, 12, 12, 26, 12, 16, 28, 16, 14, 12, 11], rows)
 
 
-def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
+def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "",
+                  fy_data: MISData | None = None,
+                  scope: str = SCOPE_CURRENT) -> None:
+    """Per-row labour detail: salary slices plus the office-overhead rows.
+
+    With *fy_data*, that window's rows are written FIRST (they are the
+    earlier months) as "FY Prior", then the selected period's — one
+    continuous register instead of the old separate "Salary (FY)" sheet
+    (v0.3.123). ``Scope`` (O) tells them apart; every partner-level
+    SUMIFS over this sheet carries the matching criterion via
+    :func:`_scope_crit`. Appending Scope at the END keeps every existing
+    column letter (Amount=I, Type=J, Billable=K, Manager=L, Pool
+    Source=M) exactly where the formulas already expect it.
+    """
     def _client_label(f):
         # Distinct labels for residual vs unresolved-timesheet vs resolved.
         if f.get("is_overhead_offset"):
@@ -2224,7 +2288,8 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     # Column layout (v0.3.68 — three CC columns for clarity):
     #   A Period         B Date           C Charged To      D Employee
     #   E Client         F Client CC      G Home CC         H Hours
-    #   I Amount         J Type
+    #   I Amount         J Type           K Billable        L Manager
+    #   M Pool Source    N Location       O Scope
     #
     # "Charged To" (was "CostCentre" pre-v0.3.68) = where the cost
     # actually lands. SUMIFS in Cost Centre P&L / Partner-Manager P&L
@@ -2240,55 +2305,10 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
     # worked on a client belonging to another partner.
     # Type — "Salary" or "Overhead"; SUMIFS uses this (now at J) to
     # split Salary Cost from Allocated Overhead.
-    #
-    # Overhead amounts are LIVE formulas chaining to the Employee
-    # Register sheet (per-employee share = office indirect pool ÷
-    # active count), so tweaking an office expense row recomputes the
-    # whole overhead cascade. The comparison-period sheet keeps plain
-    # values — its Employee Register isn't part of the workbook.
     def _cc_label(cc_id):
         if cc_id is None:
             return ""
         return lbl["cc"].get(cc_id, "")
-    er = _q("Employee Register")
-    live = (suffix == "")
-
-    # Row span of each offset row's own heads block. The heads of one
-    # period are written contiguously with their offset row right after
-    # (order guaranteed by _build_labour_facts), so the offset can back
-    # out exactly what those rows charge: -SUM(heads). With the Employee
-    # Register's Consider dropdowns (v0.3.106) a what-if flip changes the
-    # per-head share (col J) on every head row AND the offset together,
-    # keeping the firm total balanced — the old −(share × recipients)
-    # form drifted when recipients moved but the written head rows
-    # didn't.
-    offset_span: dict[int, tuple[int, int]] = {}
-    _block_start = None
-    for _i, _f in enumerate(data.labour_facts):
-        if _f.get("is_overhead") and not _f.get("is_overhead_offset"):
-            if _block_start is None:
-                _block_start = _i
-        else:
-            if _f.get("is_overhead_offset") and _block_start is not None:
-                offset_span[_i + _DATA_FIRST_ROW] = (
-                    _block_start + _DATA_FIRST_ROW,
-                    _i - 1 + _DATA_FIRST_ROW)
-            _block_start = None
-
-    def _amount(f, r):
-        # Overhead amounts chain LIVE to the Employee Register: per-employee
-        # share = pool ÷ recipients (col K); the offset backs out the sum
-        # of its own heads block. Office indirect stays a SUMIFS so editing
-        # an office expense still recomputes the cascade.
-        if live and f.get("is_overhead_offset"):
-            span = offset_span.get(r)
-            if span:
-                return f"=-SUM($I${span[0]}:$I${span[1]})"
-            return (f"=-SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
-                    f"*SUMIFS({er}!$I:$I,{er}!$A:$A,$A{r})")
-        if live and f.get("is_overhead"):
-            return f"=SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
-        return round(f["amount"], 2)
 
     def _billable(f):
         # Blank for overhead rows; Yes/No for salary so the Partner-Manager
@@ -2297,34 +2317,92 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "") -> None:
             return ""
         return "Yes" if f.get("billable") else "No"
 
-    # "Pool Source" (M, v0.3.98) — "Yes" on the salary rows of office-home
-    # staff (within the selected locations) whose pay feeds the overhead
-    # pool. The Employee Register's Office Staff Salary column SUMIFS this
-    # column, so the whole overhead cascade stays formula-driven.
-    rows = [[month_label(f["period"]), _fmt_date(f.get("txn_date")),
-             _cc_label(f["cost_centre_id"]) or "Unassigned",
-             f["employee_name"], _client_label(f),
-             _cc_label(f.get("client_cost_centre_id")),
-             _cc_label(f.get("home_cost_centre_id")),
-             round(f["hours"], 2), _amount(f, i + _DATA_FIRST_ROW),
-             "Overhead" if f.get("is_overhead") else "Salary",
-             _billable(f),
-             lbl["mgr"].get(f.get("manager_id"), "(unassigned)"),
-             "Yes" if (f.get("is_pool_source")
-                       and not f.get("is_overhead")) else "",
-             f.get("location") or "—"]
-            for i, f in enumerate(data.labour_facts)]
+    er = _q("Employee Register")
+
+    def _block(facts, first_row, live, scope_value):
+        """The rows for one period window, starting at sheet *first_row*.
+
+        Overhead amounts are LIVE formulas chaining to the Employee
+        Register (per-employee share = office indirect pool ÷ active
+        count), so tweaking an office expense row recomputes the whole
+        overhead cascade — but ONLY for the window the Register covers.
+        The FY-prior block and the year-on-year sheets keep plain values,
+        exactly as their own separate sheets did, because the Register
+        holds no rows for those months to chain to.
+
+        Row span of each offset row's own heads block: the heads of one
+        period are written contiguously with their offset row right after
+        (order guaranteed by ``_build_labour_facts``), so the offset can
+        back out exactly what those rows charge: -SUM(heads). With the
+        Employee Register's Consider dropdowns (v0.3.106) a what-if flip
+        changes the per-head share (col K) on every head row AND the
+        offset together, keeping the firm total balanced — the old
+        −(share × recipients) form drifted when recipients moved but the
+        written head rows didn't.
+        """
+        offset_span: dict[int, tuple[int, int]] = {}
+        heads_start = None
+        for i, f in enumerate(facts):
+            if f.get("is_overhead") and not f.get("is_overhead_offset"):
+                if heads_start is None:
+                    heads_start = i
+            else:
+                if f.get("is_overhead_offset") and heads_start is not None:
+                    offset_span[i + first_row] = (heads_start + first_row,
+                                                  i - 1 + first_row)
+                heads_start = None
+
+        def _amount(f, r):
+            # Office indirect stays a SUMIFS so editing an office expense
+            # still recomputes the cascade.
+            if live and f.get("is_overhead_offset"):
+                span = offset_span.get(r)
+                if span:
+                    return f"=-SUM($I${span[0]}:$I${span[1]})"
+                return (f"=-SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
+                        f"*SUMIFS({er}!$I:$I,{er}!$A:$A,$A{r})")
+            if live and f.get("is_overhead"):
+                return f"=SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
+            return round(f["amount"], 2)
+
+        # "Pool Source" (M, v0.3.98) — "Yes" on the salary rows of
+        # office-home staff (within the selected locations) whose pay
+        # feeds the overhead pool. The Employee Register's Office Staff
+        # Salary column SUMIFS this column, so the whole overhead cascade
+        # stays formula-driven.
+        return [[month_label(f["period"]), _fmt_date(f.get("txn_date")),
+                 _cc_label(f["cost_centre_id"]) or "Unassigned",
+                 f["employee_name"], _client_label(f),
+                 _cc_label(f.get("client_cost_centre_id")),
+                 _cc_label(f.get("home_cost_centre_id")),
+                 round(f["hours"], 2), _amount(f, i + first_row),
+                 "Overhead" if f.get("is_overhead") else "Salary",
+                 _billable(f),
+                 lbl["mgr"].get(f.get("manager_id"), "(unassigned)"),
+                 "Yes" if (f.get("is_pool_source")
+                           and not f.get("is_overhead")) else "",
+                 f.get("location") or "—",
+                 scope_value]
+                for i, f in enumerate(facts)]
+
+    fy_facts = fy_data.labour_facts if fy_data is not None else []
+    rows = _block(fy_facts, _DATA_FIRST_ROW, False, SCOPE_FY)
+    rows += _block(data.labour_facts, _DATA_FIRST_ROW + len(fy_facts),
+                   suffix == "", scope)
     _write_data_sheet(wb, "Salary" + suffix,
                       ["Period", "Date", "Charged To", "Employee", "Client",
                        "Client CC", "Home CC", "Hours", "Amount", "Type",
-                       "Billable", "Manager", "Pool Source", "Location"],
+                       "Billable", "Manager", "Pool Source", "Location",
+                       SCOPE_HEADER],
                       [10, 12, 12, 26, 28, 12, 12, 12, 14, 12, 10, 16, 12,
-                       14], rows)
+                       14, 11], rows)
+
 
 
 # --- Employee Register --------------------------------------------------------
 
-def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
+def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict,
+                             fy_offset: int = 0) -> None:
     """Active headcount per period + joiners/exits, and the office-overhead
     computation the Salary sheet's Overhead rows chain to.
 
@@ -2364,8 +2442,15 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
     # this window keeps it clear of the Overhead rows — whose live
     # formulas chain back to THIS sheet's column J (a full-column
     # reference would make Excel flag a circular dependency).
+    #
+    # Since v0.3.123 the FY-prior window shares that sheet, written ahead
+    # of the selected period's rows, so the window starts *fy_offset* rows
+    # further down. Those earlier rows are plain values and could not go
+    # circular, but they are not this Register's months either — it covers
+    # the selected period alone.
     n_sal = sum(1 for f in data.labour_facts if not f.get("is_overhead"))
-    sal_last_row = _DATA_FIRST_ROW + n_sal - 1
+    sal_first_row = _DATA_FIRST_ROW + fy_offset
+    sal_last_row = sal_first_row + n_sal - 1
 
     _cell(ws, 1, 1, "Employee Register", font=_TITLE)
     _cell(ws, 2, 1,
@@ -2468,8 +2553,8 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         # salary row typed below the Overhead block with Pool Source =
         # Yes won't join the pool) — unavoidable without the circularity;
         # every other figure in the workbook picks appended rows up.
-        if sal_last_row >= _DATA_FIRST_ROW:
-            sal_rng = lambda col: (f"{lab}!${col}${_DATA_FIRST_ROW}:"
+        if sal_last_row >= sal_first_row:
+            sal_rng = lambda col: (f"{lab}!${col}${sal_first_row}:"
                                    f"${col}${sal_last_row}")
             _cell(ws, row, 7,
                   f'=SUMIFS({sal_rng("I")},{sal_rng("A")},$A{row},'
@@ -2480,7 +2565,9 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict) -> None:
         # Office staff reimbursement (v0.3.109) — live SUMIFS over the
         # Reimbursements sheet's Pool Source rows (office-home staff
         # within the selected locations). Static values there, so the
-        # full-column reference can't go circular.
+        # full-column reference can't go circular. Period ($A) pins it to
+        # the selected month, and the FY-prior rows merged into that sheet
+        # in v0.3.123 are all OTHER months, so no Scope criterion either.
         _cell(ws, row, 8,
               f'=SUMIFS({rmb}!$I:$I,{rmb}!$A:$A,$A{row},'
               f'{rmb}!$J:$J,"Yes")',
@@ -2741,8 +2828,9 @@ def _sheet_comparatives(wb: Workbook, data: MISData, lbl: dict,
         # as the Cost Centre P&L's Net Profit column, expressed against
         # one window's sheets so both sides here are like for like.
         exp = _data_sheet_q("Expenses", sfx)
-        lab = _q("Salary" + sfx)
-        reimb, prov = _q("Reimbursements" + sfx), _q("Provisions" + sfx)
+        lab = _data_sheet_q("Salary", sfx)
+        reimb = _data_sheet_q("Reimbursements", sfx)
+        prov = _q("Provisions" + sfx)
         return (f"={revenue_cell}"
                 f"-SUMIFS({exp}!$J:$J,{exp}!$E:$E,$A{row})"
                 f"-SUMIFS({lab}!$I:$I,{lab}!$C:$C,$A{row})"

@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-08-18
 >
-> Current version: **v0.3.122** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.123** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,60 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.123 — Salary and Reimbursements are one sheet each ((FY) editions merged in)
+
+Operator ask, the same one that produced v0.3.118 for Revenue / Expenses:
+**"Salary (FY)"** and **"Reimbursements (FY)"** are gone. Their rows now
+sit on the main **Salary** and **Reimbursements** sheets, the FY-prior
+months first and the selected period's after them, told apart by a
+trailing **Scope** column — one continuous register per kind instead of
+hopping between two sheets.
+
+* Scope lands at **O** on Salary (A..N data) and **K** on Reimbursements
+  (A..J data). Appending it at the END means every column letter the
+  formulas already name — Amount=I, Type=J, Billable=K, Manager=L, Pool
+  Source=M on Salary; Amount=I, Employee CC=E on Reimbursements — stays
+  exactly where it was.
+* Every partner-level SUMIFS over the two sheets now carries the matching
+  Scope criterion, built by the existing ``_scope_crit`` helper: the Cost
+  Centre P&L, the Partner-Manager P&L (both its selected-period and
+  FY-so-far columns) and ``_pm_leaf_formula``. Without it the
+  selected-period figures would have quietly absorbed the earlier months.
+  The current-window criterion stays ``<>FY Prior``, so a row the
+  operator types in below the data — with an empty Scope cell — still
+  counts towards the reported period, preserving the v0.3.117 guarantee.
+* **Overhead rows keep their live formulas only where they can chain.**
+  The selected window's Overhead amounts are SUMIFS against the Employee
+  Register, which covers the reported months alone; the FY-prior block is
+  written with plain values, exactly what its own sheet held. The offset
+  row's ``=-SUM(...)`` span is computed per block, so it still backs out
+  precisely its own heads.
+* The Employee Register's one **bounded** row-range — the Office-Staff-
+  Salary SUMIFS, bounded to dodge a circular reference — now starts past
+  the FY-prior block via a new ``fy_offset``, so it still frames exactly
+  the current window's salary rows.
+* **"Provisions (FY)" stays.** A provisions sheet is a *balance
+  outstanding* at the end of its window, not a register of rows; stacking
+  two windows in one sheet would read as a total that was never owed.
+* The year-on-year " (YTD)" / " (LY)" sets are untouched — they OVERLAP
+  the reported period, so merging them would double-count.
+
+Verified with a 71-check suite in three files. The decisive one generates
+the SAME workbook twice from one database — once with this code, once
+with the pre-merge code checked out in a git worktree — recalculates both
+in real LibreOffice Calc, and compares every cell of all twelve reported
+sheets (Cover, Dashboard, Budget vs Monthly Sales, Cost Centre P&L, both
+Partner-Manager P&Ls, Entity P&L, Service MIS, Client Billing, Employee
+Register, Client Register, Comparatives). Every figure is identical: the
+merge changed the layout, not one number. Repeated for a two-month
+selection and for an April selection whose prior window is the whole
+previous financial year. Plus: the merged rows total per Scope exactly
+what each old sheet held; a row appended in Excel with a blank Scope
+counts towards the period while one hand-tagged "FY Prior" stays out; the
+Register's bounded range provably starts past the FY block; and the app
+still imports, builds every page, renders the HTML dashboard, and builds
+from an empty database.
 
 ### v0.3.122 — Credit notes by hand; Client Billing totals the whole row
 
