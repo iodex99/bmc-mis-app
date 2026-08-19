@@ -2,7 +2,7 @@
 
 > Living document. Updated as we discuss. Last updated: 2026-08-18
 >
-> Current version: **v0.3.124** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
+> Current version: **v0.3.125** ([release history on GitHub](https://github.com/iodex99/bmc-mis-app/releases))
 
 ---
 
@@ -336,6 +336,69 @@ operator's PC via the in-app updater. Highlights of every release in order:
 - Inference runs at end of import commit, in `apply_known_client_aliases`,
   in `link_client` / `create_client` / `bulk_create_clients`, and after
   `map_cc_string`.
+
+### v0.3.125 — "Don't consider" now actually zeroes that employee's overhead
+
+Operator report: the Salary sheet was charging office overhead to people
+the Employee Register showed as **"Don't consider"**, and the
+Partner-Manager P&L's overhead row came out wrong because of it.
+
+**What was happening.** The Consider dropdown gates the *recipients
+count* — a live COUNTIFS over that column — but the Salary sheet's
+Overhead **rows** are fixed when the workbook is written, one per head
+the calc engine picked. Every row read the same per-head figure
+(``SUMIFS('Employee Register'!$K:$K, …)``), so switching a row to "Don't
+consider" shrank the denominator while leaving the row in place: the pool
+got spread across a stale row set. Reproduced exactly — a 4-recipient,
+₹1,70,000-pool month, one employee flipped out:
+
+| | as generated | after the flip |
+|---|---|---|
+| Recipients | 4 | 3 (correct) |
+| Per head | 42,500 | 56,666.67 (correct) |
+| That employee's row | 42,500 | **56,666.67 — still charged** |
+| Charged to partners | 1,70,000 = pool | **2,26,666.68 vs a 1,70,000 pool** |
+| P&L Office Overhead | 1,70,000 | **2,26,666.68** |
+
+Worth stressing what was NOT wrong: the location picker itself. Verified
+against a two-location seed that a Mumbai-only run marks the Bangalore and
+untagged staff "Don't consider" and gives them no overhead row at all, and
+that the P&L ties to the calc engine exactly. The defect only bit when a
+Consider cell was changed in the workbook afterwards.
+
+**The fix.** Each Overhead row's amount is now gated on its OWN Consider
+cell, matched on Period (A) + Employee (D) — the same keys the roster
+shows, so partner heads gate on their own row too:
+
+```
+=IF(COUNTIFS(ER!$A:$A,$A9,ER!$B:$B,$D9,ER!$G:$G,"Consider")=0,0,
+    SUMIFS(ER!$K:$K,ER!$A:$A,$A9))
+```
+
+A de-considered row now reads 0 and the remaining rows absorb the whole
+pool, so the Overhead rows always add back up to it. The Office offset is
+``-SUM(its own heads block)`` and follows automatically.
+
+**A limit, stated on the sheet itself.** Switching someone *IN* cannot
+conjure a Salary row for them, so the pool comes out under-allocated —
+tick them on the Generate page and re-generate instead. Standby rows for
+every possible head would fix that, but only by putting a block on the
+Partner-Manager P&L for every partner whether active or not, which is a
+layout change nobody asked for; the sheet's note now says plainly which
+direction works live.
+
+Verified with a 49-check suite. The decisive part generates the same
+workbook twice from one database — with this code and with the pre-fix
+code from a git worktree — recalculates both in real LibreOffice Calc and
+compares every cell of nine reported sheets, for a location-filtered run
+AND an unfiltered one: every generated figure is identical, so the gate
+changes what happens on a flip and nothing else. Plus: the flipped-out row
+reads zero and the pool stays whole; the P&L overhead row follows the
+Salary sheet in all three states; the FY-prior block stays plain values;
+Salary overhead ties to the calc engine per cost centre in both runs; and
+the app still imports, builds every page, renders the dashboard, keeps
+v0.3.124's Invoice No column and v0.3.123's merged sheets, and builds from
+an empty database.
 
 ### v0.3.124 — Invoice No on Review & Map ▸ Vouchers
 

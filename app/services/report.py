@@ -2362,7 +2362,19 @@ def _sheet_salary(wb, data: MISData, lbl: dict, suffix: str = "",
                 return (f"=-SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
                         f"*SUMIFS({er}!$I:$I,{er}!$A:$A,$A{r})")
             if live and f.get("is_overhead"):
-                return f"=SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r})"
+                # Each head's share is gated on ITS OWN Consider cell in
+                # the Employee Register roster (v0.3.125). The recipients
+                # count behind the per-head figure is already a live
+                # COUNTIFS over that column, so without this gate flipping
+                # a row to "Don't consider" shrank the denominator while
+                # leaving the row in place: the pool got spread over a
+                # stale row set and every partner's overhead came out
+                # overstated. Matched on Period (A) + Employee (D), the
+                # same keys the roster shows, so partner heads — which
+                # carry the partner's name — gate on their own row too.
+                return (f'=IF(COUNTIFS({er}!$A:$A,$A{r},{er}!$B:$B,$D{r},'
+                        f'{er}!$G:$G,"Consider")=0,0,'
+                        f'SUMIFS({er}!$K:$K,{er}!$A:$A,$A{r}))')
             return round(f["amount"], 2)
 
         # "Pool Source" (M, v0.3.98) — "Yes" on the salary rows of
@@ -2466,8 +2478,13 @@ def _sheet_employee_register(wb: Workbook, data: MISData, lbl: dict,
           "indirect expenses + office-home staff salaries + office-home "
           "staff reimbursements; it is spread over the considered "
           "partner-team employees AND partners (Recipients) and charged "
-          "to their cost centres. The Salary sheet's Overhead rows read "
-          "the per-employee figure (column K).",
+          "to their cost centres. Each Overhead row on the Salary sheet "
+          "reads the per-employee figure (column K) only while ITS OWN "
+          "row here says \"Consider\", and zero otherwise — so switching "
+          "someone to \"Don't consider\" re-spreads the same pool over "
+          "the remaining recipients. Switching someone IN cannot conjure "
+          "a Salary row for them: to add a location or a person to the "
+          "allocation, tick them on the Generate page and re-generate.",
           font=_SUB)
 
     # ---- Pre-compute the roster rows so the summary COUNTIFS know
